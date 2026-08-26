@@ -13,13 +13,41 @@ on:
         description: Extra seconds to keep the job alive (0 = none)
         default: "0"
         required: false
+      fanout:
+        description: How many parallel jobs to run (exercises autoscaling)
+        default: "1"
+        required: false
 
 permissions:
   contents: read
 
 jobs:
+  # One matrix leg per requested parallel job: each needs its own ephemeral VM, so a fanout above
+  # the host's capacity is exactly the autoscaling/queueing case worth testing.
+  plan:
+    name: Plan fanout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
+    steps:
+      - id: legs
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          n = max(1, min(10, int(os.environ["FANOUT"])))
+          print("legs=" + json.dumps(list(range(1, n + 1))))
+          PY
+        env:
+          FANOUT: ${{ inputs.fanout }}
+
   guest:
-    name: Guest facts (${{ inputs.profile }})
+    name: Guest facts ${{ matrix.leg }} (${{ inputs.profile }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
     runs-on: ${{ inputs.profile }}
     timeout-minutes: 30
     steps:
