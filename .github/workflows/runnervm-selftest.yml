@@ -1,0 +1,62 @@
+name: runnervm-selftest
+# Runs on a RunnerVM-hosted ephemeral Linux VM: the `runs-on` label is the Runner Scale Set that
+# runnerd registers for the `ubuntu-24` profile (scale set name = runnervm-<profile>). Manual only —
+# on push it would sit queued whenever the Mac mini is offline.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: RunnerVM profile (selects runs-on runnervm-<profile>)
+        default: ubuntu-24
+        required: true
+      sleep_seconds:
+        description: Extra seconds to keep the job alive (0 = none)
+        default: "0"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  guest:
+    name: Guest facts (${{ inputs.profile }})
+    runs-on: runnervm-${{ inputs.profile }}
+    timeout-minutes: 30
+    steps:
+      - name: Host and OS
+        run: |
+          set -euxo pipefail
+          uname -a
+          cat /etc/os-release
+          nproc
+          free -m
+          df -h /
+          id
+          echo "RUNNER_NAME=$RUNNER_NAME RUNNER_OS=$RUNNER_OS RUNNER_ARCH=$RUNNER_ARCH"
+      - name: Guest agent is running
+        run: systemctl is-active runnervm-guest-agent
+      - name: Docker works
+        run: |
+          set -euxo pipefail
+          docker info --format '{{.ServerVersion}} {{.Architecture}}'
+          docker run --rm alpine:3 uname -m
+      - name: Checkout works
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go guest agent builds inside the VM (proves toolchain + network)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: GuestAgent/go.mod
+          cache: false
+      - run: cd GuestAgent && go build ./cmd/guest-agent && go test ./internal/rpc/...
+      - name: Optional hold
+        if: ${{ inputs.sleep_seconds != '0' }}
+        run: sleep "${{ inputs.sleep_seconds }}"
+      - name: Summary
+        run: |
+          {
+            echo "## RunnerVM self-test"
+            echo "- runner: \`$RUNNER_NAME\` on \`$(uname -m)\` $(. /etc/os-release && echo "$PRETTY_NAME")"
+            echo "- kernel: \`$(uname -r)\`"
+            echo "- docker: \`$(docker info --format '{{.ServerVersion}}')\`"
+            echo "- runner user: \`$(id -un)\`, uptime: \`$(uptime -p)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
