@@ -3,7 +3,9 @@ import RunnerCore
 import Testing
 
 @Suite struct ByteSizeTests {
-  @Test(arguments: [
+  // The literal array is annotated and hoisted: Swift 6.1's type checker times out inferring a
+  // 14-element array of heterogeneous tuples inside the @Test macro expansion.
+  static let knownForms: [(input: String, expected: UInt64)] = [
     ("8GiB", UInt64(8) << 30),
     ("512MiB", UInt64(512) << 20),
     ("1.5GiB", UInt64(1536) << 20),
@@ -18,7 +20,9 @@ import Testing
     ("2KB", UInt64(2000)),
     (" 6GiB ", UInt64(6) << 30),
     ("8gib", UInt64(8) << 30),
-  ])
+  ]
+
+  @Test(arguments: knownForms)
   func parsesKnownForms(input: String, expected: UInt64) throws {
     #expect(try ByteSize(parsing: input).bytes == expected)
   }
