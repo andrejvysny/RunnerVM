@@ -35,6 +35,8 @@ expect_eq() {
 # --------------------------------------------------------------------------
 BASE_IMG="$WORK/base.img"
 head -c 4096 /dev/zero >"$BASE_IMG"
+# The builder refuses a base without a GPT; stamp the signature at sector 1.
+printf 'EFI PART' | dd of="$BASE_IMG" bs=1 seek=512 conv=notrunc 2>/dev/null
 BASE_SHA="$(shasum -a 256 "$BASE_IMG" | awk '{print $1}')"
 AGENT="$WORK/guest-agent"
 printf 'not a real agent' >"$AGENT"

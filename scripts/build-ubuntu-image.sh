@@ -178,6 +178,7 @@ resolve_base() {
         BASE_SOURCE="$BASE"
     fi
     [ -f "$BASE" ] || die "base image not found: $BASE"
+    require_partition_table "$BASE"
     if [ -n "$BASE_SHA256" ]; then
         verify_sha256 "$BASE" "$BASE_SHA256" "base image"
         return 0
@@ -189,6 +190,19 @@ resolve_base() {
     log "!!! the image this build produces is only as trustworthy as that file"
     BASE_SHA256="$(sha256_hex "$BASE")"
     log "recording observed base sha256 $BASE_SHA256"
+}
+
+# EFI can only boot a partitioned disk. Ubuntu's `*-cloudimg-arm64.tar.gz` unpacks to a bare ext4
+# root filesystem (no GPT, no ESP) and a qcow2 `.img` is not raw either; both make the guest stop
+# within a second of `running` with nothing on serial. Catch that here instead of after a download.
+require_partition_table() {
+    local base="$1" magic sector1
+    magic="$(head -c 3 "$base")"
+    [ "$magic" != "QFI" ] || die "base image $base is qcow2; convert it to raw first (docs/images.md)"
+    sector1="$(tail -c +513 "$base" | head -c 8)"
+    [ "$sector1" = "EFI PART" ] || die \
+        "base image $base has no GPT (sector 1 is not 'EFI PART'); it must be a raw whole-disk image
+with an EFI system partition -- the Ubuntu cloud .tar.gz is a bare rootfs and cannot boot"
 }
 
 # --------------------------------------------------------------------------

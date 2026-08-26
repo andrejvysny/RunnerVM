@@ -76,8 +76,13 @@ public final class VMRuntime {
     }
   }
 
+  /// Completion-handler form on purpose: the async overlay hands the non-`Sendable`
+  /// `VZVirtualMachine` to a nonisolated context, which Swift 6.1 rejects ("sending 'self.vm'
+  /// risks causing data races"). The handler runs on the VM's queue — the main queue.
   public func start() async throws {
-    try await vm.start()
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+      vm.start { result in continuation.resume(with: result) }
+    }
   }
 
   /// ACPI shutdown request. Returns false when the framework refuses to deliver it (guest not
@@ -91,7 +96,11 @@ public final class VMRuntime {
 
   public func forceStop() async throws {
     guard vm.state != .stopped else { return }
-    try await vm.stop()
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+      vm.stop { error in
+        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+      }
+    }
   }
 
   /// Opens one vsock connection to `port` in the guest and hands back an owned file descriptor.

@@ -46,9 +46,14 @@ The build refuses to start without `--base-sha256` unless you pass
 without launching anything, which is the cheapest way to see what a build would
 actually do.
 
-The base image must be a **raw** disk (GPT + EFI). Ubuntu ships `.img` files in
-qcow2; convert them first — this host has no `qemu-img`, so M0 used
-`lima-vm/go-qcow2reader`.
+The base image must be a **raw whole-disk** image (GPT + EFI system partition);
+the builder refuses anything else before downloading a byte. Ubuntu's
+`noble-server-cloudimg-arm64.img` is qcow2 — convert it to raw first (this host
+has no `qemu-img`; a 40-line Go program over `lima-vm/go-qcow2reader` does it).
+Do **not** use `noble-server-cloudimg-arm64.tar.gz`: it unpacks to a bare ext4
+root filesystem with no partition table, which EFI cannot boot (the guest stops
+within a second, serial stays empty). Verified 2026-08-26: the converted raw
+image (`sha256 63cb4783…`) boots and builds in ~3 min.
 
 ### Flags
 
