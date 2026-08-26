@@ -22,16 +22,19 @@ struct Status: AsyncParsableCommand {
     blocks.append(section("Host", hostFields(status)))
     blocks.append(section("Capacity", capacityFields(status.capacity)))
     blocks.append(section("GitHub", githubFields(status.github)))
-    blocks.append(
-      section(
-        "Images",
-        [
-          ("Cached", "\(status.images.cached)"),
-          ("Disk usage", Format.bytes(status.images.diskUsageBytes)),
-        ]))
+    blocks.append(section("Images", imageFields(status.images)))
     blocks.append("Profiles\n" + profileLines(status.profiles))
     blocks.append(section("Reconciliation", reconciliationFields(status.reconciliation)))
     return blocks.joined(separator: "\n\n")
+  }
+
+  private static func imageFields(_ images: ImageSummary) -> [(String, String)] {
+    var fields = [
+      ("Cached", "\(images.cached)"),
+      ("Disk usage", Format.bytes(images.diskUsageBytes)),
+    ]
+    if images.pulling > 0 { fields.append(("Pulling", "\(images.pulling)")) }
+    return fields
   }
 
   private static func section(_ title: String, _ fields: [(String, String)]) -> String {

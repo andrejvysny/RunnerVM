@@ -53,7 +53,11 @@ struct DiskLayerizerTests {
     // Zero runs were skipped, so the reassembled file commits blocks only where the islands are.
     let allocated = try Fixtures.allocatedBytes(at: destination)
     #expect(allocated < Self.virtualBytes / 2)
-    #expect(try allocated <= (Fixtures.allocatedBytes(at: source)) * 2)
+    // The sparse writer skips zeros at 4 MiB granularity (tart-proven trade-off), so each data
+    // island may commit up to one 4 MiB window; anything beyond that is a reassembly regression.
+    let holeGranularity: UInt64 = 4 << 20
+    let worstCase = UInt64(Self.islands.count) * holeGranularity + holeGranularity
+    #expect(allocated <= worstCase, "allocated=\(allocated) worstCase=\(worstCase) virtual=\(Self.virtualBytes)")
     #expect(allocated > 0)
   }
 

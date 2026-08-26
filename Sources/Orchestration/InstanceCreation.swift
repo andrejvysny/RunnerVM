@@ -27,7 +27,8 @@ extension InstanceManager {
     let profile = try profileRow.decodedConfig()
 
     let instanceId = InstanceID.generate()
-    let (digest, image) = try await images.reserve(reference: profile.image, for: instanceId)
+    let (digest, image) = try await images.reserve(
+      reference: profile.image, for: instanceId, profile: profile.name)
     let record: InstanceRecord
     do {
       record = try await plan(

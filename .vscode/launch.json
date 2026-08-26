@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Debug runnerd",
+            "target": "runnerd",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug runnerd"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Release runnerd",
+            "target": "runnerd",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release runnerd"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Debug runnerctl",
+            "target": "runnerctl",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug runnerctl"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Release runnerctl",
+            "target": "runnerctl",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release runnerctl"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Debug vmworker",
+            "target": "vmworker",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug vmworker"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:github-managed-runners}",
+            "name": "Release vmworker",
+            "target": "vmworker",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release vmworker"
+        }
+    ]
+}

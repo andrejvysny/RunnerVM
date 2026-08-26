@@ -100,7 +100,9 @@ enum Mapping {
       allocatedSizeBytes: managed.allocatedBytes,
       localPath: managed.record.localPath,
       pinCount: managed.pinCount,
-      createdAt: RFC3339.string(from: managed.record.createdAt.date))
+      createdAt: RFC3339.string(from: managed.record.createdAt.date),
+      canonicalReference: managed.record.canonicalReference,
+      pulledAt: managed.record.pulledAt.map { RFC3339.string(from: $0.date) })
   }
 
   static func instance(

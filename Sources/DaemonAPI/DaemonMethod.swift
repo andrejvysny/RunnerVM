@@ -25,8 +25,14 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   case imageList = "image.list"
   case imageGet = "image.get"
   case imageImport = "image.import"
+  case imagePull = "image.pull"
+  case imagePush = "image.push"
   case imageDelete = "image.delete"
   case imagePrune = "image.prune"
+
+  case registryLogin = "registry.login"
+  case registryLogout = "registry.logout"
+  case registryStatus = "registry.status"
 
   case instanceList = "instance.list"
   case instanceGet = "instance.get"
@@ -59,7 +65,8 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   public var methodClass: MethodClass {
     switch self {
     case .systemReconcile, .systemDrain, .systemResume, .systemOffline, .systemShutdown,
-         .configApply, .imageDelete, .imagePrune,
+         .configApply, .imageDelete, .imagePrune, .imagePull, .imagePush,
+         .registryLogin, .registryLogout,
          .instanceStop, .instanceDelete, .instanceTaint, .authLogin, .authLogout,
          .debugDemandSet:
       return .idempotentMutation
@@ -81,7 +88,8 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .systemDrain, .systemResume, .systemOffline, .systemShutdown, .metricsSnapshot,
     .configGet, .configValidate, .configApply,
     .profileList, .profileGet, .scopeList, .scopeGet,
-    .imageList, .imageGet, .imageImport, .imageDelete, .imagePrune,
+    .imageList, .imageGet, .imageImport, .imagePull, .imagePush, .imageDelete, .imagePrune,
+    .registryLogin, .registryLogout, .registryStatus,
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,
     .instanceTaint,
     .instanceExec, .instanceMetrics, .instanceSSHInfo,

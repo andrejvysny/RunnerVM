@@ -4,6 +4,7 @@ import GuestControl
 import ImageStore
 import Logging
 import Metrics
+import OCIRegistry
 import Persistence
 import RunnerCore
 import Testing
@@ -25,6 +26,9 @@ struct M2Harness {
   let instanceRows: any InstanceRepository
   let imageRows: any ImageRepository
   let github: FakeGitHubServer
+  let registry: FakeRegistry
+  let registryKeychain: InMemoryRegistryKeychain
+  let registryCredentials: RegistryCredentials
   let scaleSetPlane: FakeScaleSetControlPlane
   let keychain: InMemoryKeychain
   let gateway: GitHubGateway
@@ -37,11 +41,13 @@ struct M2Harness {
 
   static let linuxImageName = "test-linux"
   static let macImageName = "test-mac"
+  static let imageClock = Date(timeIntervalSince1970: 1_756_000_000)
 
   init(
     configuration: RunnerConfiguration = M2Harness.configuration(),
     githubToken: String? = M2Harness.token,
     onDiskDatabase: Bool = false,
+    registry: FakeRegistry = FakeRegistry(),
     now: @escaping @Sendable () -> Date = { Date() }
   ) async throws {
     tree = try TempTree()
@@ -70,8 +76,25 @@ struct M2Harness {
     supervisor = WorkerSupervisor(
       paths: paths, launcher: launcher, store: launcher, instances: instanceRows, tuning: tuning)
 
+    self.registry = registry
+    registryKeychain = InMemoryRegistryKeychain()
+    // Hermetic: no process environment, no `~/.docker/config.json`, only the injected keychain.
+    registryCredentials = RegistryCredentials(
+      keychain: registryKeychain,
+      environment: EnvironmentRegistryCredentials(environment: [:]),
+      dockerConfig: DockerConfigCredentials(
+        configURL: tree.root.appending(path: "no-docker-config.json")))
     images = ImageManager(
-      store: imageStore, images: imageRows, instances: instanceRows, architecture: "arm64")
+      store: imageStore, images: imageRows, instances: instanceRows,
+      operations: GRDBOperationRepository(db: database), architecture: "arm64", paths: paths,
+      registries: FakeRegistryClientFactory(
+        registry: registry, credentials: registryCredentials.chain()),
+      metrics: metrics,
+      // Frozen: `ImageMetadata.createdAt` is encoded into the image's content digest at second
+      // resolution, so a live clock makes "importing the same bytes twice is a no-op" depend on
+      // which side of a second boundary the two calls land.
+      now: { M2Harness.imageClock })
+    await images.updateConfiguration(configuration)
     var instanceTuning = InstanceManager.Tuning()
     instanceTuning.workerExitPollInterval = .milliseconds(5)
     instanceTuning.workerExitPollAttempts = 200
@@ -127,6 +150,7 @@ struct M2Harness {
     scaleSetPlane.close()
     await runners.detachObservers()
     github.shutdown()
+    registry.shutdown()
     await supervisor.detachAll()
     // detachAll only drops the daemon-side connections (mirroring production, where a detached
     // session leaves the real worker running) -- it does not stop the FakeWorker actors' RPC
@@ -146,7 +170,8 @@ struct M2Harness {
     lifecycle: InstanceLifecycle = .ephemeral, allowPublicRepositories: Bool = false,
     warmPool: WarmPoolPolicy = .disabled, concurrentVMStarts: Int = 2,
     reuse: ReusePolicy? = nil, cleanup: DurationValue = .minutes(5),
-    linuxImage: String = M2Harness.linuxImageName
+    linuxImage: String = M2Harness.linuxImageName, concurrentImagePulls: Int = 2,
+    reserveDiskBytes: UInt64 = 0
   ) -> RunnerConfiguration {
     var timeouts = TimeoutPolicy.default
     timeouts.agentReady = agentReady
@@ -155,8 +180,9 @@ struct M2Harness {
     timeouts.cleanup = cleanup
     return RunnerConfiguration(
       host: HostConfig(
-        reserve: HostConfig.Reserve(cpu: 0, memoryBytes: 0, diskBytes: 0),
-        limits: HostConfig.Limits(concurrentVMStarts: concurrentVMStarts)),
+        reserve: HostConfig.Reserve(cpu: 0, memoryBytes: 0, diskBytes: reserveDiskBytes),
+        limits: HostConfig.Limits(
+          concurrentImagePulls: concurrentImagePulls, concurrentVMStarts: concurrentVMStarts)),
       github: GitHubConfig(
         auth: GitHubAuthConfig(provider: .pat, source: .file),
         scopes: [
@@ -235,7 +261,8 @@ struct M2Harness {
       reconciler: Reconciler(logger: Logger(label: "test")),
       parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
       startedAt: Date(), actorName: "test", gateway: gateway, scopeHealth: scopeHealth,
-      runners: runners, metrics: metrics, logger: Logger(label: "test"))
+      runners: runners, metrics: metrics, registryCredentials: registryCredentials,
+      logger: Logger(label: "test"))
   }
 
   func record(_ id: InstanceID) async throws -> InstanceRecord {
@@ -273,12 +300,13 @@ func withHarness(
   configuration: RunnerConfiguration = M2Harness.configuration(),
   githubToken: String? = M2Harness.token,
   onDiskDatabase: Bool = false,
+  registry: FakeRegistry = FakeRegistry(),
   now: @escaping @Sendable () -> Date = { Date() },
   _ body: (M2Harness) async throws -> Void
 ) async throws {
   let harness = try await M2Harness(
     configuration: configuration, githubToken: githubToken, onDiskDatabase: onDiskDatabase,
-    now: now)
+    registry: registry, now: now)
   do {
     try await body(harness)
   } catch {

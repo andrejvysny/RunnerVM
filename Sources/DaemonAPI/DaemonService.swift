@@ -30,8 +30,18 @@ public protocol DaemonService: Sendable {
   func imageList() async throws -> ImageListResponse
   func imageGet(_ request: ImageGetRequest) async throws -> ImageInfoDTO
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO
+  /// Resolves the tag, starts (or joins) the transfer and returns: the pull itself outlives the
+  /// call and is followed through `operation.get` (spec §21, §137).
+  func imagePull(_ request: ImagePullRequest) async throws -> ImagePullResponse
+  func imagePush(_ request: ImagePushRequest) async throws -> ImagePushResponse
   func imageDelete(_ request: ImageDeleteRequest) async throws -> ImageDeleteResponse
   func imagePrune(_ request: ImagePruneRequest) async throws -> ImagePruneResponse
+
+  /// Stores a registry credential in the daemon's Keychain (spec §79).
+  func registryLogin(_ request: RegistryLoginRequest) async throws -> RegistryLoginResponse
+  func registryLogout(_ request: RegistryLogoutRequest) async throws -> RegistryLogoutResponse
+  /// Offline: which provider would answer for every registry the profiles name.
+  func registryStatus() async throws -> RegistryStatusResponse
 
   func instanceList() async throws -> InstanceListResponse
   func instanceGet(_ request: InstanceGetRequest) async throws -> InstanceInfoDTO

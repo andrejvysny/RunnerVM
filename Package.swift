@@ -49,7 +49,7 @@ let package = Package(
     .target(name: "DaemonAPI", dependencies: ["RunnerCore", "RPC", "GuestControl"]),
     .target(name: "Orchestration", dependencies: [
       "RunnerCore", "RunnerLogging", "RPC", "DaemonAPI", "Persistence", "Scheduler",
-      "WorkerProtocol", "GuestControl", "ImageStore", "GitHubControl", "Metrics",
+      "WorkerProtocol", "GuestControl", "ImageStore", "OCIRegistry", "GitHubControl", "Metrics",
     ]),
     .executableTarget(name: "runnerd", dependencies: [
       "Orchestration", "DaemonAPI", "ConfigLoader", "RunnerLogging",
@@ -77,8 +77,8 @@ let package = Package(
     .testTarget(name: "WorkerProtocolTests", dependencies: ["WorkerProtocol"]),
     .testTarget(name: "GuestControlTests", dependencies: ["GuestControl", "RPC", "RunnerCore"]),
     .testTarget(name: "OrchestrationTests", dependencies: [
-      "Orchestration", "ConfigLoader", "DaemonAPI", "Persistence", "ImageStore", "Scheduler",
-      "WorkerProtocol", "GuestControl", "GitHubControl", "RPC", "RunnerCore",
+      "Orchestration", "ConfigLoader", "DaemonAPI", "Persistence", "ImageStore", "OCIRegistry",
+      "Scheduler", "WorkerProtocol", "GuestControl", "GitHubControl", "RPC", "RunnerCore",
     ]),
     .testTarget(name: "VirtualizationCoreTests", dependencies: ["VirtualizationCore"]),
   ],

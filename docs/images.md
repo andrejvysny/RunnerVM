@@ -140,6 +140,61 @@ admission. A *larger* value works, but nothing grows the filesystem
 automatically any more (cloud-init is disabled): the host must call
 `agent.resizeDisk` after boot.
 
+## Publishing and pulling from a registry (M9)
+
+A sealed image can live in any OCI registry (spec §21, §54–§58). References must
+name their registry — RunnerVM never falls back to an implicit Docker Hub.
+
+```bash
+# credentials: the daemon owns the Keychain item, because runnerd does the pull
+echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u "$GITHUB_USER" --password-stdin
+runnerctl registry status          # offline: which provider answers for which registry
+
+runnerctl image push ubuntu-24 ghcr.io/acme/runners/ubuntu-24:stable
+runnerctl image pull ghcr.io/acme/runners/ubuntu-24:stable
+```
+
+Credentials resolve per registry host, first match wins:
+`RUNNERVM_REGISTRY_USERNAME` / `RUNNERVM_REGISTRY_PASSWORD` (optionally pinned
+with `RUNNERVM_REGISTRY_HOSTNAME`), then `~/.docker/config.json` including
+`credHelpers` / `credsStore`, then the Keychain. `registry login --local` writes
+the *invoking user's* Keychain instead of the daemon's, which only helps when
+runnerd runs as that same user.
+
+A profile may point straight at a registry:
+
+```yaml
+profiles:
+  - name: linux
+    image: ghcr.io/acme/runners/ubuntu-24:stable
+```
+
+The tag is resolved to an immutable digest before any VM starts and the digest
+— never the tag — is what lands on the instance record (spec §21), so an
+incident stays reproducible after `:stable` moves. Consequences worth knowing:
+
+* **The first `vm create` after the tag moves is as slow as the image is large.**
+  Resolution and the pull happen inside `instance.create`. Pre-pull with
+  `runnerctl image pull <ref>` to keep that cost off the first job.
+* A tag → digest resolution is cached for five minutes per reference, so
+  steady-state creates do not touch the registry at all.
+* Concurrent pulls that resolve to the same manifest digest share **one**
+  transfer and one `pull-image` operation (spec §137); `host.limits.concurrentImagePulls`
+  bounds how many distinct transfers run at once.
+* A pull refuses to start unless free space minus `host.reserve.disk` covers the
+  compressed transfer size.
+* An interrupted pull keeps its staging directory
+  (`images/.tmp/pull-sha256-<hex>/`) and the next attempt resumes into it,
+  re-fetching only the chunks that never verified (spec §119). The maintenance
+  sweep skips a staging directory whose `pull-image` operation is still
+  `running`, so a resumable pull is never swept out from under itself.
+* `runnerctl image pull|push` wait for the operation by default and print a
+  progress line on a terminal; `--no-wait` returns the operation id instead.
+
+`images.canonical_reference` holds the immutable reference the image was
+resolved from; `image list`'s `NAME` column keeps showing the local label from
+the image manifest, which a later pull cannot move.
+
 ## Known limitations
 
 * **`runnerctl image import` ignores `<out>/metadata.json`.** The daemon builds

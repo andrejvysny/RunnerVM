@@ -35,6 +35,9 @@ public actor DaemonRuntime {
     /// Test seam: `nil` talks to api.github.com through the shared `URLSession` and the login
     /// keychain.
     public var github: GitHubGateway.Options?
+    /// Test seam: `nil` builds real `URLSession`-backed registry clients using the standard
+    /// credential chain (env → docker config → Keychain).
+    public var registries: (any RegistryClientFactory)?
     /// Which demand provider drives the orchestrator. `nil` (the default) reads
     /// `RunnerConfiguration.github.demand`; a non-nil value overrides the configuration, for
     /// tests and CLI flags. Changing this on a running daemon has no effect until it restarts —
@@ -58,6 +61,7 @@ public actor DaemonRuntime {
       launcher: (any WorkerLauncher)? = nil,
       actorName: String = "runnerd",
       github: GitHubGateway.Options? = nil,
+      registries: (any RegistryClientFactory)? = nil,
       demandMode: DemandMode? = nil,
       shutdownDelay: Duration = .milliseconds(200),
       exitOnShutdown: Bool = true
@@ -72,6 +76,7 @@ public actor DaemonRuntime {
       self.launcher = launcher
       self.actorName = actorName
       self.github = github
+      self.registries = registries
       self.demandMode = demandMode
       self.shutdownDelay = shutdownDelay
       self.exitOnShutdown = exitOnShutdown
@@ -276,9 +281,14 @@ public actor DaemonRuntime {
       paths: options.paths, launcher: options.launcher ?? ProcessWorkerLauncher(executable: executable),
       store: instanceStore, instances: instanceRows)
     self.supervisor = supervisor
+    let registryCredentials = RegistryCredentials()
     let images = ImageManager(
       store: imageStore, images: imageRows, instances: instanceRows,
-      operations: GRDBOperationRepository(db: database), architecture: probe.architecture)
+      operations: GRDBOperationRepository(db: database), architecture: probe.architecture,
+      paths: options.paths,
+      registries: options.registries
+        ?? DefaultRegistryClientFactory(credentials: registryCredentials.chain()),
+      metrics: metrics)
     // `.important usage` free space at the state volume, matching what admission already measures
     // (spec §17); injected as a closure so tests can drive every `DiskPressureState` directly.
     let stateDir = options.paths.stateDir
@@ -330,6 +340,7 @@ public actor DaemonRuntime {
       runners: runners,
       orchestrator: orchestrator,
       metrics: metrics,
+      registryCredentials: registryCredentials,
       logger: logger)
   }
 

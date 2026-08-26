@@ -1,5 +1,6 @@
 import Foundation
 import ImageStore
+import OCIRegistry
 import Persistence
 import RunnerCore
 import Testing
@@ -53,11 +54,22 @@ extension ImageManagerTests {
     }
   }
 
-  /// v1 has no registry client; the error has to say so rather than reporting a generic miss.
-  @Test func registryReferencesAreRejectedWithAHint() async throws {
+  /// Since M9 a registry-qualified reference is resolved against the registry, so the failure is
+  /// the registry's own -- not a local catalogue miss.
+  @Test func aRegistryReferenceIsResolvedAgainstTheRegistry() async throws {
+    try await withHarness { harness in
+      let error = await #expect(throws: RegistryError.self) {
+        _ = try await harness.images.resolve(reference: "ghcr.io/acme/ubuntu:24.04")
+      }
+      #expect(error?.code == "REGISTRY_NOT_FOUND")
+    }
+  }
+
+  /// A bare name is still local-only, and the error has to say how to create one.
+  @Test func anUnknownLocalNameSaysHowToImportOne() async throws {
     try await withHarness { harness in
       let error = await #expect(throws: ImageError.self) {
-        _ = try await harness.images.resolve(reference: "ghcr.io/acme/ubuntu:24.04")
+        _ = try await harness.images.resolve(reference: "not-imported")
       }
       #expect(error?.code == "IMAGE_NOT_FOUND")
       #expect(error?.message.contains("image import") == true)
@@ -226,7 +238,7 @@ extension ImageManagerTests {
         idempotencyKey: nil)
       let manager = ImageManager(
         store: harness.imageStore, images: harness.imageRows, instances: harness.instanceRows,
-        operations: operations, architecture: "arm64")
+        operations: operations, architecture: "arm64", paths: harness.paths)
 
       let report = try await manager.prune(
         policy: ImageCacheConfig(keepRecentlyUsed: .days(7)), dryRun: false)

@@ -6,7 +6,9 @@ struct Image: ParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "image",
     abstract: "Import and inspect local VM images.",
-    subcommands: [Import.self, List.self, Inspect.self, Delete.self, Prune.self])
+    subcommands: [
+      Import.self, Pull.self, Push.self, List.self, Inspect.self, Delete.self, Prune.self,
+    ])
 
   @OptionGroup var options: GlobalOptions
 }
@@ -162,6 +164,7 @@ extension Image {
     [
       ("digest", image.digest),
       ("name", Format.optional(image.name)),
+      ("reference", Format.optional(image.canonicalReference)),
       ("os", image.os),
       ("architecture", image.architecture),
       ("state", image.state),
@@ -170,6 +173,7 @@ extension Image {
       ("pins", "\(image.pinCount)"),
       ("path", image.localPath),
       ("created", image.createdAt),
+      ("pulled", Format.optional(image.pulledAt)),
     ]
   }
 }

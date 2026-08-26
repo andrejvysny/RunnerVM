@@ -12,6 +12,7 @@ public protocol KeychainCredentialStore: Sendable {
 public struct KeychainRegistryCredentials: RegistryCredentialProvider {
   public struct Failure: Error, CustomStringConvertible, Sendable {
     public let status: OSStatus
+    public init(status: OSStatus) { self.status = status }
     public var description: String {
       "keychain lookup failed with status \(status)"
     }

@@ -43,6 +43,8 @@ actor DaemonServiceImpl: DaemonService {
   let orchestrator: Orchestrator?
   let metrics: MetricRegistry
   let hostMode: HostModeControl
+  /// Owns the registry Keychain item `registry.login` writes and the pull chain reads.
+  let registryCredentials: RegistryCredentials
   let logger: Logger
 
   /// Set by `DaemonRuntime` once it owns both halves. `nil` means nothing can stop the process,
@@ -60,7 +62,8 @@ actor DaemonServiceImpl: DaemonService {
     startedAt: Date, actorName: String,
     diskPressure: DiskPressureMonitor = DiskPressureMonitor(freeSpace: { UInt64.max }),
     gateway: GitHubGateway, scopeHealth: ScopeHealthMonitor, runners: RunnerSessionManager,
-    orchestrator: Orchestrator? = nil, metrics: MetricRegistry = MetricRegistry(), logger: Logger
+    orchestrator: Orchestrator? = nil, metrics: MetricRegistry = MetricRegistry(),
+    registryCredentials: RegistryCredentials = RegistryCredentials(), logger: Logger
   ) {
     self.paths = paths
     self.hostId = hostId
@@ -86,6 +89,7 @@ actor DaemonServiceImpl: DaemonService {
     self.runners = runners
     self.orchestrator = orchestrator
     self.metrics = metrics
+    self.registryCredentials = registryCredentials
     self.hostMode = HostModeControl(
       hostId: hostId, hosts: GRDBHostRepository(db: database),
       sessions: GRDBRunnerSessionRepository(db: database),
@@ -121,6 +125,7 @@ actor DaemonServiceImpl: DaemonService {
     appliedYAML = persisted.yaml
     appliedAt = persisted.appliedAt
     appliedConfig = try? parseConfig(persisted.yaml)
+    await images.updateConfiguration(appliedConfig)
     await instances.updateConfiguration(appliedConfig)
     await gateway.updateConfiguration(appliedConfig)
     await orchestrator?.updateConfiguration(appliedConfig)
@@ -171,10 +176,11 @@ actor DaemonServiceImpl: DaemonService {
       github: Mapping.github(
         auth: await gateway.snapshot(), scopes: scopeRecords),
       images: ImageSummary(
-        cached: imageRecords.count,
+        cached: imageRecords.count { $0.state == .ready },
         diskUsageBytes: imageRecords.reduce(0) {
           $0 + ($1.allocatedSizeBytes ?? $1.virtualSizeBytes)
-        }),
+        },
+        pulling: imageRecords.count { $0.state == .pulling }),
       profiles: profileRecords.map { profile in
         ProfileRuntimeSummary(
           name: profile.name, enabled: profile.enabled,
@@ -212,7 +218,7 @@ actor DaemonServiceImpl: DaemonService {
     return row.id
   }
 
-  private func reserveDiskFloor() -> UInt64 {
+  func reserveDiskFloor() -> UInt64 {
     (appliedConfig?.host.reserve ?? HostConfig.Reserve()).diskBytes
   }
 
@@ -245,6 +251,7 @@ actor DaemonServiceImpl: DaemonService {
     appliedConfig = config
     appliedYAML = outcome.yaml
     appliedAt = outcome.appliedAt
+    await images.updateConfiguration(config)
     await instances.updateConfiguration(config)
     await gateway.updateConfiguration(config)
     await orchestrator?.updateConfiguration(config)

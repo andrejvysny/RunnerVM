@@ -13,9 +13,9 @@ struct RunnerCtl: ParsableCommand {
       the human tables.
       """,
     subcommands: [
-      Status.self, Version.self, ConfigCommand.self, Profile.self, Scope.self, Image.self, VM.self,
-      Auth.self, GitHubCommand.self, Runner.self, ScaleSet.self, Debug.self, Doctor.self,
-      System.self, MetricsCommand.self,
+      Status.self, Version.self, ConfigCommand.self, Profile.self, Scope.self, Image.self,
+      Registry.self, VM.self, Auth.self, GitHubCommand.self, Runner.self, ScaleSet.self,
+      Debug.self, Doctor.self, System.self, MetricsCommand.self,
     ]
   )
 

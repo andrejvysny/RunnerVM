@@ -160,10 +160,13 @@ public struct GitHubSummary: Codable, Sendable, Hashable {
 public struct ImageSummary: Codable, Sendable, Hashable {
   public var cached: Int
   public var diskUsageBytes: UInt64
+  /// Images whose row is `pulling`: a registry transfer is in flight for them right now.
+  public var pulling: Int
 
-  public init(cached: Int, diskUsageBytes: UInt64) {
+  public init(cached: Int, diskUsageBytes: UInt64, pulling: Int = 0) {
     self.cached = cached
     self.diskUsageBytes = diskUsageBytes
+    self.pulling = pulling
   }
 }
 

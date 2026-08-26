@@ -180,6 +180,47 @@ actor FakeDaemonService: DaemonService {
     return image
   }
 
+  var lastPullRequest: ImagePullRequest?
+  var lastPushRequest: ImagePushRequest?
+
+  func imagePull(_ request: ImagePullRequest) async throws -> ImagePullResponse {
+    lastPullRequest = request
+    return ImagePullResponse(
+      reference: request.reference + "@sha256:" + String(repeating: "c", count: 64),
+      manifestDigest: "sha256:" + String(repeating: "c", count: 64),
+      operationId: "op-pull", alreadyPresent: false, digest: nil)
+  }
+
+  func imagePush(_ request: ImagePushRequest) async throws -> ImagePushResponse {
+    lastPushRequest = request
+    return ImagePushResponse(
+      reference: request.reference, digest: "sha256:" + String(repeating: "a", count: 64),
+      operationId: "op-push")
+  }
+
+  var registryLogins: [RegistryLoginRequest] = []
+  var registryLogouts: [String] = []
+
+  func registryLogin(_ request: RegistryLoginRequest) async throws -> RegistryLoginResponse {
+    registryLogins.append(request)
+    return RegistryLoginResponse(
+      registry: request.registry, username: request.username,
+      location: "keychain \(request.registry)")
+  }
+
+  func registryLogout(_ request: RegistryLogoutRequest) async throws -> RegistryLogoutResponse {
+    registryLogouts.append(request.registry)
+    return RegistryLogoutResponse(registry: request.registry, removed: true)
+  }
+
+  func registryStatus() async throws -> RegistryStatusResponse {
+    RegistryStatusResponse(
+      registries: [
+        RegistryCredentialDTO(
+          registry: "ghcr.io", provider: "keychain", username: "octocat", profiles: ["linux"]),
+      ])
+  }
+
   func imageDelete(_ request: ImageDeleteRequest) async throws -> ImageDeleteResponse {
     images.removeAll { $0.digest == request.digest }
     return ImageDeleteResponse(digest: request.digest)

@@ -6,6 +6,9 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
   public var digest: String
   /// Local label the image was imported under; `nil` for an unnamed import.
   public var name: String?
+  /// The immutable reference this host resolved the image from, `<registry>/<repo>@sha256:…`
+  /// (spec §21). Equal to `name` for a locally imported image, `nil` when neither is set.
+  public var canonicalReference: String?
   public var os: String
   public var architecture: String
   public var state: String
@@ -14,14 +17,17 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
   public var localPath: String
   public var pinCount: Int
   public var createdAt: String
+  /// When the image finished pulling or importing; `nil` while it is still `pulling`.
+  public var pulledAt: String?
 
   public init(
     digest: String, name: String?, os: String, architecture: String, state: String,
     virtualSizeBytes: UInt64, allocatedSizeBytes: UInt64, localPath: String, pinCount: Int,
-    createdAt: String
+    createdAt: String, canonicalReference: String? = nil, pulledAt: String? = nil
   ) {
     self.digest = digest
     self.name = name
+    self.canonicalReference = canonicalReference
     self.os = os
     self.architecture = architecture
     self.state = state
@@ -30,6 +36,7 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     self.localPath = localPath
     self.pinCount = pinCount
     self.createdAt = createdAt
+    self.pulledAt = pulledAt
   }
 }
 
@@ -62,6 +69,66 @@ public struct ImageGetRequest: Codable, Sendable, Hashable {
   public var ref: String
 
   public init(ref: String) { self.ref = ref }
+}
+
+/// Spec §21, §137. The reply comes back as soon as the tag is resolved and the transfer is
+/// started, so a multi-gigabyte pull never has to fit inside the socket's idle timeout; follow
+/// `operationId` with `operation.get`.
+public struct ImagePullRequest: Codable, Sendable, Hashable {
+  /// A registry-qualified reference: `<registry>/<repository>[:tag][@sha256:…]`.
+  public var reference: String
+
+  public init(reference: String) { self.reference = reference }
+}
+
+public struct ImagePullResponse: Codable, Sendable, Hashable {
+  /// `<registry>/<repository>@sha256:…` the reference resolved to.
+  public var reference: String
+  /// The registry manifest digest concurrent pulls deduplicate on.
+  public var manifestDigest: String
+  /// `nil` when the image was already in the store, so nothing was started.
+  public var operationId: String?
+  public var alreadyPresent: Bool
+  /// Local content digest; set only when `alreadyPresent`.
+  public var digest: String?
+
+  public init(
+    reference: String, manifestDigest: String, operationId: String?, alreadyPresent: Bool,
+    digest: String?
+  ) {
+    self.reference = reference
+    self.manifestDigest = manifestDigest
+    self.operationId = operationId
+    self.alreadyPresent = alreadyPresent
+    self.digest = digest
+  }
+}
+
+public struct ImagePushRequest: Codable, Sendable, Hashable {
+  /// Local `sha256:` digest or the name the image was imported under.
+  public var image: String
+  /// Registry-qualified target; a tag is published alongside the digest.
+  public var reference: String
+
+  public init(image: String, reference: String) {
+    self.image = image
+    self.reference = reference
+  }
+}
+
+public struct ImagePushResponse: Codable, Sendable, Hashable {
+  /// The requested target reference. The immutable `@sha256:…` form the registry assigns is only
+  /// known once the transfer finishes; follow `operationId`.
+  public var reference: String
+  /// Local content digest of the image being published.
+  public var digest: String
+  public var operationId: String?
+
+  public init(reference: String, digest: String, operationId: String?) {
+    self.reference = reference
+    self.digest = digest
+    self.operationId = operationId
+  }
 }
 
 public struct ImageDeleteRequest: Codable, Sendable, Hashable {

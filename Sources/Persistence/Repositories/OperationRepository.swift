@@ -10,6 +10,15 @@ public protocol OperationRepository: Sendable {
     kind: String, resourceType: String, resourceId: String, idempotencyKey: String?
   ) async throws -> OperationRecord
 
+  /// Like `start`, but only a *still-running* row wins the idempotency key: a terminal row with
+  /// the same key has its key cleared and a fresh operation is inserted. A retried image pull must
+  /// not adopt the failed operation of the attempt before it, while a pull resumed after a daemon
+  /// crash (whose row is still `running`) must adopt exactly that one (spec §119).
+  @discardableResult
+  func restart(
+    kind: String, resourceType: String, resourceId: String, idempotencyKey: String
+  ) async throws -> OperationRecord
+
   func finish(id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?) async throws
   func list(state: OperationState?) async throws -> [OperationRecord]
 }
@@ -29,6 +38,27 @@ public final class GRDBOperationRepository: OperationRepository, Sendable {
         let existing = try OperationRecord.filter(Column("idempotency_key") == idempotencyKey).fetchOne(db)
       {
         return existing
+      }
+      let record = OperationRecord(
+        id: OperationID.generate(), kind: kind, resourceType: resourceType, resourceId: resourceId,
+        state: .running, idempotencyKey: idempotencyKey, startedAt: .now
+      )
+      try DatabaseErrorMapper.run(entity: "operations") { try record.insert(db) }
+      return record
+    }
+  }
+
+  public func restart(
+    kind: String, resourceType: String, resourceId: String, idempotencyKey: String
+  ) async throws -> OperationRecord {
+    try await db.write { db in
+      if var existing = try OperationRecord
+        .filter(Column("idempotency_key") == idempotencyKey).fetchOne(db)
+      {
+        if existing.state == .running || existing.state == .pending { return existing }
+        // `idempotency_key` is UNIQUE, so the finished row has to release it first.
+        existing.idempotencyKey = nil
+        try DatabaseErrorMapper.run(entity: "operations") { try existing.update(db) }
       }
       let record = OperationRecord(
         id: OperationID.generate(), kind: kind, resourceType: resourceType, resourceId: resourceId,

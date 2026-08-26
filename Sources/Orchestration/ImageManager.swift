@@ -1,6 +1,8 @@
 import Foundation
 import ImageStore
 import Logging
+import Metrics
+import OCIRegistry
 import Persistence
 import RunnerCore
 import RunnerLogging
@@ -37,19 +39,49 @@ public struct ImagePruneReport: Sendable, Equatable {
 /// Owns the local image catalogue: `ImageStore` holds the bytes, `ImageRepository` holds the rows
 /// and the pins, and this actor keeps the two consistent.
 public actor ImageManager {
-  private let store: ImageStore
-  private let images: any ImageRepository
-  private let instances: any InstanceRepository
-  /// `nil` in callers that don't care about the "pending operation" prune rule (spec §110); no
-  /// production code creates an `image`-typed operation row yet, so this only changes behaviour
-  /// once something does.
-  private let operations: (any OperationRepository)?
-  private let architecture: String
-  private let logger: Logger
+  /// Not `private`: `ImagePulling.swift` extends this actor from a separate file to keep this one
+  /// under its line budget, and cross-file extensions cannot see `private` members.
+  let store: ImageStore
+  let images: any ImageRepository
+  let instances: any InstanceRepository
+  /// `nil` in callers that don't care about the "pending operation" prune rule (spec §110) or
+  /// about tracking a pull as an operation.
+  let operations: (any OperationRepository)?
+  let architecture: String
+  let paths: RunnerPaths
+  let registries: any RegistryClientFactory
+  let metrics: MetricRegistry
+  let now: @Sendable () -> Date
+  let logger: Logger
+
+  /// One in-flight transfer per resolved manifest digest, however many callers asked for it
+  /// (spec §137). Keyed by the *registry* manifest digest, which is what tag resolution produces
+  /// and the only identity known before any bytes move.
+  var inFlightPulls: [ImageDigest: InFlightPull] = [:]
+  /// Staging directory names of pushes this process is running, so the sweep leaves them alone.
+  var activePushStaging: Set<String> = []
+  var activePullCount = 0
+  /// Highest `activePullCount` this daemon has reached, so the concurrency gate is observable
+  /// without instrumenting every transfer.
+  var peakActivePulls = 0
+  var pullWaiters: [CheckedContinuation<Void, Never>] = []
+  var concurrentPulls = HostConfig.Limits().concurrentImagePulls
+  var hostReserveDiskBytes = HostConfig.Reserve().diskBytes
+  /// Tag → digest, so a profile that names a moving tag does not hit the registry on every
+  /// `vm create`. Registry-qualified reference string → (digest, resolved at).
+  var tagResolutions: [String: (digest: ImageDigest, at: Date)] = [:]
+
+  /// How long a tag → digest resolution is trusted before the registry is asked again (spec §21:
+  /// the digest is what gets pinned, the tag is only a lookup key).
+  public static let tagResolutionTTL: Duration = .seconds(300)
 
   public init(
     store: ImageStore, images: any ImageRepository, instances: any InstanceRepository,
-    operations: (any OperationRepository)? = nil, architecture: String,
+    operations: (any OperationRepository)? = nil, architecture: String, paths: RunnerPaths,
+    registries: any RegistryClientFactory = DefaultRegistryClientFactory(
+      credentials: ChainedRegistryCredentials.standard()),
+    metrics: MetricRegistry = MetricRegistry(),
+    now: @escaping @Sendable () -> Date = { Date() },
     logger: Logger = Logger(component: .image)
   ) {
     self.store = store
@@ -57,7 +89,21 @@ public actor ImageManager {
     self.instances = instances
     self.operations = operations
     self.architecture = architecture
+    self.paths = paths
+    self.registries = registries
+    self.metrics = metrics
+    self.now = now
     self.logger = logger
+  }
+
+  /// Picks up `host.limits.concurrentImagePulls` and the free-space floor a pull must respect.
+  /// Called at bootstrap and on every `config.apply`.
+  public func updateConfiguration(_ config: RunnerConfiguration?) {
+    concurrentPulls = max(1, config?.host.limits.concurrentImagePulls
+      ?? HostConfig.Limits().concurrentImagePulls)
+    hostReserveDiskBytes = config?.host.reserve.diskBytes ?? HostConfig.Reserve().diskBytes
+    // A raised limit must wake whoever is queued behind the old one.
+    wakePullWaiters()
   }
 
   // MARK: - Import
@@ -72,7 +118,9 @@ public actor ImageManager {
       os: os,
       architecture: architecture,
       virtualDiskSizeBytes: size,
-      createdAt: Date(),
+      // The injected clock, not `Date()`: `createdAt` feeds the content digest through
+      // `metadata.json`, so a test that imports the same bytes twice must be able to pin it.
+      createdAt: now(),
       boot: ImageMetadata.Boot(type: os == .macos ? .macos : .efi),
       macos: hardwareModel.map { ImageMetadata.MacOSPlatform(hardwareModel: $0) })
     let imported = try await store.importLocal(
@@ -89,7 +137,7 @@ public actor ImageManager {
       name: info.manifest.name ?? name)
   }
 
-  private func makeRecord(
+  func makeRecord(
     info: ImageInfo, directory: URL, name: String?
   ) throws -> ImageRecord {
     let metadataJSON = String(
@@ -126,9 +174,11 @@ public actor ImageManager {
     try await decorate(try await record(for: reference))
   }
 
-  /// Profile `image:` values in v1 resolve locally only; registry references arrive in M9.
+  /// Profile `image:` values: a local name or digest resolves from the catalogue, a
+  /// registry-qualified reference is resolved against the registry and pulled if missing
+  /// (spec §21, §137). A tag is re-resolved at most once every `tagResolutionTTL`.
   public func resolve(reference: String) async throws -> ImageDigest {
-    try await record(for: reference).digest
+    try await resolveRecord(reference: reference, profile: nil).digest
   }
 
   // MARK: - Reservations
@@ -139,10 +189,14 @@ public actor ImageManager {
   /// (see `deleteCandidates`), so once this pin lands neither can delete the digest reserved here;
   /// `InstanceManager.create` calls this before the instance row exists, closing the window where
   /// a concurrent `image.prune` could otherwise delete an image mid-create.
+  ///
+  /// A registry-qualified `reference` is resolved -- and pulled, if this host has never seen the
+  /// digest -- before the pin is taken, which is what makes the first `vm create` after a profile
+  /// change slow (docs/images.md). Existing instances keep the digest they were created with.
   public func reserve(
-    reference: String, for instanceId: InstanceID
+    reference: String, for instanceId: InstanceID, profile: String? = nil
   ) async throws -> (ImageDigest, ImageInfo) {
-    let digest = try await record(for: reference).digest
+    let digest = try await resolveRecord(reference: reference, profile: profile).digest
     let info = try await store.inspect(digest: digest)
     try await images.pin(ownerType: .planning, ownerId: instanceId.rawValue, digest: digest)
     return (digest, info)
@@ -168,7 +222,7 @@ public actor ImageManager {
     return orphaned.count
   }
 
-  private func record(for reference: String) async throws -> ImageRecord {
+  func record(for reference: String) async throws -> ImageRecord {
     if reference.hasPrefix("sha256:"),
        let found = try await images.get(digest: ImageDigest(rawValue: reference)) {
       return found
@@ -177,18 +231,28 @@ public actor ImageManager {
     if let named = all.first(where: { $0.canonicalReference == reference }) {
       return named
     }
+    // Pulling content this host had already imported overwrites `canonical_reference` with the
+    // registry reference (spec §21); the label it was imported under survives in the immutable
+    // local manifest, and must keep resolving.
+    for row in all {
+      if let info = try? await store.inspect(digest: row.digest), info.manifest.name == reference {
+        return row
+      }
+    }
     throw ImageError.notFound(
-      reference: "\(reference) (v1 resolves local images only; import one with "
-        + "`runnerctl image import <disk> --name \(reference)`)")
+      reference: "\(reference) (no local image with that name or digest; import one with "
+        + "`runnerctl image import <disk> --name \(reference)`, or name a registry reference)")
   }
 
   private func decorate(_ record: ImageRecord) async throws -> ManagedImage {
-    let allocated = (try? await store.inspect(digest: record.digest).allocatedBytes)
-      ?? record.allocatedSizeBytes ?? 0
+    // `name` is the local label from the immutable manifest, which a later registry pull cannot
+    // move; `canonicalReference` is the provenance, which it can.
+    let info = try? await store.inspect(digest: record.digest)
     return ManagedImage(
-      record: record, allocatedBytes: allocated,
+      record: record,
+      allocatedBytes: info?.allocatedBytes ?? record.allocatedSizeBytes ?? 0,
       pinCount: try await images.pinCount(digest: record.digest),
-      name: record.canonicalReference)
+      name: info?.manifest.name ?? record.canonicalReference)
   }
 
   // MARK: - Delete
@@ -262,10 +326,42 @@ public actor ImageManager {
       reclaimedBytes: reclaimedBytes, staleStagingRemoved: staleStagingRemoved)
   }
 
-  /// Passthrough so callers that only want the staging sweep (the periodic maintenance tick)
-  /// don't need to reach into `ImageStore` directly.
+  /// Drops abandoned `images/.tmp` staging directories, *except* the ones a pull is still using.
+  ///
+  /// Not `ImageStore.sweepStaging`: a resumable pull (spec §119) keeps writing into one directory
+  /// for as long as the transfer takes, and a directory's mtime does not move while a file inside
+  /// it is appended to -- so an hour-long pull looks stale to a plain age sweep. A pull is
+  /// protected while this process holds it in flight, and, across a daemon restart, while its
+  /// `pull-image` operation row is still `running`.
   public func sweepStaging(olderThan retention: Duration, now: Date = Date()) async throws -> Int {
-    try await store.sweepStaging(olderThan: retention, now: now)
+    let protected = try await protectedStagingNames()
+    let manager = FileManager.default
+    let root = stagingRoot
+    guard manager.fileExists(atPath: root.path(percentEncoded: false)) else { return 0 }
+    let cutoff = now.addingTimeInterval(-Self.seconds(retention))
+    var removed = 0
+    for child in try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+    where !protected.contains(child.lastPathComponent) {
+      let attributes = try? manager.attributesOfItem(atPath: child.path(percentEncoded: false))
+      guard let modified = attributes?[.modificationDate] as? Date, modified < cutoff else { continue }
+      try manager.removeItem(at: child)
+      removed += 1
+    }
+    return removed
+  }
+
+  var stagingRoot: URL {
+    paths.imagesDir.appending(path: ".tmp", directoryHint: .isDirectory)
+  }
+
+  private func protectedStagingNames() async throws -> Set<String> {
+    var names = activePushStaging
+    for digest in inFlightPulls.keys { names.insert(Self.pullStagingName(for: digest)) }
+    guard let operations else { return names }
+    for row in try await operations.list(state: .running) where row.kind == Self.pullOperationKind {
+      names.insert(Self.pullStagingName(for: ImageDigest(rawValue: row.resourceId)))
+    }
+    return names
   }
 
   private func liveInstanceDigests() async throws -> Set<ImageDigest> {
@@ -334,7 +430,7 @@ public actor ImageManager {
   }
 
   private func sweepStagingAndOrphanBlobs(now: Date) async throws -> Int {
-    let swept = try await store.sweepStaging(olderThan: .seconds(3_600), now: now)
+    let swept = try await sweepStaging(olderThan: .seconds(3_600), now: now)
     for blob in try await store.unreferencedBlobs() {
       try? FileManager.default.removeItem(at: blob)
     }

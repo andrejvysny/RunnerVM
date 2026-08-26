@@ -90,6 +90,30 @@ public actor DaemonClient {
     try await call(.imageImport, request)
   }
 
+  public func imagePull(reference: String) async throws -> ImagePullResponse {
+    try await call(.imagePull, ImagePullRequest(reference: reference))
+  }
+
+  public func imagePush(image: String, reference: String) async throws -> ImagePushResponse {
+    try await call(.imagePush, ImagePushRequest(image: image, reference: reference))
+  }
+
+  public func registryLogin(
+    registry: String, username: String, password: String
+  ) async throws -> RegistryLoginResponse {
+    try await call(
+      .registryLogin,
+      RegistryLoginRequest(registry: registry, username: username, password: password))
+  }
+
+  public func registryLogout(registry: String) async throws -> RegistryLogoutResponse {
+    try await call(.registryLogout, RegistryLogoutRequest(registry: registry))
+  }
+
+  public func registryStatus() async throws -> RegistryStatusResponse {
+    try await call(.registryStatus)
+  }
+
   public func imageDelete(digest: String) async throws -> ImageDeleteResponse {
     try await call(.imageDelete, ImageDeleteRequest(digest: digest))
   }
