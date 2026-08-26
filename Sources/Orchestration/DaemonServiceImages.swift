@@ -19,9 +19,11 @@ extension DaemonServiceImpl {
   }
 
   private func describe(_ managed: ManagedImage) async -> ImageInfoDTO {
-    Mapping.image(
+    let version = managed.record.runnerVersion
+    return Mapping.image(
       managed,
-      runnerVersionHealth: await runnerVersions.health(forVersion: managed.record.runnerVersion))
+      runnerVersionHealth: await runnerVersions.health(forVersion: version),
+      firstMissed: await runnerVersions.firstMissedRelease(forVersion: version))
   }
 
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {

@@ -28,6 +28,10 @@ OUT=""
 RUNNER_VERSION="latest"
 RUNNER_SHA256=""
 RUNNER_URL=""
+RUNNER_DIGEST_SOURCE=""
+ALLOW_UNVERIFIED_RUNNER=0
+ALLOW_PARTIAL_PROVENANCE=0
+PARTIAL_REASON=""
 PACKAGE_UPGRADE="yes"
 DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
 DOCKER_SUITE="noble"
@@ -54,7 +58,11 @@ Inputs (every download is pinned and verified before the guest sees it):
   --base-sha256 <hex>      Expected sha256 of the base image. Required unless --allow-unverified-base.
   --allow-unverified-base  Build from an unverified base image. Loud, and recorded as such.
   --runner-version <v>     actions/runner version, or "latest" (default: latest, resolved on the host).
-  --runner-sha256 <hex>    Pin the runner tarball; must match what the host downloads.
+  --runner-sha256 <hex>    Pin the runner tarball; must match GitHub's release asset digest,
+                           if one could be read, or the build stops.
+  --allow-unverified-runner
+                           Trust the host's own download hash when GitHub's release asset has
+                           no digest and no --runner-sha256 was given. Loud, and recorded as such.
   --package-upgrade yes|no Run a full apt upgrade during the build (default: yes).
   --docker-suite <name>    Docker apt repository suite (default: noble).
   --guest-agent <path>     Use a prebuilt linux/arm64 guest agent instead of building one.
@@ -68,6 +76,9 @@ Output and builder VM:
   --no-sudo                Do not grant the runner account passwordless sudo.
   --keep-build-dir         Keep the builder VM directory (disk, seed, serial.log) after sealing.
   --print-seed             Resolve every input, render the cloud-init user-data, print both, exit.
+  --allow-partial-provenance
+                           Seal the image even if the guest's RVM-MANIFEST block could not be
+                           recovered from serial.log. Loud, and recorded as such.
 
 Environment: VMWORKER (path to a signed vmworker), BUILD_TIMEOUT_MIN (default 40),
 RUNNERVM_BUILD_CACHE (download cache, default ~/.cache/runnervm-build).
@@ -83,6 +94,7 @@ while [ $# -gt 0 ]; do
     --out) OUT="$2"; shift 2 ;;
     --runner-version) RUNNER_VERSION="$2"; shift 2 ;;
     --runner-sha256) RUNNER_SHA256="$2"; shift 2 ;;
+    --allow-unverified-runner) ALLOW_UNVERIFIED_RUNNER=1; shift ;;
     --package-upgrade) PACKAGE_UPGRADE="$2"; shift 2 ;;
     --docker-suite) DOCKER_SUITE="$2"; shift 2 ;;
     --guest-agent) GUEST_AGENT_BIN="$2"; shift 2 ;;
@@ -93,6 +105,7 @@ while [ $# -gt 0 ]; do
     --socket-dir) SOCKET_DIR="$2"; shift 2 ;;
     --no-sudo) NO_SUDO=1; shift ;;
     --keep-build-dir) KEEP_BUILD_DIR=1; shift ;;
+    --allow-partial-provenance) ALLOW_PARTIAL_PROVENANCE=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -214,6 +227,77 @@ latest_runner_version() {
     printf '%s' "${resolved#v}"
 }
 
+# Prints the release JSON for `v<version>` of actions/runner. RVM_RELEASE_JSON_FILE
+# lets tests substitute a fixture, so this never has to touch the network under test.
+fetch_release_json() {
+    local version="$1" api_path token
+    if [ -n "${RVM_RELEASE_JSON_FILE:-}" ]; then
+        cat "$RVM_RELEASE_JSON_FILE"
+        return 0
+    fi
+    api_path="repos/actions/runner/releases/tags/v$version"
+    if command -v gh >/dev/null 2>&1 && gh api "$api_path" 2>/dev/null; then
+        return 0
+    fi
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "$token" ]; then
+        curl -sSfL --max-time 30 \
+            -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Authorization: Bearer $token" "https://api.github.com/$api_path"
+    else
+        curl -sSfL --max-time 30 \
+            -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/$api_path"
+    fi
+}
+
+# Resolves the sha256 GitHub itself recorded for the arm64 runner tarball asset of
+# release v<version> (assets[].digest, "sha256:<hex>") -- the trust anchor, rather than
+# hashing whatever an unauthenticated first download happens to contain. Prints the bare
+# hex on success; prints nothing and returns 1 if the release, the asset, or its digest
+# field is unavailable.
+resolve_runner_digest() {
+    local version="$1" json digest
+    json="$(fetch_release_json "$version")" || return 1
+    digest="$(printf '%s' "$json" | jq -r \
+        --arg name "actions-runner-linux-arm64-$version.tar.gz" \
+        '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null)" || return 1
+    [ -n "$digest" ] || return 1
+    digest="${digest#sha256:}"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s' "$digest"
+}
+
+# Decides which digest the build trusts, in order: an operator's --runner-sha256 pin,
+# then GitHub's own release asset metadata, then -- only with --allow-unverified-runner
+# -- the hash of whatever the host ends up downloading. Sets RUNNER_SHA256 and
+# RUNNER_DIGEST_SOURCE; RUNNER_SHA256 is left empty only in the last case, where it is
+# not known until resolve_runner hashes the download itself.
+select_runner_digest() {
+    local asset_digest=""
+    asset_digest="$(resolve_runner_digest "$RUNNER_VERSION")" || asset_digest=""
+    if [ -n "$RUNNER_SHA256" ]; then
+        if [ -n "$asset_digest" ] && [ "$asset_digest" != "$RUNNER_SHA256" ]; then
+            die "runner digest mismatch for v$RUNNER_VERSION: --runner-sha256 $RUNNER_SHA256 \
+disagrees with GitHub's release asset digest $asset_digest -- refusing to silently prefer either"
+        fi
+        RUNNER_DIGEST_SOURCE="operator"
+        return 0
+    fi
+    if [ -n "$asset_digest" ]; then
+        RUNNER_SHA256="$asset_digest"
+        RUNNER_DIGEST_SOURCE="github-release-asset"
+        log "runner digest from GitHub release asset metadata: $RUNNER_SHA256"
+        return 0
+    fi
+    [ "$ALLOW_UNVERIFIED_RUNNER" -eq 1 ] || die \
+        "could not read a release asset digest for actions/runner v$RUNNER_VERSION: pass
+--runner-sha256 <hex> to pin it, or --allow-unverified-runner to hash whatever the host downloads"
+    RUNNER_DIGEST_SOURCE="download"
+    log "!!! WARNING: --allow-unverified-runner: no GitHub asset digest for v$RUNNER_VERSION, \
+will hash the host's own download instead"
+}
+
 resolve_runner() {
     if [ "$RUNNER_VERSION" = "latest" ]; then
         log "resolving the latest actions/runner release on the host"
@@ -223,24 +307,27 @@ resolve_runner() {
     fi
     RUNNER_VERSION="${RUNNER_VERSION#v}"
     RUNNER_URL="https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-arm64-$RUNNER_VERSION.tar.gz"
+    select_runner_digest
+
     local cached="$CACHE_DIR/actions-runner-linux-arm64-$RUNNER_VERSION.tar.gz"
     if [ ! -f "$cached" ] && [ "$PRINT_SEED" -eq 1 ]; then
         [ -n "$RUNNER_SHA256" ] || die \
-            "--print-seed will not download the runner tarball: pass --runner-sha256 <hex>,
-or run a real build once so $cached is cached"
-        log "print-seed: trusting --runner-sha256 for $RUNNER_VERSION, nothing downloaded"
+            "--print-seed cannot hash an unverified runner tarball without downloading it:
+run a real build once so $cached is cached, or pin --runner-sha256"
+        log "print-seed: trusting the resolved runner digest for $RUNNER_VERSION ($RUNNER_DIGEST_SOURCE), nothing downloaded"
         return 0
     fi
     if [ ! -f "$cached" ]; then
         log "downloading $RUNNER_URL"
         download_to "$RUNNER_URL" "$cached"
     fi
-    local actual
-    actual="$(sha256_hex "$cached")"
-    [ -z "$RUNNER_SHA256" ] || [ "$RUNNER_SHA256" = "$actual" ] ||
-        die "--runner-sha256 $RUNNER_SHA256 does not match $cached ($actual)"
-    RUNNER_SHA256="$actual"
-    log "actions runner $RUNNER_VERSION sha256 $RUNNER_SHA256"
+    if [ -n "$RUNNER_SHA256" ]; then
+        verify_sha256 "$cached" "$RUNNER_SHA256" "runner tarball"
+    else
+        RUNNER_SHA256="$(sha256_hex "$cached")"
+        log "!!! WARNING: recording observed runner sha256 $RUNNER_SHA256 (download, unverified against GitHub)"
+    fi
+    log "actions runner $RUNNER_VERSION sha256 $RUNNER_SHA256 (source: $RUNNER_DIGEST_SOURCE)"
 }
 
 # --------------------------------------------------------------------------
@@ -439,15 +526,36 @@ extract_manifest() {
     jq -e . "$dest" >/dev/null 2>&1 || return 1
 }
 
+# Fails closed: a build the guest never reported a usable manifest for (or reported one
+# with no `packages`) has no way to know what actually landed on disk, so it must not
+# seal silently. Writes the manifest (or '{}') to `dest` either way and sets the global
+# PARTIAL_REASON; returns 1 -- the caller is expected to die -- unless allow_partial is 1.
+check_guest_manifest() {
+    local serial="$1" dest="$2" allow_partial="$3"
+    PARTIAL_REASON=""
+    if extract_manifest "$serial" "$dest"; then
+        jq -e '.packages != null' "$dest" >/dev/null 2>&1 ||
+            PARTIAL_REASON="guest manifest decoded but has no packages field"
+    else
+        PARTIAL_REASON="no usable RVM-MANIFEST block in $serial"
+        echo '{}' >"$dest"
+    fi
+    [ -z "$PARTIAL_REASON" ] || [ "$allow_partial" -eq 1 ] || return 1
+    return 0
+}
+
 write_metadata() {
-    local guest="$1" dest="$2" upgrade="false"
+    local guest="$1" dest="$2" upgrade="false" partial="false"
     [ "$PACKAGE_UPGRADE" != "yes" ] || upgrade="true"
+    [ -z "${PARTIAL_REASON:-}" ] || partial="true"
     jq -n --sort-keys \
         --argjson virtualBytes "$VIRTUAL_BYTES" \
         --argjson packageUpgrade "$upgrade" \
+        --argjson partial "$partial" \
         --arg runnerVersion "$RUNNER_VERSION" \
         --arg runnerSha "sha256:$RUNNER_SHA256" \
         --arg runnerUrl "$RUNNER_URL" \
+        --arg runnerDigestSource "${RUNNER_DIGEST_SOURCE:-}" \
         --arg agentVersion "$AGENT_VERSION" \
         --arg agentCommit "$AGENT_COMMIT" \
         --arg agentSha "sha256:$AGENT_SHA256" \
@@ -459,6 +567,7 @@ write_metadata() {
         --arg builtAt "$BUILT_AT" \
         --arg dockerRepo "$DOCKER_REPO_URL $DOCKER_SUITE $DOCKER_COMPONENT" \
         --arg diskSha "sha256:$DISK_SHA256" \
+        --arg partialReason "${PARTIAL_REASON:-}" \
         --slurpfile guest "$guest" \
         "$(metadata_filter)" >"$dest"
 }
@@ -481,7 +590,10 @@ metadata_filter() {
   capabilities: { docker: true, ssh: true },
   provenance: {
     baseImage: { source: $baseSource, sha256: $baseSha },
-    actionsRunner: { version: $runnerVersion, sha256: $runnerSha, url: $runnerUrl },
+    actionsRunner: {
+      version: $runnerVersion, sha256: $runnerSha, url: $runnerUrl,
+      digestSource: ($runnerDigestSource | select(length > 0) // null)
+    },
     guestAgent: {
       gitCommit: $agentCommit, sha256: $agentSha,
       reportedVersion: ($guest[0].guestAgentVersion // null)
@@ -496,7 +608,9 @@ metadata_filter() {
     packageUpgrade: $packageUpgrade,
     packages: ($guest[0].packages // null),
     kernelVersion: ($guest[0].kernelVersion // null),
-    diskSHA256: $diskSha
+    diskSHA256: $diskSha,
+    partial: $partial,
+    partialReason: ($partialReason | select(length > 0) // null)
   }
 }
 JQ
@@ -788,6 +902,7 @@ if [ "$PRINT_SEED" -eq 1 ]; then
     jq -n --sort-keys \
         --arg base "$BASE" --arg baseSource "$BASE_SOURCE" --arg baseSha "$BASE_SHA256" \
         --arg runnerVersion "$RUNNER_VERSION" --arg runnerSha "$RUNNER_SHA256" \
+        --arg runnerDigestSource "$RUNNER_DIGEST_SOURCE" \
         --arg runnerUrl "$RUNNER_URL" --arg agentVersion "$AGENT_VERSION" \
         --arg agentSha "$AGENT_SHA256" --arg agentCommit "$AGENT_COMMIT" \
         --arg builderCommit "$BUILDER_COMMIT" --arg builtAt "$BUILT_AT" \
@@ -837,13 +952,18 @@ WORKER_PID=""
 # Seal
 # --------------------------------------------------------------------------
 GUEST_MANIFEST="$BUILD_DIR/guest-manifest.json"
-if extract_manifest "$SERIAL_LOG" "$GUEST_MANIFEST"; then
+if ! check_guest_manifest "$SERIAL_LOG" "$GUEST_MANIFEST" "$ALLOW_PARTIAL_PROVENANCE"; then
+    echo "guest manifest could not be recovered: $PARTIAL_REASON" >&2
+    echo "serial log: $SERIAL_LOG" >&2
+    echo "pass --allow-partial-provenance to seal anyway with degraded provenance" >&2
+    exit 1
+fi
+if [ -n "$PARTIAL_REASON" ]; then
+    log "!!! WARNING: $PARTIAL_REASON"
+    log "!!! metadata.json will carry no package manifest for this image (--allow-partial-provenance)"
+else
     log "guest manifest: $(jq -r '.packages | length' "$GUEST_MANIFEST") packages, \
 docker $(jq -r .dockerVersion "$GUEST_MANIFEST"), kernel $(jq -r .kernelVersion "$GUEST_MANIFEST")"
-else
-    log "!!! WARNING: no usable RVM-MANIFEST block in serial.log"
-    log "!!! metadata.json will carry no package manifest for this image"
-    echo '{}' >"$GUEST_MANIFEST"
 fi
 
 log "sealing image into $OUT"

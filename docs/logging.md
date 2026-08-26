@@ -184,6 +184,11 @@ Two worked examples ship with the repo; neither is installed by `scripts/install
 file is JSON, leave the guest console output as text, and attach `host_id` and `source` labels.
 Read the header of each file for the placeholders to replace.
 
+`<state-dir>` is 0750 and `logs/`/`logs/instances/` are 0750 too, owned by the service user and its
+dedicated `_runnervm` group (never `staff` — see `docs/install.md`), so a log shipper needs to
+either run as `_runnervm` itself or be added to that group:
+`sudo dseditgroup -o edit -a <shipper-user> -t user _runnervm`.
+
 - **Vector** — `packaging/vector/vector.toml`, with a Loki sink.
   `vector validate --config packaging/vector/vector.toml`.
 - **Fluent Bit** — `packaging/fluent-bit/fluent-bit.conf` (plus `parsers.conf` and

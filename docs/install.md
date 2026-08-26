@@ -23,16 +23,25 @@ Without `sudo`, the script performs whatever it can with the invoking user's own
 for `--prefix`/`--state-dir`/`--runtime-dir` under a writable custom location, e.g. for testing)
 and prints the exact `sudo <command>` lines for everything else under **manual steps** — it never
 calls `sudo` itself. Defaults: `--prefix /usr/local`, `--state-dir "/Library/Application Support/
-RunnerVM"`, `--runtime-dir /var/run/runnervm`, `--user _runnervm`, `--launchd none`.
+RunnerVM"`, `--runtime-dir /var/run/runnervm`, `--user _runnervm`, `--group _runnervm`,
+`--launchd none`.
 
-What it does, in order: builds release binaries for `runnerd`/`runnerctl`/`vmworker`; signs
-`vmworker` with `Resources/vmworker.entitlements` (ad-hoc by default; set `CODESIGN_IDENTITY` for a
-Developer ID build); installs `runnerd`+`vmworker` to `<prefix>/libexec/runnervm/` and `runnerctl`
-to `<prefix>/bin/`; creates `<state-dir>` (mode 0750) with `images/`, `instances/`, `logs/`
-subdirectories and `<runtime-dir>` (mode 0700), both owned by the service user; copies `--config`
-to `<state-dir>/config.yaml`; verifies every socket path stays under the 104-byte `sun_path` limit
-before writing anything; and, if `--launchd` is not `none`, installs the chosen plist. It never
-runs `launchctl` — load the job yourself (the script prints the exact command).
+What it does, in order: checks that the `_runnervm` service group and user exist with the right
+`PrimaryGroupID` relationship, queuing `dscl`/`sysadminctl` manual steps for whatever is missing or
+wrong (see "Dedicated service account and auto-login" below); builds release binaries for
+`runnerd`/`runnerctl`/`vmworker`; signs `vmworker` with `Resources/vmworker.entitlements` (ad-hoc by
+default; set `CODESIGN_IDENTITY` for a Developer ID build); installs `runnerd`+`vmworker` to
+`<prefix>/libexec/runnervm/` and `runnerctl` to `<prefix>/bin/`; creates `<state-dir>` (mode 0750)
+with `images/`, `instances/`, `logs/` subdirectories (`logs/` and `logs/instances/` explicitly
+0750) and `<runtime-dir>` (mode 0700), both owned by the service user and group; copies `--config`
+to `<state-dir>/config.yaml` (mode 0640); verifies every socket path stays under the 104-byte
+`sun_path` limit before writing anything; and, if `--launchd` is not `none`, installs the chosen
+plist. It never runs `launchctl` — load the job yourself (the script prints the exact command).
+
+`--group` defaults to the dedicated `_runnervm` group, never `staff`: every local macOS user
+account is a member of `staff`, so a `staff`-owned state directory and log/config files would be
+readable by every account on the Mac, including runner `_diag` bundles and GitHub credentials.
+Passing `--group staff` is refused unless `--allow-staff-group` is also given.
 
 Verify with `--dry-run` first; it performs no filesystem writes and prints every action, including
 the fully rendered launchd plist.
@@ -62,10 +71,36 @@ loop in `docs/qualification.md` (`scripts/qualify-host.sh`).
 
 ## Dedicated service account and auto-login
 
+RunnerVM runs as a dedicated `_runnervm` user whose primary group is a dedicated `_runnervm`
+group — **never** `staff`. Every local macOS user account, human or service, is a member of
+`staff` by default; a `staff`-owned state directory would make `<state-dir>` (0750) and its
+config/log files (0640) readable by every other account on the Mac, including GitHub credentials
+and runner `_diag` bundles that can carry job output. `scripts/install.sh --group staff` is
+refused for exactly this reason unless you pass `--allow-staff-group` and accept the exposure.
+
+`scripts/install.sh` checks for both principals on every run (`dscl . -read`) and prints the exact
+commands to run under `sudo` when either is missing — the same **manual steps** mechanism it uses
+for every other privileged action. To do it by hand ahead of time, or to understand what the
+script queues:
+
 ```sh
+# 1. Create the hidden system group (pick a free GID in 200-400: none of
+#    `dscl . -list /Groups PrimaryGroupID` should already print it).
+sudo dscl . -create /Groups/_runnervm
+sudo dscl . -create /Groups/_runnervm PrimaryGroupID 250
+sudo dscl . -create /Groups/_runnervm RealName "RunnerVM Service"
+sudo dscl . -create /Groups/_runnervm Password "*"
+
+# 2. Create the service account with that group as its primary group.
 sudo sysadminctl -addUser _runnervm -fullName "RunnerVM Service" \
-  -password - -home /Users/_runnervm -admin off
+  -GID 250 -password - -home /Users/_runnervm -admin off
 ```
+
+(`-password -` prompts interactively; do not put the password on the command line or in shell
+history.) If `_runnervm` already exists with `staff` as its primary group — a host installed before
+this dedicated group existed — `scripts/install.sh` detects the mismatch and queues
+`sudo dscl . -create /Users/_runnervm PrimaryGroupID <gid>` to fix it in place; nothing else about
+the account needs to change.
 
 For the LaunchAgent path, also enable automatic login for `_runnervm` (System Settings → Login
 Screen) and log in as that user once before relying on it, so its login keychain exists and is
@@ -82,6 +117,11 @@ Removes the installed binaries and the matching launchd plist (both variants if 
 omitted). **State (`<state-dir>`, including images and instance disks) and the runtime socket
 directory are left in place** — remove them by hand if you actually want the data gone. Unload the
 job first (the command is printed) so nothing tries to restart the daemon mid-uninstall.
+
+The `_runnervm` service account and group are also left in place — uninstall never deletes
+directory service records. Remove them yourself (`sudo sysadminctl -deleteUser _runnervm`,
+`sudo dscl . -delete /Groups/_runnervm`) only after confirming nothing else on the host still
+depends on that account owning files under `<state-dir>`.
 
 ## `runnerctl doctor`
 
@@ -150,3 +190,8 @@ pipelines.
   - the GitHub App private key PEM it points at — 0600.
 - Run production workloads as the dedicated `_runnervm` account, never as `root` — `root` is only
   needed transiently, for `sudo scripts/install.sh` itself.
+- The service account's primary group is a dedicated `_runnervm` group, never `staff`. Every local
+  macOS account is a member of `staff`, so a `staff`-owned `<state-dir>` would make its 0750/0640
+  contents — GitHub credentials, job logs, runner `_diag` bundles — readable by every other user on
+  the Mac. `scripts/install.sh --group staff` requires `--allow-staff-group` for exactly this
+  reason; see "Dedicated service account and auto-login" above.

@@ -18,12 +18,13 @@ PREFIX="/usr/local"
 STATE_DIR="/Library/Application Support/RunnerVM"
 RUNTIME_DIR="/var/run/runnervm"
 SERVICE_USER="_runnervm"
-SERVICE_GROUP="staff"
+SERVICE_GROUP="_runnervm"
 LAUNCHD="none"
 CONFIG_SRC=""
 LOG_LEVEL="info"
 DRY_RUN=0
 UNINSTALL=0
+ALLOW_STAFF_GROUP=0
 : "${CODESIGN_IDENTITY:=-}"
 
 usage() {
@@ -35,9 +36,13 @@ usage: install.sh [options]
                          (default: /Library/Application Support/RunnerVM).
   --runtime-dir <dir>   Directory for runnerd.sock and worker sockets (default: /var/run/runnervm).
   --user <name>         Dedicated service account the daemon runs as (default: _runnervm).
-  --group <name>        Group for that account (default: staff).
+  --group <name>        Group for that account (default: _runnervm). --allow-staff-group is
+                         required to set this to "staff".
   --launchd <kind>      agent | daemon | none (default: none — print manual-start instructions).
   --config <yaml>       Configuration file, copied to <state-dir>/config.yaml.
+  --allow-staff-group   Permit --group staff (or a default left unchanged from an older install).
+                         Refused otherwise: every local macOS user is in "staff", so state/log/
+                         config modes end up readable by every account on the Mac.
   --dry-run             Print every action instead of performing it; no filesystem writes.
   --uninstall           Remove installed binaries and the launchd job; state is left in place.
   -h, --help             Show this help.
@@ -60,6 +65,7 @@ while [ $# -gt 0 ]; do
     --launchd) LAUNCHD="$2"; shift 2 ;;
     --config) CONFIG_SRC="$2"; shift 2 ;;
     --log-level) LOG_LEVEL="$2"; shift 2 ;;
+    --allow-staff-group) ALLOW_STAFF_GROUP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -78,6 +84,27 @@ esac
 [ -n "$SERVICE_USER" ] || { echo "--user must not be empty" >&2; exit 2; }
 if [ -n "$CONFIG_SRC" ] && [ ! -f "$CONFIG_SRC" ]; then
     echo "--config file not found: $CONFIG_SRC" >&2
+    exit 2
+fi
+
+# --group staff is refused by default: every local macOS user is a member of "staff" (GID 20, the
+# default primary group for admin and most human accounts), so <state-dir> at 0750 and config/log
+# files at 0640 owned by $SERVICE_USER:staff end up readable by every other account on the Mac --
+# including runner _diag bundles, serial console logs and GitHub credentials (spec §129). Fails
+# fast, before any build or filesystem work.
+if [ "$SERVICE_GROUP" = "staff" ] && [ "$ALLOW_STAFF_GROUP" -ne 1 ]; then
+    cat >&2 <<EOF
+error: --group staff refused.
+
+Every local user account on this Mac is a member of "staff". Running the service under that
+group means <state-dir> (0750) and its config/log files (0640) are readable by every other
+account, defeating the point of the restrictive modes -- this includes GitHub credentials and
+runner _diag bundles that can contain job output.
+
+Use the dedicated "_runnervm" group instead (this script's default; see "docs/install.md",
+"Dedicated service account and auto-login"), or pass --allow-staff-group if you have reviewed
+and accept that every local account can read RunnerVM's state, logs and secrets.
+EOF
     exit 2
 fi
 
@@ -170,6 +197,79 @@ quote_cmd() {
 }
 
 # --------------------------------------------------------------------------
+# Service group/user (spec §7.2, §129)
+#
+# dscl reads (existence/GID checks) are harmless without privilege and always run for real, dry
+# run or not, so the plan below reflects this machine's actual directory service state. Only the
+# dscl mutations that create/fix records go through privileged() (or, for the one interactive
+# step, straight into MANUAL_STEPS) -- this script still never calls sudo itself.
+# --------------------------------------------------------------------------
+GROUP_GID_MIN=200
+GROUP_GID_MAX=400
+
+# Hidden "system" GID range on macOS is everything below 500; 200-400 avoids the low end that
+# Apple's own daemons occupy densely. Prints the first unused GID in range on stdout.
+find_free_gid() {
+    local gid="$GROUP_GID_MIN" used
+    used="$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}')"
+    while [ "$gid" -le "$GROUP_GID_MAX" ]; do
+        if ! printf '%s\n' "$used" | grep -qx "$gid"; then
+            printf '%s' "$gid"
+            return 0
+        fi
+        gid=$((gid + 1))
+    done
+    return 1
+}
+
+# Ensure $SERVICE_GROUP and $SERVICE_USER exist, and that the user's primary group is
+# $SERVICE_GROUP. Missing/incorrect pieces are queued as manual dscl/sysadminctl steps (or run
+# directly when this shell already has the privilege, same as every other step in this script).
+ensure_service_principals() {
+    local group_attr user_attr group_gid user_pgid new_gid
+
+    group_attr="$(dscl . -read "/Groups/$SERVICE_GROUP" PrimaryGroupID 2>/dev/null || true)"
+    if [ -z "$group_attr" ]; then
+        new_gid="$(find_free_gid)" || {
+            echo "error: no free GID in ${GROUP_GID_MIN}-${GROUP_GID_MAX} for group $SERVICE_GROUP" >&2
+            exit 1
+        }
+        log "group $SERVICE_GROUP does not exist — queuing creation with GID $new_gid"
+        privileged "create group $SERVICE_GROUP" dscl . -create "/Groups/$SERVICE_GROUP"
+        privileged "set $SERVICE_GROUP PrimaryGroupID $new_gid" \
+            dscl . -create "/Groups/$SERVICE_GROUP" PrimaryGroupID "$new_gid"
+        privileged "set $SERVICE_GROUP RealName" \
+            dscl . -create "/Groups/$SERVICE_GROUP" RealName "RunnerVM Service"
+        privileged "set $SERVICE_GROUP Password" \
+            dscl . -create "/Groups/$SERVICE_GROUP" Password "*"
+        group_gid="$new_gid"
+    else
+        group_gid="${group_attr#PrimaryGroupID: }"
+        log "group $SERVICE_GROUP exists (GID $group_gid)"
+    fi
+
+    user_attr="$(dscl . -read "/Users/$SERVICE_USER" PrimaryGroupID 2>/dev/null || true)"
+    if [ -z "$user_attr" ]; then
+        # sysadminctl -addUser -password - prompts on stdin for the account password; never
+        # attempted directly (which would hang a non-interactive run) -- always a manual step.
+        MANUAL_STEPS+=(
+            "$(quote_cmd sysadminctl -addUser "$SERVICE_USER" -fullName "RunnerVM Service" \
+                -GID "$group_gid" -home "/Users/$SERVICE_USER" -password - -admin off)"
+        )
+        log "user $SERVICE_USER does not exist — queued creation with primary group $SERVICE_GROUP (GID $group_gid, see 'manual steps' below)"
+    else
+        user_pgid="${user_attr#PrimaryGroupID: }"
+        if [ "$user_pgid" != "$group_gid" ]; then
+            privileged "fix $SERVICE_USER PrimaryGroupID -> $group_gid ($SERVICE_GROUP)" \
+                dscl . -create "/Users/$SERVICE_USER" PrimaryGroupID "$group_gid"
+            log "user $SERVICE_USER exists but its primary group was GID $user_pgid, not $SERVICE_GROUP — queued fix"
+        else
+            log "user $SERVICE_USER exists with primary group $SERVICE_GROUP (GID $group_gid)"
+        fi
+    fi
+}
+
+# --------------------------------------------------------------------------
 # Socket path budget (spec §22, §129; RunnerPaths.socketPathLimit = 100 bytes)
 # --------------------------------------------------------------------------
 check_socket_path_lengths() {
@@ -223,19 +323,24 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 # --------------------------------------------------------------------------
-# 1. Verify socket path lengths before doing anything else
+# 1. Ensure the service group/user exist with the right relationship (spec §7.2, §129)
+# --------------------------------------------------------------------------
+ensure_service_principals
+
+# --------------------------------------------------------------------------
+# 2. Verify socket path lengths before doing anything else
 # --------------------------------------------------------------------------
 check_socket_path_lengths "$RUNTIME_DIR"
 
 # --------------------------------------------------------------------------
-# 2. Build release binaries
+# 3. Build release binaries
 # --------------------------------------------------------------------------
 step "swift build -c release (runnerd, runnerctl, vmworker)" \
     env -C "$REPO_ROOT" swift build -c release \
     --product runnerd --product runnerctl --product vmworker
 
 # --------------------------------------------------------------------------
-# 3. Sign vmworker with the virtualization entitlement (spec §7.2)
+# 4. Sign vmworker with the virtualization entitlement (spec §7.2)
 # --------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
     printf '+ codesign --force --sign "%s" --entitlements Resources/vmworker.entitlements %s\n' \
@@ -249,7 +354,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 4. Install binaries
+# 5. Install binaries
 # --------------------------------------------------------------------------
 privileged "create $LIBEXEC_DIR" mkdir -p "$LIBEXEC_DIR"
 privileged "create $BIN_DIR" mkdir -p "$BIN_DIR"
@@ -278,7 +383,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 5. State and runtime directories (spec §22, §129)
+# 6. State and runtime directories (spec §22, §129)
 # --------------------------------------------------------------------------
 privileged "create $STATE_DIR (0750, $SERVICE_USER:$SERVICE_GROUP)" \
     mkdir -p -m 0750 "$STATE_DIR"
@@ -289,6 +394,13 @@ for sub in images instances logs; do
     privileged "chown $STATE_DIR/$sub to $SERVICE_USER:$SERVICE_GROUP" \
         chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/$sub"
 done
+# logs/ and logs/instances hold runner _diag bundles, serial console output and job logs --
+# owner + service group only, no world access, matching <state-dir> itself.
+privileged "chmod 0750 $STATE_DIR/logs" chmod 0750 "$STATE_DIR/logs"
+privileged "create $STATE_DIR/logs/instances (0750, $SERVICE_USER:$SERVICE_GROUP)" \
+    mkdir -p -m 0750 "$STATE_DIR/logs/instances"
+privileged "chown $STATE_DIR/logs/instances to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/logs/instances"
 privileged "create $RUNTIME_DIR (0700, $SERVICE_USER:$SERVICE_GROUP)" \
     mkdir -p -m 0700 "$RUNTIME_DIR"
 privileged "chown $RUNTIME_DIR to $SERVICE_USER:$SERVICE_GROUP" \
@@ -305,7 +417,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 6. launchd job (spec §7.2; plan C3 S3 — see packaging/launchd/README.md)
+# 7. launchd job (spec §7.2; plan C3 S3 — see packaging/launchd/README.md)
 # --------------------------------------------------------------------------
 render_plist() {
     # $1 = template path, $2 = destination path (for logging only in dry-run)

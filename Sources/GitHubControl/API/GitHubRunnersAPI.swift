@@ -135,6 +135,9 @@ public struct GitHubRunnersAPI: Sendable {
   // MARK: - Runner software version (spec §53)
 
   public static let latestReleasePath = "/repos/actions/runner/releases/latest"
+  public static let runnerReleasesPath = "/repos/actions/runner/releases"
+  /// A server that keeps advertising a next page must not turn this into an unbounded fetch.
+  private static let maxReleasePages = 20
 
   /// Latest published `actions/runner` release, for the image staleness check: the tag without its
   /// leading `v`, plus the publication date `RunnerVersionPolicy` measures its grace window from.
@@ -156,6 +159,50 @@ public struct GitHubRunnersAPI: Sendable {
 
   public func latestRunnerVersion() async throws -> String {
     try await latestRunnerRelease().version
+  }
+
+  /// Up to `limit` recent, published, non-draft, non-prerelease `actions/runner` releases, newest
+  /// first — the window `RunnerVersionPolicy` grades an image against (spec §53). Unlike
+  /// `latestRunnerRelease`, this needs more than the single newest release: the 30-day grace clock
+  /// is measured from the *first* release an image missed, and that can only be found by looking
+  /// at the releases between the image's version and the newest one.
+  ///
+  /// Paginates only until `limit` is collected — the endpoint can carry years of history and the
+  /// policy never needs more than a bounded recent window.
+  public func recentRunnerReleases(limit: Int = 60) async throws -> RunnerReleaseHistory {
+    var collected: [RunnerRelease] = []
+    var request: GitHubRequest? = GitHubRequest.get(
+      Self.runnerReleasesPath, query: [URLQueryItem(name: "per_page", value: "100")])
+    var pages = 0
+    while let current = request, collected.count < limit, pages < Self.maxReleasePages {
+      let response = try await client.send(current, as: [Wire.Release].self)
+      collected.append(contentsOf: Self.usableReleases(response.value))
+      request = response.nextPage.map(GitHubRequest.following)
+      pages += 1
+    }
+    let releases = Array(collected.sorted { $0.publishedAt > $1.publishedAt }.prefix(limit))
+    return RunnerReleaseHistory(releases: releases, latest: Self.highestVersion(of: releases))
+  }
+
+  /// Drops drafts, prereleases, and anything whose tag or `published_at` cannot be trusted, rather
+  /// than failing the whole page over one bad entry.
+  private static func usableReleases(_ page: [Wire.Release]) -> [RunnerRelease] {
+    page.compactMap { release in
+      guard release.draft != true, release.prerelease != true,
+            let publishedAt = parseTimestamp(release.publishedAt)
+      else { return nil }
+      let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+      guard !version.isEmpty else { return nil }
+      return RunnerRelease(version: version, publishedAt: publishedAt)
+    }
+  }
+
+  /// Not `releases.first`: publication order is not guaranteed to track version order.
+  private static func highestVersion(of releases: [RunnerRelease]) -> RunnerRelease? {
+    releases
+      .compactMap { release in SemanticVersion(release.version).map { (release, $0) } }
+      .max { $0.1 < $1.1 }?
+      .0
   }
 
   /// Built per call rather than held: `ISO8601DateFormatter` is a non-`Sendable` reference type and

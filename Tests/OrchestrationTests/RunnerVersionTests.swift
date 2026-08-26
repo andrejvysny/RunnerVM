@@ -9,18 +9,19 @@ import Testing
 
 @testable import Orchestration
 
-/// Spec §53: the daemon grades every local image's baked-in `actions/runner` against the newest
-/// published release, and `imageUpdates.denyTooOldRunner` turns the worst grade into a refusal.
+/// Spec §53: the daemon grades every local image's baked-in `actions/runner` against a recent
+/// window of published releases, and `imageUpdates.denyTooOldRunner` turns the worst grade into a
+/// refusal.
 @Suite struct RunnerVersionTests {
   static let now = Date(timeIntervalSince1970: 1_756_000_000)
-  static let releasePath = GitHubRunnersAPI.latestReleasePath
+  static let releasesPath = GitHubRunnersAPI.runnerReleasesPath
 
   // MARK: - Monitor
 
   @Test func refreshReadsTheLatestReleaseFromGitHub() async throws {
     try await withHarness(now: { Self.now }) { harness in
       let published = Self.now.addingTimeInterval(-3 * 86_400)
-      harness.github.stubLatestRunnerRelease(tag: "v2.336.0", publishedAt: published)
+      harness.github.stubRunnerReleases([("v2.336.0", published, false)])
 
       let release = await harness.runnerVersions.refresh()
 
@@ -35,11 +36,12 @@ import Testing
   /// until a newer one replaces it.
   @Test func aFailedRefreshKeepsTheLastKnownRelease() async throws {
     try await withHarness(now: { Self.now }) { harness in
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
-      harness.github.stub(.get, Self.releasePath, .error(500))
+      harness.github.stub(.get, Self.releasesPath, .error(500))
       await harness.runnerVersions.refresh()
 
       #expect(await harness.runnerVersions.latest()?.version == "2.336.0")
@@ -54,7 +56,7 @@ import Testing
       #expect(await harness.runnerVersions.unavailable() == .notFetchedYet)
       #expect(await harness.runnerVersions.releaseAgeSeconds() == nil)
 
-      harness.github.stub(.get, Self.releasePath, .error(500))
+      harness.github.stub(.get, Self.releasesPath, .error(500))
       await harness.runnerVersions.refresh()
 
       #expect(await harness.runnerVersions.latest() == nil)
@@ -68,20 +70,21 @@ import Testing
   /// The maintenance loop calls this every five minutes; the lookup itself is six-hourly.
   @Test func refreshIfDueOnlyQueriesOncePerInterval() async throws {
     try await withHarness { harness in
-      harness.github.stubLatestRunnerRelease(tag: "v2.336.0", publishedAt: Date())
+      harness.github.stubRunnerReleases([("v2.336.0", Date(), false)])
 
       await harness.runnerVersions.refreshIfDue()
       await harness.runnerVersions.refreshIfDue()
       await harness.runnerVersions.refreshIfDue()
 
-      #expect(harness.github.requests(.get, Self.releasePath).count == 1)
+      #expect(harness.github.requests(.get, Self.releasesPath).count == 1)
     }
   }
 
   @Test func metadataIsGradedThroughTheSamePolicy() async throws {
     try await withHarness(now: { Self.now }) { harness in
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-90 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-90 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       let metadata = ImageMetadata(
@@ -91,19 +94,39 @@ import Testing
     }
   }
 
+  /// The regression this fix closes: the grace clock starts at the first release an image missed,
+  /// not at whichever release is newest today. A later release must not reset it.
+  @Test func aNewerReleaseDoesNotResetTheGraceWindow() async throws {
+    try await withHarness(now: { Self.now }) { harness in
+      harness.github.stubRunnerReleases([
+        ("v2.331.0", Self.now.addingTimeInterval(-40 * 86_400), false),
+        ("v2.332.0", Self.now.addingTimeInterval(-1 * 86_400), false),
+      ])
+      await harness.runnerVersions.refresh()
+
+      // Old bug: measured from latest (1 day old) -> `stale`. Correct: from the first missed
+      // release, 2.331.0, published 40 days ago -> `tooOld`.
+      #expect(await harness.runnerVersions.health(forVersion: "2.330.0") == .tooOld)
+      let missed = await harness.runnerVersions.firstMissedRelease(forVersion: "2.330.0")
+      #expect(missed?.version == "2.331.0")
+    }
+  }
+
   // MARK: - Surface
 
   @Test func imageListReportsTheRunnerVersionAndItsHealth() async throws {
     try await withHarness(now: { Self.now }) { harness in
       try await harness.importLinuxImage(runnerVersion: "2.320.0")
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-5 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-5 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       let listed = try await harness.service().imageList().images
       let image = try #require(listed.first { $0.name == M2Harness.linuxImageName })
       #expect(image.runnerVersion == "2.320.0")
       #expect(image.runnerVersionHealth == .stale)
+      #expect(image.runnerFirstMissedVersion == "2.336.0")
 
       let inspected = try await harness.service().imageGet(
         ImageGetRequest(ref: M2Harness.linuxImageName))
@@ -114,8 +137,9 @@ import Testing
   @Test func statusCountsStaleAndTooOldImages() async throws {
     try await withHarness(now: { Self.now }) { harness in
       try await harness.importLinuxImage(runnerVersion: "2.300.0")
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-90 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-90 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       let status = try await harness.service().status()
@@ -127,8 +151,9 @@ import Testing
   @Test func maintenancePublishesTheFreshnessGauges() async throws {
     try await withHarness(now: { Self.now }) { harness in
       let image = try await harness.importLinuxImage(runnerVersion: "2.300.0")
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-90 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-90 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       let service = harness.service()
@@ -155,8 +180,9 @@ import Testing
     configuration.imageUpdates = ImageUpdatesConfig(denyTooOldRunner: true)
     try await withHarness(configuration: configuration, now: { Self.now }) { harness in
       try await harness.importLinuxImage(runnerVersion: "2.300.0")
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-90 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-90 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       do {
@@ -175,8 +201,9 @@ import Testing
   @Test func theSameImageIsAdmittedWhenDenyTooOldRunnerIsOff() async throws {
     try await withHarness(now: { Self.now }) { harness in
       try await harness.importLinuxImage(runnerVersion: "2.300.0")
-      harness.github.stubLatestRunnerRelease(
-        tag: "v2.336.0", publishedAt: Self.now.addingTimeInterval(-90 * 86_400))
+      harness.github.stubRunnerReleases([
+        ("v2.336.0", Self.now.addingTimeInterval(-90 * 86_400), false)
+      ])
       await harness.runnerVersions.refresh()
 
       let record = try await harness.instances.create(profileName: "linux")

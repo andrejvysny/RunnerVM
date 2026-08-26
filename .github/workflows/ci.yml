@@ -49,14 +49,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install shellcheck
-        run: brew install shellcheck
+      - name: Install linters
+        run: brew install shellcheck actionlint
+      - name: actionlint
+        run: actionlint
       - name: shellcheck
         run: shellcheck scripts/*.sh scripts/tests/*.sh
       - name: bash -n
         run: for f in scripts/*.sh scripts/tests/*.sh; do bash -n "$f"; done
       - name: image-builder unit test
         run: bash scripts/tests/build-ubuntu-image-test.sh
+      - name: install script unit test
+        run: bash scripts/tests/install-test.sh
       # swiftformat --lint is deliberately absent: the tree predates the .swiftformat rules
       # (≈250 files differ). Enable it in the same commit that runs `swiftformat .` once.
 
@@ -73,7 +77,10 @@ jobs:
         with:
           go-version-file: GuestAgent/go.mod
       - run: go vet ./...
-      - run: gofmt -l . | tee /dev/stderr | test -z "$(cat)"
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
       - name: go test -race
         run: go test -race -count=1 ./...
       - name: Cross-compile darwin/arm64

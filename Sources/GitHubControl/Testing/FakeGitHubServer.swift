@@ -124,6 +124,19 @@ public final class FakeGitHubServer: Sendable {
       .json("{\"tag_name\":\"\(tag)\",\"published_at\":\"\(stamp)\"}"))
   }
 
+  /// The `actions/runner` release *list* route `RunnerVersionMonitor` reads (spec §53): a single
+  /// page carrying every given release, oldest scripting need only — a test that also needs
+  /// pagination stubs the route directly with `stub(.get, GitHubRunnersAPI.runnerReleasesPath, …)`.
+  public func stubRunnerReleases(_ releases: [(tag: String, publishedAt: Date, prerelease: Bool)]) {
+    let formatter = ISO8601DateFormatter()
+    let entries = releases.map { release in
+      "{\"tag_name\":\"\(release.tag)\","
+        + "\"published_at\":\"\(formatter.string(from: release.publishedAt))\","
+        + "\"prerelease\":\(release.prerelease),\"draft\":false}"
+    }
+    stub(.get, GitHubRunnersAPI.runnerReleasesPath, .json("[\(entries.joined(separator: ","))]"))
+  }
+
   public var recorded: [Recorded] {
     state.withLock { $0.recorded }
   }

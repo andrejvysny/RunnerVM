@@ -29,7 +29,8 @@ import Testing
     baseImage: ImageMetadata.Provenance.BaseImage(
       source: "https://cloud-images.ubuntu.com/noble.img", sha256: "sha256:aa"),
     actionsRunner: ImageMetadata.Provenance.ActionsRunner(
-      version: "2.331.0", sha256: "sha256:bb", url: "https://example.invalid/runner.tar.gz"),
+      version: "2.331.0", sha256: "sha256:bb", url: "https://example.invalid/runner.tar.gz",
+      digestSource: "github-release-asset"),
     guestAgent: ImageMetadata.Provenance.GuestAgent(
       gitCommit: "3fb473c", sha256: "sha256:cc", reportedVersion: "runnervm-guest-agent v0.1.0"),
     builder: ImageMetadata.Provenance.Builder(
@@ -38,7 +39,7 @@ import Testing
     docker: ImageMetadata.Provenance.Docker(
       repository: "https://download.docker.com/linux/ubuntu noble stable", version: "5:27.3.1"),
     packageUpgrade: true, packages: ["git=1:2.43.0", "jq=1.7.1"],
-    kernelVersion: "6.8.0-51-generic", diskSHA256: "sha256:dd")
+    kernelVersion: "6.8.0-51-generic", diskSHA256: "sha256:dd", partial: false, partialReason: nil)
 
   @Test func provenanceRoundTrips() throws {
     let (encoder, decoder) = Self.coders()
@@ -47,6 +48,25 @@ import Testing
     #expect(decoded == original)
     #expect(decoded.provenance?.packages?.count == 2)
     #expect(decoded.provenance?.diskSHA256 == "sha256:dd")
+    #expect(decoded.provenance?.actionsRunner?.digestSource == "github-release-asset")
+    #expect(decoded.provenance?.partial == false)
+    #expect(decoded.provenance?.partialReason == nil)
+  }
+
+  /// A build that could not recover the guest manifest and sealed anyway only because
+  /// `--allow-partial-provenance` was passed: `partial` and `partialReason` round-trip too.
+  @Test func partialProvenanceRoundTrips() throws {
+    let (encoder, decoder) = Self.coders()
+    let partial = ImageMetadata.Provenance(
+      actionsRunner: ImageMetadata.Provenance.ActionsRunner(
+        version: "2.331.0", sha256: "sha256:bb", digestSource: "download"),
+      partial: true, partialReason: "no usable RVM-MANIFEST block in serial.log")
+    let original = Self.metadata(provenance: partial)
+    let decoded = try decoder.decode(ImageMetadata.self, from: try encoder.encode(original))
+    #expect(decoded == original)
+    #expect(decoded.provenance?.partial == true)
+    #expect(decoded.provenance?.partialReason == "no usable RVM-MANIFEST block in serial.log")
+    #expect(decoded.provenance?.actionsRunner?.digestSource == "download")
   }
 
   /// The whole reason `schemaVersion` stays at 1: a file written before provenance existed has no
@@ -99,6 +119,9 @@ import Testing
     #expect(decoded.provenance?.packages?.count == 3)
     #expect(decoded.provenance?.kernelVersion == "6.8.0-51-generic")
     #expect(decoded.provenance?.diskSHA256?.hasPrefix("sha256:") == true)
+    #expect(decoded.provenance?.actionsRunner?.digestSource == "github-release-asset")
+    #expect(decoded.provenance?.partial == false)
+    #expect(decoded.provenance?.partialReason == nil)
   }
 
   private static let sealedFixture = """
@@ -113,6 +136,7 @@ import Testing
       "os": "linux",
       "provenance": {
         "actionsRunner": {
+          "digestSource": "github-release-asset",
           "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
           "url": "https://github.com/actions/runner/releases/download/v2.331.0/actions-runner-linux-arm64-2.331.0.tar.gz",
           "version": "2.331.0"
@@ -143,7 +167,9 @@ import Testing
           "git=1:2.43.0-1ubuntu7",
           "jq=1.7.1-3build1",
           "docker-ce=5:27.3.1-1~ubuntu.24.04~noble"
-        ]
+        ],
+        "partial": false,
+        "partialReason": null
       },
       "runnerVersion": "2.331.0",
       "schemaVersion": 1,

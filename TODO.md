@@ -129,3 +129,11 @@ All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: ha
 - [x] T11 P1 external log persistence: in-process rotation, JSON sink, correlation fields, Vector/Fluent Bit example
 - [x] T12 P2 docs sync (install.md drain, README scope)
 - [x] T13 P2 dependabot (swift, gomod, actions)
+
+## Readiness review round 2 (2026-08-26) — tasks
+- [x] R2-1 `RunnerVersionPolicy`: 30-day window from the first missed release (`recentRunnerReleases`, `RunnerReleaseHistory`), regression test
+- [x] R2-2 actions/runner digest from GitHub release asset metadata (`--runner-sha256` pin > asset digest > error/`--allow-unverified-runner`); `digestSource` recorded
+- [x] R2-3 missing guest manifest fails closed (`--allow-partial-provenance` for dev; `provenance.partial`)
+- [x] R2-4 service group default `_runnervm` (refuses `staff` without `--allow-staff-group`), `scripts/tests/install-test.sh`
+- [x] R2-5 `SecureFile.ownerAndGroupRead` rejects `0o037`; `WorkerEnvironment` derives `HOME` from passwd; vsock connect closes the fd if cancelled mid-flight; `actionlint` in CI
+- [ ] R2-6 CI green on `master` — blocked 2026-08-26 by a GitHub Actions major outage (runs `startup_failure`/`queued` with zero jobs, incl. Dependabot's own runs); re-dispatch `ci.yml` when githubstatus.com reports Actions operational

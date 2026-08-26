@@ -12,15 +12,36 @@ public enum RunnerVersionHealth: String, Codable, Sendable, CaseIterable, Hashab
   case unknown
 }
 
-/// The newest published `actions/runner` release: version without the leading `v`, and when GitHub
+/// One published `actions/runner` release: version without the leading `v`, and when GitHub
 /// published it — the clock the grace window is measured from.
-public struct LatestRunnerRelease: Codable, Sendable, Equatable {
+public struct RunnerRelease: Codable, Sendable, Equatable {
   public var version: String
   public var publishedAt: Date
 
   public init(version: String, publishedAt: Date) {
     self.version = version
     self.publishedAt = publishedAt
+  }
+}
+
+/// Prior name, kept so call sites that only ever cared about "the newest release" do not have to
+/// churn.
+public typealias LatestRunnerRelease = RunnerRelease
+
+/// A bounded, newest-first window of recent `actions/runner` releases, plus the highest version
+/// among them. `RunnerVersionPolicy` needs the whole window — not just `latest` — because the
+/// 30-day grace clock is measured from the first release an image missed, not from whichever
+/// release happens to be newest today (spec §53).
+public struct RunnerReleaseHistory: Codable, Sendable, Equatable {
+  /// Newest first by `publishedAt`.
+  public var releases: [RunnerRelease]
+  /// Highest semantic version among `releases`; not necessarily `releases.first`, since GitHub
+  /// does not guarantee publication order tracks version order.
+  public var latest: RunnerRelease?
+
+  public init(releases: [RunnerRelease], latest: RunnerRelease?) {
+    self.releases = releases
+    self.latest = latest
   }
 }
 
@@ -36,25 +57,46 @@ public enum RunnerVersionPolicy {
 
   public static var graceInterval: TimeInterval { Double(graceDays) * 86_400 }
 
+  /// The grace window is measured from the *first* release the image fell behind on, not from
+  /// whatever GitHub has published most recently: a new release must never reset the clock on an
+  /// image that has already been behind for weeks.
   public static func evaluate(
-    imageVersion: String?, latest: LatestRunnerRelease?, now: Date
+    imageVersion: String?, history: RunnerReleaseHistory?, now: Date
   ) -> RunnerVersionHealth {
-    guard let latest,
+    guard let history, !history.releases.isEmpty,
           let image = SemanticVersion(imageVersion),
-          let published = SemanticVersion(latest.version)
+          let latest = history.latest.flatMap({ SemanticVersion($0.version) })
     else { return .unknown }
-    guard image < published else { return .healthy }
-    return now.timeIntervalSince(latest.publishedAt) < graceInterval ? .stale : .tooOld
+    guard image < latest else { return .healthy }
+    guard let firstMissed = firstMissedRelease(imageVersion: imageVersion, history: history)
+    else { return .healthy }
+    return now.timeIntervalSince(firstMissed.publishedAt) < graceInterval ? .stale : .tooOld
+  }
+
+  /// The oldest published release newer than `imageVersion` — the release whose publication date
+  /// the grace window is measured from. `nil` once the image is at or ahead of every known
+  /// release, or when either side fails to parse. Releases whose tag does not parse as a semantic
+  /// version are ignored rather than treated as missed.
+  public static func firstMissedRelease(
+    imageVersion: String?, history: RunnerReleaseHistory?
+  ) -> RunnerRelease? {
+    guard let history, let image = SemanticVersion(imageVersion) else { return nil }
+    return history.releases
+      .filter { release in SemanticVersion(release.version).map { image < $0 } ?? false }
+      .min { $0.publishedAt < $1.publishedAt }
   }
 }
 
 /// `major.minor.patch` with a tolerated leading `v`. Missing components count as zero, so `2.336`
 /// and `2.336.0` compare equal; anything that is not a dotted run of digits is unparsable, which
 /// the policy reports as `unknown` rather than guessing.
-struct SemanticVersion: Comparable {
+///
+/// `public`: `GitHubControl` reuses this exact comparison to pick `RunnerReleaseHistory.latest` by
+/// true version rather than by publish date, so the two modules can never disagree about ordering.
+public struct SemanticVersion: Comparable {
   let parts: [Int]
 
-  init?(_ raw: String?) {
+  public init?(_ raw: String?) {
     guard var text = raw.map({ $0.trimmingCharacters(in: .whitespaces) }), !text.isEmpty else {
       return nil
     }
@@ -71,7 +113,7 @@ struct SemanticVersion: Comparable {
     parts = parsed + Array(repeating: 0, count: 3 - parsed.count)
   }
 
-  static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+  public static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
     for (left, right) in zip(lhs.parts, rhs.parts) where left != right { return left < right }
     return false
   }

@@ -40,12 +40,16 @@ public actor RunnerVersionMonitor {
     }
   }
 
+  /// Comfortably covers the grace window: even a runner release every few days would need four
+  /// months of misses before the oldest one aged out of this cache.
+  private static let maxCachedReleases = 60
+
   private let gateway: GitHubGateway
   private let tuning: Tuning
   private let now: @Sendable () -> Date
   private let logger: Logger
 
-  private var cached: LatestRunnerRelease?
+  private var cached: RunnerReleaseHistory?
   private var nextAttemptAt: Date?
   private var failureStreak = 0
   private var lastFailure: String?
@@ -66,39 +70,39 @@ public actor RunnerVersionMonitor {
   /// The maintenance-loop entry point: refreshes only once the interval (or the failure backoff)
   /// has elapsed, so it can be called on every tick.
   @discardableResult
-  public func refreshIfDue() async -> LatestRunnerRelease? {
+  public func refreshIfDue() async -> RunnerRelease? {
     guard let due = nextAttemptAt else { return await refresh() }
-    guard now() >= due else { return cached }
+    guard now() >= due else { return cached?.latest }
     return await refresh()
   }
 
-  /// One lookup. Never throws: a missing credential or a failed call leaves the last known release
+  /// One lookup. Never throws: a missing credential or a failed call leaves the last known history
   /// in place, and every image grades `unknown` only while nothing has ever been fetched.
   @discardableResult
-  public func refresh() async -> LatestRunnerRelease? {
+  public func refresh() async -> RunnerRelease? {
     guard let api = await gateway.runnersAPI() else {
       // Not a failure: there is simply no credential to ask with. Re-checked next tick, cheaply.
       nextAttemptAt = now().addingTimeInterval(seconds(tuning.failureBackoff))
-      return cached
+      return cached?.latest
     }
     do {
-      let release = try await api.latestRunnerRelease()
-      if release != cached {
+      let history = try await api.recentRunnerReleases(limit: Self.maxCachedReleases)
+      if let latest = history.latest, latest != cached?.latest {
         logger.info(
           "latest actions/runner release",
           metadata: [
-            "version": .string(release.version),
-            "published_at": .string(ISO8601DateFormatter().string(from: release.publishedAt)),
+            "version": .string(latest.version),
+            "published_at": .string(ISO8601DateFormatter().string(from: latest.publishedAt)),
           ])
       }
-      cached = release
+      cached = history
       failureStreak = 0
       lastFailure = nil
       nextAttemptAt = now().addingTimeInterval(nextDelay())
-      return release
+      return history.latest
     } catch {
       recordFailure(error)
-      return cached
+      return cached?.latest
     }
   }
 
@@ -113,7 +117,7 @@ public actor RunnerVersionMonitor {
         "could not read the latest actions/runner release; keeping the last known value",
         metadata: [
           "error": .string(reason),
-          "known_version": .string(cached?.version ?? "-"),
+          "known_version": .string(cached?.latest?.version ?? "-"),
         ])
     }
     nextAttemptAt = now().addingTimeInterval(seconds(tuning.failureBackoff))
@@ -132,19 +136,25 @@ public actor RunnerVersionMonitor {
 
   // MARK: - Queries
 
-  public func latest() -> LatestRunnerRelease? { cached }
+  public func latest() -> RunnerRelease? { cached?.latest }
 
   public func health(for metadata: ImageMetadata) -> RunnerVersionHealth {
     health(forVersion: metadata.runnerVersion)
   }
 
   public func health(forVersion version: String?) -> RunnerVersionHealth {
-    RunnerVersionPolicy.evaluate(imageVersion: version, latest: cached, now: now())
+    RunnerVersionPolicy.evaluate(imageVersion: version, history: cached, now: now())
+  }
+
+  /// The release `version` first fell behind on, for doctor/CLI detail (e.g. "ubuntu-24 (2.330.0)
+  /// missed 2.331.0 released 45 d ago"). `nil` once the image is healthy, unknown, or ahead.
+  public func firstMissedRelease(forVersion version: String?) -> RunnerRelease? {
+    RunnerVersionPolicy.firstMissedRelease(imageVersion: version, history: cached)
   }
 
   /// `nil` once a release is known. Drives the `runner-version` doctor check's explanation.
   public func unavailable() async -> Unavailable? {
-    guard cached == nil else { return nil }
+    guard cached?.latest == nil else { return nil }
     if let lastFailure { return .lastAttemptFailed(reason: lastFailure) }
     return await gateway.runnersAPI() == nil ? .notConfigured : .notFetchedYet
   }
@@ -152,7 +162,7 @@ public actor RunnerVersionMonitor {
   /// Seconds since GitHub published the newest release, for
   /// `runnervm_runner_latest_release_age_seconds`. `nil` while nothing is known.
   public func releaseAgeSeconds() -> Double? {
-    cached.map { max(0, now().timeIntervalSince($0.publishedAt)) }
+    cached?.latest.map { max(0, now().timeIntervalSince($0.publishedAt)) }
   }
 
   private static func describe(_ error: any Error) -> String {

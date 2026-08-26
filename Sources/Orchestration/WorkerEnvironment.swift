@@ -35,6 +35,18 @@ public enum WorkerEnvironment {
     if result["PATH"] == nil {
       result["PATH"] = fallbackPath
     }
+    if result["HOME"] == nil, let home = passwdHomeDirectory() {
+      result["HOME"] = home
+    }
     return result
+  }
+
+  /// A LaunchDaemon session may start runnerd with no `HOME` at all, yet Virtualization.framework
+  /// and Security need one to find the service account's keychain. The passwd entry is the
+  /// authoritative answer for the account runnerd actually runs as.
+  static func passwdHomeDirectory(uid: uid_t = geteuid()) -> String? {
+    guard let entry = getpwuid(uid), let dir = entry.pointee.pw_dir else { return nil }
+    let home = String(cString: dir)
+    return home.isEmpty ? nil : home
   }
 }

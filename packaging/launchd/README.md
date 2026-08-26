@@ -25,15 +25,25 @@ cold reboot.
 
 ## LaunchAgent path (recommended)
 
-1. Create the dedicated service account (needs an admin):
+1. Create the dedicated service group and account (needs an admin). The group is a hidden system
+   group, never `staff` — every local macOS account is a member of `staff`, which would make
+   `<state-dir>` and its log/config files readable by every other user on the Mac (see
+   `docs/install.md`, "Dedicated service account and auto-login"):
 
    ```sh
+   # Pick a free GID in 200-400 (`dscl . -list /Groups PrimaryGroupID` should not already print it).
+   sudo dscl . -create /Groups/_runnervm
+   sudo dscl . -create /Groups/_runnervm PrimaryGroupID 250
+   sudo dscl . -create /Groups/_runnervm RealName "RunnerVM Service"
+   sudo dscl . -create /Groups/_runnervm Password "*"
+
    sudo sysadminctl -addUser _runnervm -fullName "RunnerVM Service" \
-     -password - -home /Users/_runnervm -admin off
+     -GID 250 -password - -home /Users/_runnervm -admin off
    ```
 
    (`-password -` prompts interactively; do not put the password on the command line or in shell
-   history.)
+   history.) `scripts/install.sh` checks for both and prints the equivalent commands under "manual
+   steps" whenever either is missing, so this step can also be left to the installer.
 
 2. Enable automatic login for that account: System Settings → General → Login Screen (or Users &
    Groups, depending on macOS version) → set "Automatically log in as" to `_runnervm`. This is a

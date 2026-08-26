@@ -90,7 +90,8 @@ enum Mapping {
   }
 
   static func image(
-    _ managed: ManagedImage, runnerVersionHealth: RunnerVersionHealth = .unknown
+    _ managed: ManagedImage, runnerVersionHealth: RunnerVersionHealth = .unknown,
+    firstMissed: RunnerRelease? = nil
   ) -> ImageInfoDTO {
     ImageInfoDTO(
       digest: managed.record.digest.rawValue,
@@ -107,6 +108,8 @@ enum Mapping {
       pulledAt: managed.record.pulledAt.map { RFC3339.string(from: $0.date) },
       runnerVersion: managed.record.runnerVersion,
       runnerVersionHealth: runnerVersionHealth,
+      runnerFirstMissedVersion: firstMissed?.version,
+      runnerFirstMissedPublishedAt: firstMissed.map { RFC3339.string(from: $0.publishedAt) },
       provenance: managed.metadata?.provenance.map(provenance))
   }
 

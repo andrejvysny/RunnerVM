@@ -51,10 +51,14 @@ enum Wire {
     /// RFC 3339. The grace window in `RunnerVersionPolicy` is measured from this, so a release
     /// without it cannot be judged for staleness.
     let publishedAt: String?
+    /// Both default to "not draft/prerelease" when GitHub omits them, matching its own docs.
+    let draft: Bool?
+    let prerelease: Bool?
 
     private enum CodingKeys: String, CodingKey {
       case tagName = "tag_name"
       case publishedAt = "published_at"
+      case draft, prerelease
     }
   }
 

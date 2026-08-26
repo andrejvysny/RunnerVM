@@ -17,14 +17,14 @@ public enum SecureFile {
     /// No group or other bits at all — required for anything that is itself a bearer secret (a
     /// PAT, a private key).
     case ownerOnly
-    /// Group-readable is tolerated; group/other write and other-read are not — for a descriptor
-    /// that names other files rather than carrying a secret itself.
+    /// Group-read is tolerated; group write/execute and every "other" bit are not — for a
+    /// descriptor that names other files rather than carrying a secret itself.
     case ownerAndGroupRead
 
     fileprivate var disallowedBits: mode_t {
       switch self {
       case .ownerOnly: 0o077
-      case .ownerAndGroupRead: 0o027
+      case .ownerAndGroupRead: 0o037
       }
     }
 

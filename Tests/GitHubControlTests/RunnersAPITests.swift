@@ -237,6 +237,93 @@ struct GitHubRunnersAPITests {
     }
   }
 
+  // MARK: - Recent runner releases (spec §53): the freshness policy's grading window
+
+  @Test func recentRunnerReleasesReadsTheListEndpoint() async throws {
+    try await withHarness { harness in
+      let published = Date(timeIntervalSince1970: 1_730_745_600)
+      harness.server.stubRunnerReleases([("v2.336.0", published, false)])
+
+      let history = try await harness.api.recentRunnerReleases()
+
+      #expect(history.releases.map(\.version) == ["2.336.0"])
+      #expect(history.latest?.version == "2.336.0")
+      #expect(history.latest?.publishedAt == published)
+      let recorded = try #require(
+        harness.server.requests(.get, GitHubRunnersAPI.runnerReleasesPath).first)
+      #expect(recorded.query["per_page"] == "100")
+    }
+  }
+
+  /// Drafts and prereleases must never count as something an image "missed" — GitHub has not
+  /// actually shipped them yet.
+  @Test func recentRunnerReleasesSkipsDraftsAndPrereleases() async throws {
+    try await withHarness { harness in
+      harness.server.stub(
+        .get, GitHubRunnersAPI.runnerReleasesPath,
+        .json(
+          "["
+            + "{\"tag_name\":\"v2.338.0\",\"published_at\":\"2024-11-05T00:00:00Z\",\"draft\":true},"
+            + "{\"tag_name\":\"v2.337.0\",\"published_at\":\"2024-11-04T00:00:00Z\",\"prerelease\":true},"
+            + "{\"tag_name\":\"v2.336.0\",\"published_at\":\"2024-11-03T00:00:00Z\"}"
+            + "]")
+      )
+      let history = try await harness.api.recentRunnerReleases()
+      #expect(history.releases.map(\.version) == ["2.336.0"])
+    }
+  }
+
+  /// A release missing `published_at` is dropped rather than failing the whole page: one bad
+  /// historical entry must not blind the freshness check to every release around it.
+  @Test func recentRunnerReleasesDropsReleasesWithoutAPublicationDate() async throws {
+    try await withHarness { harness in
+      harness.server.stub(
+        .get, GitHubRunnersAPI.runnerReleasesPath,
+        .json(
+          "["
+            + "{\"tag_name\":\"v2.337.0\"},"
+            + "{\"tag_name\":\"v2.336.0\",\"published_at\":\"2024-11-03T00:00:00Z\"}"
+            + "]")
+      )
+      let history = try await harness.api.recentRunnerReleases()
+      #expect(history.releases.map(\.version) == ["2.336.0"])
+    }
+  }
+
+  /// `latest` is the highest semantic version, not `releases.first`: GitHub does not guarantee
+  /// release order tracks version order.
+  @Test func recentRunnerReleasesPicksTheHighestVersionAsLatest() async throws {
+    try await withHarness { harness in
+      harness.server.stubRunnerReleases([
+        ("v2.336.0", Date(timeIntervalSince1970: 1_730_745_600), false),
+        ("v2.330.1", Date(timeIntervalSince1970: 1_731_000_000), false),
+      ])
+      let history = try await harness.api.recentRunnerReleases()
+      #expect(history.latest?.version == "2.336.0")
+    }
+  }
+
+  /// Follows `Link: rel="next"` and stops once `limit` releases are collected, without touching a
+  /// page beyond what is needed.
+  @Test func recentRunnerReleasesPaginatesUntilTheLimitIsCollected() async throws {
+    try await withHarness { harness in
+      let path = GitHubRunnersAPI.runnerReleasesPath
+      let nextLink = "\(harness.server.baseURL)\(path)?per_page=100&page=2"
+      harness.server.stub(
+        .get, path,
+        .json(
+          "[{\"tag_name\":\"v2.336.0\",\"published_at\":\"2024-11-04T00:00:00Z\"}]",
+          headers: ["Link": "<\(nextLink)>; rel=\"next\""]),
+        .json("[{\"tag_name\":\"v2.335.0\",\"published_at\":\"2024-11-03T00:00:00Z\"}]")
+      )
+
+      let history = try await harness.api.recentRunnerReleases(limit: 2)
+
+      #expect(history.releases.map(\.version) == ["2.336.0", "2.335.0"])
+      #expect(harness.server.requests(.get, path).count == 2)
+    }
+  }
+
   // MARK: - Scope health (spec §134, §135, §148)
 
   @Test func healthyScopeReportsNoProblems() async throws {

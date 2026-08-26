@@ -28,11 +28,20 @@ extension ImageMetadata {
       /// `sha256:<hex>` of the release tarball, verified inside the guest before extraction.
       public var sha256: String?
       public var url: String?
+      /// How `sha256` was established: `"operator"` (an explicit `--runner-sha256` pin),
+      /// `"github-release-asset"` (GitHub's own release asset digest metadata -- the default
+      /// trust anchor), or `"download"` (only the host's own download hash, recorded when
+      /// `--allow-unverified-runner` was needed because GitHub had no digest for the asset).
+      public var digestSource: String?
 
-      public init(version: String? = nil, sha256: String? = nil, url: String? = nil) {
+      public init(
+        version: String? = nil, sha256: String? = nil, url: String? = nil,
+        digestSource: String? = nil
+      ) {
         self.version = version
         self.sha256 = sha256
         self.url = url
+        self.digestSource = digestSource
       }
     }
 
@@ -105,12 +114,18 @@ extension ImageMetadata {
     /// Two hosts that seal byte-identical disks and byte-identical metadata therefore get the same
     /// image digest.
     public var diskSHA256: String?
+    /// True when this build could not recover the guest's `RVM-MANIFEST` block (or the block
+    /// decoded with no `packages`) and sealed anyway only because `--allow-partial-provenance`
+    /// was passed. Absent or `false` means the build failed closed instead of a silent gap.
+    public var partial: Bool?
+    /// Why `partial` is true, e.g. "no usable RVM-MANIFEST block in serial.log".
+    public var partialReason: String?
 
     public init(
       baseImage: BaseImage? = nil, actionsRunner: ActionsRunner? = nil,
       guestAgent: GuestAgent? = nil, builder: Builder? = nil, docker: Docker? = nil,
       packageUpgrade: Bool? = nil, packages: [String]? = nil, kernelVersion: String? = nil,
-      diskSHA256: String? = nil
+      diskSHA256: String? = nil, partial: Bool? = nil, partialReason: String? = nil
     ) {
       self.baseImage = baseImage
       self.actionsRunner = actionsRunner
@@ -121,6 +136,8 @@ extension ImageMetadata {
       self.packages = packages
       self.kernelVersion = kernelVersion
       self.diskSHA256 = diskSHA256
+      self.partial = partial
+      self.partialReason = partialReason
     }
   }
 }

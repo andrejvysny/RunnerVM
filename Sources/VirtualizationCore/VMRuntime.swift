@@ -111,11 +111,18 @@ public final class VMRuntime {
       throw VMRuntimeError.noSocketDevice
     }
     try Task.checkCancellation()
-    return try await withCheckedThrowingContinuation { continuation in
+    let descriptor: CInt = try await withCheckedThrowingContinuation { continuation in
       device.connect(toPort: port) { result in
         continuation.resume(with: result.flatMap(Self.duplicateDescriptor))
       }
     }
+    // The framework call itself cannot be cancelled; if the task was cancelled while it was in
+    // flight, nobody is left to own the descriptor, so close it instead of leaking it.
+    guard !Task.isCancelled else {
+      close(descriptor)
+      throw CancellationError()
+    }
+    return descriptor
   }
 
   /// Runs inside the framework callback; `connection` is released when the callback returns.

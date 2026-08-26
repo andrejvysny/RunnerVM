@@ -43,6 +43,16 @@ struct SecureFileTests {
     }
   }
 
+  @Test func groupExecuteIsRejectedUnderOwnerAndGroupRead() async throws {
+    try await withFile(mode: 0o650) { url in
+      #expect(throws: GitHubControlError.self) {
+        try SecureFile.read(
+          path: url.path(percentEncoded: false), label: "test file", policy: .ownerAndGroupRead
+        )
+      }
+    }
+  }
+
   @Test func worldReadableIsRejectedUnderBothPolicies() async throws {
     try await withFile(mode: 0o644) { url in
       for policy: SecureFile.Policy in [.ownerOnly, .ownerAndGroupRead] {

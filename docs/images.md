@@ -60,7 +60,8 @@ qcow2; convert them first — this host has no `qemu-img`, so M0 used
 | `--allow-unverified-base` | off | build from an unverified base image; logs a loud warning and records the observed digest |
 | `--out <dir>` | — | where the sealed image lands (required except with `--print-seed`) |
 | `--runner-version <v>` | `latest` | actions/runner version; `latest` is resolved **on the host** (`gh api`, else the REST API) and only the resolved version ever reaches the guest |
-| `--runner-sha256 <hex>` | — | pin the runner tarball; the build fails if the host's download hashes differently |
+| `--runner-sha256 <hex>` | — | pin the runner tarball digest as the operator; must agree with GitHub's release asset digest when one exists, or the build stops (see [Verifiability and provenance](#verifiability-and-provenance)) |
+| `--allow-unverified-runner` | off | when GitHub's release asset has no digest and no `--runner-sha256` was given, trust the host's own download hash instead of refusing; logs a loud warning and records `digestSource: "download"` |
 | `--package-upgrade yes\|no` | `yes` | run a full `apt upgrade`; recorded in the manifest either way |
 | `--docker-suite <name>` | `noble` | suite in the Docker apt repository line |
 | `--guest-agent <path>` | — | use a prebuilt linux/arm64 guest agent instead of running `make -C GuestAgent build-linux` |
@@ -71,6 +72,12 @@ qcow2; convert them first — this host has no `qemu-img`, so M0 used
 | `--socket-dir <dir>` | `/tmp/rvm-build-<id>` | vmworker socket directory — keep it short, `AF_UNIX` paths cap at 104 bytes |
 | `--no-sudo` | off | do not grant the `runner` account passwordless sudo |
 | `--keep-build-dir` | off | keep `<out>/.build/<uuid>/` (builder disk, seed, serial.log, worker.log) |
+| `--allow-partial-provenance` | off | seal the image even if the guest's `RVM-MANIFEST` block could not be recovered from `serial.log`; logs a loud warning and records `provenance.partial: true` |
+
+`--allow-unverified-runner` and `--allow-partial-provenance` exist for recovering a
+broken build environment, not for routine use. **Production builds must not pass
+either flag** — an image sealed with one is only as trustworthy as the operator
+who ran the build, not as GitHub's or the guest's own attestations.
 
 `VMWORKER` overrides the vmworker path; `BUILD_TIMEOUT_MIN` (default 40) bounds
 the guest run; `RUNNERVM_BUILD_CACHE` (default `~/.cache/runnervm-build`) is
@@ -143,11 +150,43 @@ Nothing enters the guest unpinned. Before the builder VM starts, the host:
 2. resolves `--runner-version latest` to a concrete release **on the host** —
    the string `latest` never reaches the guest, so two builds a week apart can
    never silently disagree about what "the runner" is,
-3. downloads that release tarball itself and computes its sha256; `--runner-sha256`,
-   when given, must match or the build stops,
-4. renders the runner URL *and* its expected digest into the cloud-init
-   user-data, where the guest re-checks it with `sha256sum -c` before extracting
-   anything.
+3. resolves the *expected* sha256 of that release's arm64 tarball from
+   **GitHub's own release asset metadata** (`GET
+   repos/actions/runner/releases/tags/v<version>`, `assets[].digest`) — this is
+   the trust anchor, not a hash of whatever an unauthenticated first download
+   happens to contain,
+4. downloads the tarball itself and verifies it against that digest *before*
+   anything is rendered into cloud-init — a mismatch stops the build outright,
+5. renders the runner URL *and* the verified digest into the cloud-init
+   user-data, where the guest re-checks the same digest with `sha256sum -c`
+   before extracting anything.
+
+### Runner digest precedence and the two escape hatches
+
+`--runner-sha256 <hex>` pins the digest as the operator. Precedence is strict
+and never silent:
+
+* no pin: the GitHub release asset digest is trusted, recorded as
+  `provenance.actionsRunner.digestSource: "github-release-asset"`.
+* a pin that **agrees** with the release asset digest: the operator's pin
+  wins, recorded as `digestSource: "operator"`.
+* a pin that **disagrees** with the release asset digest: hard error. The
+  build refuses to guess which one is right.
+* no pin, and GitHub has no digest for that asset (rare, but the API does not
+  guarantee one for every release): the build refuses unless
+  `--allow-unverified-runner` is passed, in which case it falls back to
+  hashing its own download and records `digestSource: "download"`.
+
+Similarly, a build whose guest never produced a usable `RVM-MANIFEST` block
+(see below) fails closed — non-zero exit, the `serial.log` path, and a hint —
+unless `--allow-partial-provenance` is passed, in which case it seals anyway
+with `provenance.partial: true` and `provenance.partialReason` set.
+
+**Neither `--allow-unverified-runner` nor `--allow-partial-provenance` belongs
+in a production build.** They exist to get an operator unstuck (GitHub's API
+unreachable, a genuinely digest-less release, a guest that crashed before
+emitting its manifest) and are loud and recorded precisely so a sealed image
+that used one is never mistaken for a fully-verified one.
 
 ### The guest manifest
 
@@ -171,9 +210,11 @@ decodes it:
 ```
 
 `packages` is `dpkg-query -W -f='${Package}=${Version}'` from the sealed
-filesystem — the list a rebuild is diffed against. A build whose console never
-produced a usable block still seals: the script warns loudly and writes
-`metadata.json` with `provenance.packages: null`.
+filesystem — the list a rebuild is diffed against. **A build whose console never
+produced a usable block, or whose block decoded with no `packages`, fails
+closed**: non-zero exit, unless `--allow-partial-provenance` was passed, in
+which case it seals with `provenance.packages: null`, `provenance.partial:
+true` and `provenance.partialReason` explaining why.
 
 ### The sealed `metadata.json`
 
@@ -202,7 +243,8 @@ decodes (`ImageMetadata.Provenance`, `Sources/RunnerCore/Models/ImageProvenance.
     "actionsRunner": {
       "version": "2.331.0",
       "sha256": "sha256:1111…",
-      "url": "https://github.com/actions/runner/releases/download/v2.331.0/actions-runner-linux-arm64-2.331.0.tar.gz"
+      "url": "https://github.com/actions/runner/releases/download/v2.331.0/actions-runner-linux-arm64-2.331.0.tar.gz",
+      "digestSource": "github-release-asset"
     },
     "guestAgent": {
       "gitCommit": "3fb473c50107af5909c377dd581e9ff8915b557c",
@@ -222,10 +264,20 @@ decodes (`ImageMetadata.Provenance`, `Sources/RunnerCore/Models/ImageProvenance.
     "packageUpgrade": true,
     "packages": ["git=1:2.43.0-1ubuntu7", "…"],
     "kernelVersion": "6.8.0-51-generic",
-    "diskSHA256": "sha256:3333…"
+    "diskSHA256": "sha256:3333…",
+    "partial": false,
+    "partialReason": null
   }
 }
 ```
+
+`provenance.actionsRunner.digestSource` is `"github-release-asset"`, `"operator"`
+or `"download"` — see [Runner digest precedence](#runner-digest-precedence-and-the-two-escape-hatches)
+above. `provenance.partial` is `true` only when `--allow-partial-provenance` was
+needed to seal despite a missing or incomplete guest manifest, with
+`provenance.partialReason` explaining why; both are absent (decode as `nil`/`false`)
+on a normal, fully-verified build, and on any `metadata.json` sealed before these
+fields existed.
 
 `provenance.diskSHA256` is the **content identity the local image digest is
 derived from**: `ImageStore` hashes `disk.img` into the `disk` layer digest, and
@@ -318,13 +370,15 @@ automatically any more (cloud-init is disabled): the host must call
 ## Runner software freshness (spec §53)
 
 The `runnerVersion` sealed into `metadata.json` is graded every six hours against
-the newest published `actions/runner` release:
+a recent window (up to 60) of published `actions/runner` releases. The 30-day
+grace clock starts at the **first** release the image missed, not the newest
+one GitHub has since published — a later release does not reset the clock:
 
 | health    | meaning                                                        |
 | --------- | -------------------------------------------------------------- |
 | `healthy` | at or ahead of the latest release                                |
-| `stale`   | behind, but the release is under 30 days old                     |
-| `tooOld`  | behind, and the release is 30+ days old — GitHub stops giving such a runner work |
+| `stale`   | behind, but the first release it missed is under 30 days old     |
+| `tooOld`  | behind, and the first release it missed is 30+ days old — GitHub stops giving such a runner work |
 | `unknown` | the image records no `runnerVersion`, or GitHub has not been read yet |
 
 `runnerctl image list` shows it in the `RUNNER` column (`2.336.0 (stale)`),
@@ -436,6 +490,12 @@ and dumps the tail of `serial.log`. Re-run with `--keep-build-dir` to hold on to
 the builder disk, the seed and the full log. Inside the guest every provisioning
 step is one `set -x` line from `/usr/local/sbin/runnervm-build.sh`, so the last
 line before the failure is the command that failed.
+
+A build that *does* reach `RUNNERVM-BUILD-OK` can still fail afterwards, at
+sealing: if the host cannot recover a usable `RVM-MANIFEST` block from
+`serial.log`, it exits non-zero with the log path and a hint rather than
+sealing an image with unknown provenance (pass `--allow-partial-provenance` to
+override, see [Verifiability and provenance](#verifiability-and-provenance)).
 
 `--print-seed` renders the exact cloud-init user-data a build would use without
 launching anything, which settles most "is the guest getting what I think it is"

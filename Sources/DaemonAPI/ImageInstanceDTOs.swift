@@ -26,6 +26,12 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
   /// That version graded against the newest published release (spec §53). `unknown` whenever the
   /// image or the daemon cannot answer, never an error.
   public var runnerVersionHealth: RunnerVersionHealth
+  /// The release `runnerVersion` first fell behind on — what the 30-day grace window in
+  /// `runnerVersionHealth` is measured from. `nil` unless `runnerVersionHealth` is `stale` or
+  /// `tooOld`.
+  public var runnerFirstMissedVersion: String?
+  /// RFC 3339. Publication date of `runnerFirstMissedVersion`.
+  public var runnerFirstMissedPublishedAt: String?
   /// Build provenance, when the image was sealed with any; `nil` for images built before
   /// provenance existed or imported without their `metadata.json`.
   public var provenance: ImageProvenanceSummaryDTO?
@@ -35,6 +41,7 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     virtualSizeBytes: UInt64, allocatedSizeBytes: UInt64, localPath: String, pinCount: Int,
     createdAt: String, canonicalReference: String? = nil, pulledAt: String? = nil,
     runnerVersion: String? = nil, runnerVersionHealth: RunnerVersionHealth = .unknown,
+    runnerFirstMissedVersion: String? = nil, runnerFirstMissedPublishedAt: String? = nil,
     provenance: ImageProvenanceSummaryDTO? = nil
   ) {
     self.digest = digest
@@ -51,6 +58,8 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     self.pulledAt = pulledAt
     self.runnerVersion = runnerVersion
     self.runnerVersionHealth = runnerVersionHealth
+    self.runnerFirstMissedVersion = runnerFirstMissedVersion
+    self.runnerFirstMissedPublishedAt = runnerFirstMissedPublishedAt
     self.provenance = provenance
   }
 }

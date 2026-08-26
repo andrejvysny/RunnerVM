@@ -32,6 +32,12 @@ import Testing
   /// GitHub credential set in the parent's actual environment, and asserts the secret never
   /// reaches the child's environment -- exercising the allowlist through `posix_spawn` itself,
   /// not just the pure `build` function.
+  @Test func missingHOMEFallsBackToThePasswdEntry() {
+    let result = WorkerEnvironment.build(from: ["PATH": "/bin"])
+    #expect(result["HOME"] == WorkerEnvironment.passwdHomeDirectory())
+    #expect(result["HOME"]?.isEmpty == false)
+  }
+
   @Test func realSpawnNeverForwardsSecretsToTheWorkerProcess() async throws {
     setenv("RUNNERVM_GITHUB_TOKEN", "very-secret", 1)
     defer { unsetenv("RUNNERVM_GITHUB_TOKEN") }

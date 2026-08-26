@@ -132,8 +132,20 @@ extension DoctorChecks {
   private static func names(_ images: [ImageInfoDTO], health: RunnerVersionHealth) -> String {
     images
       .filter { $0.runnerVersionHealth == health }
-      .map { $0.name ?? Format.shortDigest($0.digest) }
+      .map(describe)
       .joined(separator: ", ")
+  }
+
+  /// `ubuntu-24 (2.330.0) missed 2.331.0 released 45 d ago` when the daemon knows which release
+  /// the image first fell behind on; just the label and version otherwise.
+  private static func describe(_ image: ImageInfoDTO) -> String {
+    let label = image.name ?? Format.shortDigest(image.digest)
+    guard let version = image.runnerVersion, !version.isEmpty else { return label }
+    guard let missed = image.runnerFirstMissedVersion,
+          let publishedAt = image.runnerFirstMissedPublishedAt.flatMap(RFC3339.date)
+    else { return "\(label) (\(version))" }
+    let daysAgo = max(0, Int(Date().timeIntervalSince(publishedAt) / 86_400))
+    return "\(label) (\(version)) missed \(missed) released \(daysAgo) d ago"
   }
 
   private static func unknownReason(_ images: [ImageInfoDTO], authState: String?) -> String {

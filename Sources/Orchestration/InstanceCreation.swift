@@ -86,10 +86,12 @@ extension InstanceManager {
     let imageVersion = image.metadata.runnerVersion
     guard (configuration?.imageUpdates ?? ImageUpdatesConfig()).denyTooOldRunner else {
       guard warnedRunnerTooOld.insert(digest).inserted else { return }
+      let missed = await runnerVersions.firstMissedRelease(forVersion: imageVersion)
       logger.warning(
         "image runner software is past GitHub's update window",
         metadata: .context(imageDigest: digest).merging([
           "runner_version": .string(imageVersion ?? "-"), "latest_version": .string(latest),
+          "first_missed_version": .string(missed?.version ?? "-"),
         ]) { $1 })
       return
     }
