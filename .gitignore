@@ -1,0 +1,9 @@
+.build/
+*.xcodeproj
+*.xcworkspace
+.swiftpm/
+DerivedData/
+GuestAgent/bin/
+*.img
+*.iso
+.DS_Store
