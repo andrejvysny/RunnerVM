@@ -1,4 +1,5 @@
 import Foundation
+import RunnerCore
 
 // MARK: - image.*
 
@@ -19,11 +20,22 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
   public var createdAt: String
   /// When the image finished pulling or importing; `nil` while it is still `pulling`.
   public var pulledAt: String?
+  /// `actions/runner` version baked into the image; `nil` when the image carries no metadata for
+  /// it (a raw `image import` synthesises metadata and cannot know).
+  public var runnerVersion: String?
+  /// That version graded against the newest published release (spec §53). `unknown` whenever the
+  /// image or the daemon cannot answer, never an error.
+  public var runnerVersionHealth: RunnerVersionHealth
+  /// Build provenance, when the image was sealed with any; `nil` for images built before
+  /// provenance existed or imported without their `metadata.json`.
+  public var provenance: ImageProvenanceSummaryDTO?
 
   public init(
     digest: String, name: String?, os: String, architecture: String, state: String,
     virtualSizeBytes: UInt64, allocatedSizeBytes: UInt64, localPath: String, pinCount: Int,
-    createdAt: String, canonicalReference: String? = nil, pulledAt: String? = nil
+    createdAt: String, canonicalReference: String? = nil, pulledAt: String? = nil,
+    runnerVersion: String? = nil, runnerVersionHealth: RunnerVersionHealth = .unknown,
+    provenance: ImageProvenanceSummaryDTO? = nil
   ) {
     self.digest = digest
     self.name = name
@@ -37,6 +49,44 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     self.pinCount = pinCount
     self.createdAt = createdAt
     self.pulledAt = pulledAt
+    self.runnerVersion = runnerVersion
+    self.runnerVersionHealth = runnerVersionHealth
+    self.provenance = provenance
+  }
+}
+
+/// The readable part of `ImageMetadata.Provenance`. Deliberately a summary: the full package
+/// manifest runs to hundreds of entries and belongs in `metadata.json`, not in every `image list`.
+public struct ImageProvenanceSummaryDTO: Codable, Sendable, Hashable {
+  public var baseImageSource: String?
+  public var baseImageSHA256: String?
+  public var runnerSHA256: String?
+  public var guestAgentCommit: String?
+  public var dockerVersion: String?
+  public var kernelVersion: String?
+  public var packageUpgrade: Bool?
+  public var packageCount: Int?
+  public var diskSHA256: String?
+  public var builtAt: String?
+  public var builderCommit: String?
+
+  public init(
+    baseImageSource: String? = nil, baseImageSHA256: String? = nil, runnerSHA256: String? = nil,
+    guestAgentCommit: String? = nil, dockerVersion: String? = nil, kernelVersion: String? = nil,
+    packageUpgrade: Bool? = nil, packageCount: Int? = nil, diskSHA256: String? = nil,
+    builtAt: String? = nil, builderCommit: String? = nil
+  ) {
+    self.baseImageSource = baseImageSource
+    self.baseImageSHA256 = baseImageSHA256
+    self.runnerSHA256 = runnerSHA256
+    self.guestAgentCommit = guestAgentCommit
+    self.dockerVersion = dockerVersion
+    self.kernelVersion = kernelVersion
+    self.packageUpgrade = packageUpgrade
+    self.packageCount = packageCount
+    self.diskSHA256 = diskSHA256
+    self.builtAt = builtAt
+    self.builderCommit = builderCommit
   }
 }
 
@@ -55,12 +105,20 @@ public struct ImageImportRequest: Codable, Sendable, Hashable {
   /// `GuestOS` raw value.
   public var os: String
   public var name: String?
+  /// Explicit sealed `metadata.json` to adopt. When `nil` the daemon looks for one next to
+  /// `path`; naming a file that does not exist, or one that describes a different guest OS, is an
+  /// error rather than a silent fallback.
+  public var metadataPath: String?
 
-  public init(path: String, nvramPath: String? = nil, os: String, name: String? = nil) {
+  public init(
+    path: String, nvramPath: String? = nil, os: String, name: String? = nil,
+    metadataPath: String? = nil
+  ) {
     self.path = path
     self.nvramPath = nvramPath
     self.os = os
     self.name = name
+    self.metadataPath = metadataPath
   }
 }
 

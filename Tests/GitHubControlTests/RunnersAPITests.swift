@@ -195,9 +195,45 @@ struct GitHubRunnersAPITests {
   @Test func stripsTheVFromTheLatestRunnerRelease() async throws {
     try await withHarness { harness in
       harness.server.stub(
-        .get, "/repos/actions/runner/releases/latest", .json("{\"tag_name\":\"v2.319.1\"}")
+        .get, GitHubRunnersAPI.latestReleasePath,
+        .json("{\"tag_name\":\"v2.319.1\",\"published_at\":\"2024-11-04T18:00:00Z\"}")
       )
       try #expect(try await harness.api.latestRunnerVersion() == "2.319.1")
+    }
+  }
+
+  /// The publication date is what the 30-day staleness window is measured from (spec §53), so it
+  /// is decoded, not skipped.
+  @Test func readsThePublicationDateOfTheLatestRunnerRelease() async throws {
+    try await withHarness { harness in
+      let published = Date(timeIntervalSince1970: 1_730_745_600)
+      harness.server.stubLatestRunnerRelease(tag: "v2.336.0", publishedAt: published)
+      let release = try await harness.api.latestRunnerRelease()
+      #expect(release.version == "2.336.0")
+      #expect(release.publishedAt == published)
+    }
+  }
+
+  @Test func acceptsAFractionalSecondsPublicationTimestamp() async throws {
+    try await withHarness { harness in
+      harness.server.stub(
+        .get, GitHubRunnersAPI.latestReleasePath,
+        .json("{\"tag_name\":\"2.336.0\",\"published_at\":\"2024-11-04T18:00:00.123Z\"}")
+      )
+      try #expect(try await harness.api.latestRunnerRelease().version == "2.336.0")
+    }
+  }
+
+  /// Without a usable timestamp the release cannot be graded at all, so this is an invalid
+  /// response rather than a release with an invented date.
+  @Test func aReleaseWithoutAPublicationDateIsRejected() async throws {
+    try await withHarness { harness in
+      harness.server.stub(
+        .get, GitHubRunnersAPI.latestReleasePath, .json("{\"tag_name\":\"v2.336.0\"}")
+      )
+      await #expect(throws: GitHubControlError.self) {
+        try await harness.api.latestRunnerRelease()
+      }
     }
   }
 

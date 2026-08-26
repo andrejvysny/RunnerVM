@@ -26,17 +26,25 @@ user-data (cloud-config)  ─┘   (ISO9660, label cidata)       │ poweroff
 swift build
 scripts/sign-dev.sh
 
-# 2. build
+# 2. build -- every downloaded input is pinned and checksum-verified
 scripts/build-ubuntu-image.sh \
   --base /path/to/ubuntu-24.04-server-cloudimg-arm64.raw \
+  --base-sha256 <sha256 of that file> \
   --out  /path/to/out \
   --disk-gib 12
 
-# 3. import + boot
+# 3. import + boot (the sealed metadata.json next to disk.img is adopted)
 runnerctl image import /path/to/out/disk.img \
   --nvram /path/to/out/nvram.bin --os linux --name ubuntu-24
+runnerctl image inspect ubuntu-24     # shows the provenance summary
 runnerctl vm create --profile ubuntu-24
 ```
+
+The build refuses to start without `--base-sha256` unless you pass
+`--allow-unverified-base`, which is recorded as such in the sealed metadata. A
+`--print-seed` run resolves every input and renders the cloud-init user-data
+without launching anything, which is the cheapest way to see what a build would
+actually do.
 
 The base image must be a **raw** disk (GPT + EFI). Ubuntu ships `.img` files in
 qcow2; convert them first — this host has no `qemu-img`, so M0 used
@@ -46,9 +54,17 @@ qcow2; convert them first — this host has no `qemu-img`, so M0 used
 
 | flag | default | meaning |
 | --- | --- | --- |
-| `--base <path>` | — | raw Ubuntu 24.04 arm64 cloud disk (required, never modified) |
-| `--out <dir>` | — | where the sealed image lands (required) |
-| `--runner-version <v>` | `latest` | actions/runner version; `latest` is resolved on the host via the GitHub API and pinned into the guest's user-data |
+| `--base <path>` | — | raw Ubuntu 24.04 arm64 cloud disk (never modified); required unless `--base-url` |
+| `--base-url <url>` | — | download the base image into the cache instead of using a local file; requires `--base-sha256` |
+| `--base-sha256 <hex>` | — | expected sha256 of the base image, verified before anything else runs |
+| `--allow-unverified-base` | off | build from an unverified base image; logs a loud warning and records the observed digest |
+| `--out <dir>` | — | where the sealed image lands (required except with `--print-seed`) |
+| `--runner-version <v>` | `latest` | actions/runner version; `latest` is resolved **on the host** (`gh api`, else the REST API) and only the resolved version ever reaches the guest |
+| `--runner-sha256 <hex>` | — | pin the runner tarball; the build fails if the host's download hashes differently |
+| `--package-upgrade yes\|no` | `yes` | run a full `apt upgrade`; recorded in the manifest either way |
+| `--docker-suite <name>` | `noble` | suite in the Docker apt repository line |
+| `--guest-agent <path>` | — | use a prebuilt linux/arm64 guest agent instead of running `make -C GuestAgent build-linux` |
+| `--print-seed` | off | resolve every input, render the user-data, print both, exit without launching a VM |
 | `--disk-gib <n>` | `16` | virtual size of the built image; cloud-init `growpart` grows the root partition to fill it |
 | `--cpus <n>` | `4` | builder VM vCPUs |
 | `--memory-gib <n>` | `4` | builder VM memory |
@@ -57,16 +73,19 @@ qcow2; convert them first — this host has no `qemu-img`, so M0 used
 | `--keep-build-dir` | off | keep `<out>/.build/<uuid>/` (builder disk, seed, serial.log, worker.log) |
 
 `VMWORKER` overrides the vmworker path; `BUILD_TIMEOUT_MIN` (default 40) bounds
-the guest run.
+the guest run; `RUNNERVM_BUILD_CACHE` (default `~/.cache/runnervm-build`) is
+where downloaded base images and runner tarballs are kept between builds.
 
 ## What the image contains
 
 Baseline packages (spec §18): `git curl wget ca-certificates jq tar gzip
 xz-utils zstd unzip zip rsync openssh-server build-essential python3
 python3-pip pipx dnsutils iproute2 netcat-openbsd cloud-guest-utils`, plus a
-full `apt upgrade`.
+full `apt upgrade` unless `--package-upgrade no`. The exact versions that landed
+are recorded in `metadata.json` under `provenance.packages`.
 
-* **Docker Engine** from the official Docker apt repository (`noble`, arm64):
+* **Docker Engine** from the official Docker apt repository (`--docker-suite`,
+  default `noble`, arm64):
   `docker-ce docker-ce-cli containerd.io docker-buildx-plugin
   docker-compose-plugin`, enabled at boot (spec §19).
 * **GitHub Actions runner** in `/opt/actions-runner`, owned by `runner`, with
@@ -111,7 +130,163 @@ Inside the guest, before poweroff:
   emptied, then `fstrim -av` so the sparse file stays small
 
 On the host the script then moves `disk.img`/`nvram.bin` into `<out>`, copies the
-build's `serial.log` to `<out>/build-serial.log`, and writes `metadata.json`.
+build's `serial.log` to `<out>/build-serial.log` and the decoded guest manifest
+to `<out>/build-manifest.json`, hashes the sealed disk, and writes
+`metadata.json`.
+
+## Verifiability and provenance
+
+Nothing enters the guest unpinned. Before the builder VM starts, the host:
+
+1. verifies the base image against `--base-sha256` (or refuses, unless
+   `--allow-unverified-base`),
+2. resolves `--runner-version latest` to a concrete release **on the host** —
+   the string `latest` never reaches the guest, so two builds a week apart can
+   never silently disagree about what "the runner" is,
+3. downloads that release tarball itself and computes its sha256; `--runner-sha256`,
+   when given, must match or the build stops,
+4. renders the runner URL *and* its expected digest into the cloud-init
+   user-data, where the guest re-checks it with `sha256sum -c` before extracting
+   anything.
+
+### The guest manifest
+
+Just before sealing, the guest emits a base64-encoded JSON blob on the console
+between `RVM-MANIFEST-BEGIN` / `RVM-MANIFEST-END` markers, with `set -x` off so
+no trace line can imitate a marker. The host takes the last complete pair out of
+`serial.log`, keeps only base64-alphabet lines (kernel messages interleave), and
+decodes it:
+
+```json
+{
+  "runnerVersion": "2.331.0",
+  "runnerSHA256": "…",
+  "dockerVersion": "5:27.3.1-1~ubuntu.24.04~noble",
+  "dockerRepository": "https://download.docker.com/linux/ubuntu noble stable",
+  "kernelVersion": "6.8.0-51-generic",
+  "guestAgentVersion": "runnervm-guest-agent v0.1.0 (linux/arm64)",
+  "guestAgentSHA256": "…",
+  "packages": ["adduser=3.137ubuntu1", "…"]
+}
+```
+
+`packages` is `dpkg-query -W -f='${Package}=${Version}'` from the sealed
+filesystem — the list a rebuild is diffed against. A build whose console never
+produced a usable block still seals: the script warns loudly and writes
+`metadata.json` with `provenance.packages: null`.
+
+### The sealed `metadata.json`
+
+`schemaVersion` stays **1**. `provenance` is a new optional object and every
+field inside it is optional, so an image sealed before provenance existed still
+decodes (`ImageMetadata.Provenance`, `Sources/RunnerCore/Models/ImageProvenance.swift`).
+
+```json
+{
+  "schemaVersion": 1,
+  "os": "linux",
+  "architecture": "arm64",
+  "diskFormat": "raw",
+  "virtualDiskSizeBytes": 17179869184,
+  "runnerVersion": "2.331.0",
+  "guestAgentVersion": "v0.1.0-12-g3fb473c",
+  "minimumHostOS": "15.0",
+  "createdAt": "2026-08-26T10:00:00Z",
+  "boot": { "type": "efi" },
+  "capabilities": { "docker": true, "ssh": true },
+  "provenance": {
+    "baseImage": {
+      "source": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img",
+      "sha256": "sha256:ad7fac…"
+    },
+    "actionsRunner": {
+      "version": "2.331.0",
+      "sha256": "sha256:1111…",
+      "url": "https://github.com/actions/runner/releases/download/v2.331.0/actions-runner-linux-arm64-2.331.0.tar.gz"
+    },
+    "guestAgent": {
+      "gitCommit": "3fb473c50107af5909c377dd581e9ff8915b557c",
+      "sha256": "sha256:2222…",
+      "reportedVersion": "runnervm-guest-agent v0.1.0 (linux/arm64)"
+    },
+    "builder": {
+      "gitCommit": "3fb473c50107af5909c377dd581e9ff8915b557c",
+      "script": "scripts/build-ubuntu-image.sh",
+      "hostOSVersion": "26.4",
+      "builtAt": "2026-08-26T10:00:00Z"
+    },
+    "docker": {
+      "repository": "https://download.docker.com/linux/ubuntu noble stable",
+      "version": "5:27.3.1-1~ubuntu.24.04~noble"
+    },
+    "packageUpgrade": true,
+    "packages": ["git=1:2.43.0-1ubuntu7", "…"],
+    "kernelVersion": "6.8.0-51-generic",
+    "diskSHA256": "sha256:3333…"
+  }
+}
+```
+
+`provenance.diskSHA256` is the **content identity the local image digest is
+derived from**: `ImageStore` hashes `disk.img` into the `disk` layer digest, and
+`LocalImageManifest.computeDigest` folds that layer digest together with the
+sha256 of `metadata.json` to produce the `sha256:…` the daemon catalogues. Two
+hosts that seal byte-identical disks *and* byte-identical metadata therefore end
+up with the same image digest. (Hashing a 16 GiB sparse file costs a full read;
+that is the one slow step at the end of a build.)
+
+### Reproducing a build from a `metadata.json`
+
+Everything the script needs is in the file:
+
+```bash
+m=/path/to/metadata.json
+git checkout "$(jq -r .provenance.builder.gitCommit "$m")"
+scripts/build-ubuntu-image.sh \
+  --base-url    "$(jq -r .provenance.baseImage.source "$m")" \
+  --base-sha256 "$(jq -r '.provenance.baseImage.sha256 | ltrimstr("sha256:")' "$m")" \
+  --runner-version "$(jq -r .provenance.actionsRunner.version "$m")" \
+  --runner-sha256  "$(jq -r '.provenance.actionsRunner.sha256 | ltrimstr("sha256:")' "$m")" \
+  --package-upgrade "$(jq -r 'if .provenance.packageUpgrade then "yes" else "no" end' "$m")" \
+  --docker-suite "$(jq -r '.provenance.docker.repository | split(" ")[1]' "$m")" \
+  --out /path/to/out2
+```
+
+Then diff what came out:
+
+```bash
+diff <(jq -r '.provenance.packages[]' "$m") \
+     <(jq -r '.provenance.packages[]' /path/to/out2/metadata.json)
+```
+
+Two caveats, both inherent rather than fixable here:
+
+* **`--package-upgrade yes` is not reproducible.** It pulls whatever the Ubuntu
+  archive holds today. Build with `--package-upgrade no` if you need the package
+  set to be a function of the base image alone, and treat the recorded package
+  list as the ground truth for what a given image actually contains.
+* **`diskSHA256` will not match across two builds.** Timestamps, generated
+  machine state and filesystem allocation order all differ. The package list,
+  the runner digest, the base digest and the agent digest are the reproducible
+  parts; the disk hash identifies *this* build's output.
+
+### Immutable references
+
+Provenance is only useful if a profile cannot silently change which image it
+means. Pin the digest, not the tag:
+
+```yaml
+profiles:
+  - name: linux
+    image: ghcr.io/acme/runners/ubuntu-24@sha256:…   # not :stable
+```
+
+A tag is resolved to a digest before any VM starts and the *digest* is what
+lands on the instance record (spec §21), so an incident stays reproducible even
+after `:stable` moves — but the profile itself still points at a moving target,
+and two hosts can be on different sides of a tag push. `runnerctl image inspect`
+prints the resolved digest and the provenance summary together, which is the
+pair to quote in an incident.
 
 ## Profile snippet
 
@@ -139,6 +314,33 @@ profiles:
 admission. A *larger* value works, but nothing grows the filesystem
 automatically any more (cloud-init is disabled): the host must call
 `agent.resizeDisk` after boot.
+
+## Runner software freshness (spec §53)
+
+The `runnerVersion` sealed into `metadata.json` is graded every six hours against
+the newest published `actions/runner` release:
+
+| health    | meaning                                                        |
+| --------- | -------------------------------------------------------------- |
+| `healthy` | at or ahead of the latest release                                |
+| `stale`   | behind, but the release is under 30 days old                     |
+| `tooOld`  | behind, and the release is 30+ days old — GitHub stops giving such a runner work |
+| `unknown` | the image records no `runnerVersion`, or GitHub has not been read yet |
+
+`runnerctl image list` shows it in the `RUNNER` column (`2.336.0 (stale)`),
+`runnerctl status` counts it (`Cached  3 ready (1 stale, 0 too old)`), and
+`runnerctl doctor` fails its `runner-version` check when a profile's image is
+`tooOld`. Nothing here ever mutates an image — the fix is a rebuild.
+
+```yaml
+imageUpdates:
+  denyTooOldRunner: true   # default false: refuse `vm create` from a tooOld image
+```
+
+With the switch off, the first `vm create` from a `tooOld` digest logs a warning
+and proceeds. With it on, admission fails with `IMAGE_RUNNER_TOO_OLD` before
+anything is cloned, and the orchestrator holds the profile down rather than
+retrying every tick.
 
 ## Publishing and pulling from a registry (M9)
 
@@ -197,13 +399,17 @@ the image manifest, which a later pull cannot move.
 
 ## Known limitations
 
-* **`runnerctl image import` ignores `<out>/metadata.json`.** The daemon builds
-  its own `ImageMetadata` from the disk size and `--os`
-  (`Sources/Orchestration/ImageManager.swift:40`), so `runnerVersion`,
-  `guestAgentVersion`, `capabilities` and `createdAt` do **not** survive the
-  import. The file is written for provenance and for a future
-  `image import --metadata`; the same facts are also readable inside the guest
-  at `/etc/runnervm-image.json`.
+* **A sealed `metadata.json` is adopted whole or not at all.** `image import`
+  reads the `metadata.json` sitting next to the disk (or the one named by
+  `--metadata`) and keeps `runnerVersion`, `guestAgentVersion`, `capabilities`,
+  `createdAt` and `provenance`; only `virtualDiskSizeBytes` is overwritten with
+  the size the file actually has. A sibling file that describes a *different*
+  guest OS is ignored with a warning and the metadata is synthesised instead —
+  but an explicit `--metadata` that cannot be used is an error, because it is a
+  claim the caller made. The daemon log says which path it took
+  (`image metadata adopted from sealed metadata.json` /
+  `image metadata synthesised`). The same facts stay readable inside the guest at
+  `/etc/runnervm-image.json`.
 * **No SSH keys are provisioned.** `sshd` listens (socket-activated) and
   `PasswordAuthentication` is off, so `runnerctl vm ssh --connect` cannot
   authenticate until an `authorized_keys` is injected.
@@ -215,7 +421,12 @@ the image manifest, which a later pull cannot move.
   executing its own final stage is not worth the risk; `cloud-init.disabled`
   makes it inert.
 * The builder VM needs outbound network (Ubuntu archive, download.docker.com,
-  github.com). There is no offline mode.
+  github.com). There is no offline mode; the host's own downloads are cached in
+  `RUNNERVM_BUILD_CACHE`, the guest's are not.
+* **The Ubuntu archive and the Docker repository are not pinned.** Only the base
+  image, the runner tarball and the guest agent are. `provenance.packages`
+  records what apt resolved to, which makes a drift visible after the fact but
+  does not prevent it.
 * x86_64 guests are not supported: Apple Virtualization is arm64-only.
 
 ## Debugging a failed build
@@ -225,6 +436,13 @@ and dumps the tail of `serial.log`. Re-run with `--keep-build-dir` to hold on to
 the builder disk, the seed and the full log. Inside the guest every provisioning
 step is one `set -x` line from `/usr/local/sbin/runnervm-build.sh`, so the last
 line before the failure is the command that failed.
+
+`--print-seed` renders the exact cloud-init user-data a build would use without
+launching anything, which settles most "is the guest getting what I think it is"
+questions in a second rather than in forty minutes.
+`scripts/tests/build-ubuntu-image-test.sh` exercises the input verification, the
+rendering, the console manifest extraction and the metadata composition — no VM,
+no entitlement, no network.
 
 Common causes: the Docker repo codename (`noble`) not matching the base image,
 `apt` fighting `unattended-upgrades` for the dpkg lock (the script disables the

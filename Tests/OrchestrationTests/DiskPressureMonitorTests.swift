@@ -90,6 +90,7 @@ extension M2Harness {
       reconciler: Reconciler(logger: Logger(label: "test")),
       parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
       startedAt: Date(), actorName: "test", diskPressure: diskPressure, gateway: gateway,
-      scopeHealth: scopeHealth, runners: runners, logger: Logger(label: "test"))
+      scopeHealth: scopeHealth, runnerVersions: runnerVersions, runners: runners,
+      logger: Logger(label: "test"))
   }
 }

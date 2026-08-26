@@ -54,10 +54,14 @@
         <string>__LOG_LEVEL__</string>
     </dict>
 
-    <!-- launchd has no journal; stderr carries runnerd's JSON logs (spec §42). -->
+    <!-- Crash and launch output only. runnerd writes its own JSON log, with in-process
+         rotation, to <state-dir>/logs/runnerd/runnerd.log (spec §42); what lands here is what
+         escapes the logging system — a dyld failure, a Swift runtime trap, an early panic.
+         The directory is created by runnerd at startup, so create it once before the first
+         `launchctl bootstrap`:  mkdir -p "__STATE_DIR__/logs/runnerd". -->
     <key>StandardOutPath</key>
-    <string>__LOG_PATH__</string>
+    <string>__STATE_DIR__/logs/runnerd/stdio.log</string>
     <key>StandardErrorPath</key>
-    <string>__LOG_PATH__</string>
+    <string>__STATE_DIR__/logs/runnerd/stdio.log</string>
 </dict>
 </plist>

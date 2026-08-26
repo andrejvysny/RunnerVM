@@ -134,17 +134,40 @@ public struct GitHubRunnersAPI: Sendable {
 
   // MARK: - Runner software version (spec §53)
 
-  /// Latest published `actions/runner` release, without the leading `v`, for the image staleness
-  /// check. Compared against `ImageMetadata.runnerVersion`.
-  public func latestRunnerVersion() async throws -> String {
+  public static let latestReleasePath = "/repos/actions/runner/releases/latest"
+
+  /// Latest published `actions/runner` release, for the image staleness check: the tag without its
+  /// leading `v`, plus the publication date `RunnerVersionPolicy` measures its grace window from.
+  /// Compared against `ImageMetadata.runnerVersion`.
+  public func latestRunnerRelease() async throws -> LatestRunnerRelease {
     let release = try await client.send(
-      GitHubRequest.get("/repos/actions/runner/releases/latest"), as: Wire.Release.self
+      GitHubRequest.get(Self.latestReleasePath), as: Wire.Release.self
     ).value
     let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
     guard !version.isEmpty else {
       throw GitHubControlError.invalidResponse(reason: "actions/runner release has an empty tag")
     }
-    return version
+    guard let publishedAt = Self.parseTimestamp(release.publishedAt) else {
+      throw GitHubControlError.invalidResponse(
+        reason: "actions/runner release \(release.tagName) has no usable published_at")
+    }
+    return LatestRunnerRelease(version: version, publishedAt: publishedAt)
+  }
+
+  public func latestRunnerVersion() async throws -> String {
+    try await latestRunnerRelease().version
+  }
+
+  /// Built per call rather than held: `ISO8601DateFormatter` is a non-`Sendable` reference type and
+  /// this runs once every few hours.
+  private static func parseTimestamp(_ text: String?) -> Date? {
+    guard let text, !text.isEmpty else { return nil }
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    if let date = plain.date(from: text) { return date }
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: text)
   }
 
   // MARK: - Credential health (spec §148)

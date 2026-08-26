@@ -80,8 +80,12 @@ public struct ProcessWorkerLauncher: WorkerLauncher {
 
     var pid: pid_t = 0
     let argv = [path] + request.arguments
+    // Allowlisted, not inherited: runnerd's environment carries GitHub/registry credentials the
+    // worker must never see. Sorted for a deterministic argv across runs.
+    let environment = WorkerEnvironment.build(from: ProcessInfo.processInfo.environment)
+    let envPairs = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
     let status = withCStrings(argv) { cArgv in
-      withCStrings(ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }) { cEnv in
+      withCStrings(envPairs) { cEnv in
         posix_spawn(&pid, path, &actions.value, &attributes.value, cArgv, cEnv)
       }
     }

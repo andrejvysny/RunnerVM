@@ -33,6 +33,7 @@ struct M2Harness {
   let keychain: InMemoryKeychain
   let gateway: GitHubGateway
   let scopeHealth: ScopeHealthMonitor
+  let runnerVersions: RunnerVersionMonitor
   let runners: RunnerSessionManager
   /// One registry shared by every manager the harness builds, so a test can assert on what the
   /// lifecycle actually observed.
@@ -84,6 +85,26 @@ struct M2Harness {
       environment: EnvironmentRegistryCredentials(environment: [:]),
       dockerConfig: DockerConfigCredentials(
         configURL: tree.root.appending(path: "no-docker-config.json")))
+    github = FakeGitHubServer()
+    scaleSetPlane = FakeScaleSetControlPlane()
+    keychain = InMemoryKeychain()
+    // `source: file` in a temp state dir keeps the credential path hermetic: no process
+    // environment, no login keychain, and `FilePATProvider`'s 0600 check runs for real.
+    if let githubToken {
+      try GitHubTokenStore.file(url: paths.stateDir.appending(path: GitHubTokenStore.fileName))
+        .write(token: githubToken)
+    }
+    let plane = scaleSetPlane
+    gateway = GitHubGateway(
+      options: GitHubGateway.Options(
+        paths: paths, baseURL: github.baseURL, session: github.makeSession(),
+        keychain: keychain,
+        http: GitHubHTTPClient.Options(retryPolicy: RetryPolicy(maxAttempts: 1)),
+        scaleSetPlane: { _ in plane }))
+    await gateway.updateConfiguration(configuration)
+    scopeHealth = ScopeHealthMonitor(scopes: GRDBScopeRepository(db: database), gateway: gateway)
+    // Frozen alongside the image clock so a test can place a release relative to `now`.
+    runnerVersions = RunnerVersionMonitor(gateway: gateway, now: now)
     images = ImageManager(
       store: imageStore, images: imageRows, instances: instanceRows,
       operations: GRDBOperationRepository(db: database), architecture: "arm64", paths: paths,
@@ -108,31 +129,14 @@ struct M2Harness {
       paths: paths, hostId: hostId, instances: instanceRows,
       profiles: GRDBProfileRepository(db: database), imageRows: imageRows, images: images,
       imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor,
-      probe: M2Harness.probe(), metrics: metrics, tuning: instanceTuning)
+      probe: M2Harness.probe(), metrics: metrics, runnerVersions: runnerVersions,
+      tuning: instanceTuning)
     let manager = instances
     await supervisor.setHandlers(
       onState: { id, state in await manager.handleWorkerState(id: id, vmState: state) },
       onDisconnect: { id in await manager.handleWorkerDisconnect(id: id) })
     await instances.updateConfiguration(configuration)
 
-    github = FakeGitHubServer()
-    scaleSetPlane = FakeScaleSetControlPlane()
-    keychain = InMemoryKeychain()
-    // `source: file` in a temp state dir keeps the credential path hermetic: no process
-    // environment, no login keychain, and `FilePATProvider`'s 0600 check runs for real.
-    if let githubToken {
-      try GitHubTokenStore.file(url: paths.stateDir.appending(path: GitHubTokenStore.fileName))
-        .write(token: githubToken)
-    }
-    let plane = scaleSetPlane
-    gateway = GitHubGateway(
-      options: GitHubGateway.Options(
-        paths: paths, baseURL: github.baseURL, session: github.makeSession(),
-        keychain: keychain,
-        http: GitHubHTTPClient.Options(retryPolicy: RetryPolicy(maxAttempts: 1)),
-        scaleSetPlane: { _ in plane }))
-    await gateway.updateConfiguration(configuration)
-    scopeHealth = ScopeHealthMonitor(scopes: GRDBScopeRepository(db: database), gateway: gateway)
     var sessionTuning = RunnerSessionManager.Tuning()
     sessionTuning.pollInterval = .milliseconds(5)
     sessionTuning.lostPollThreshold = 2
@@ -261,7 +265,8 @@ struct M2Harness {
       reconciler: Reconciler(logger: Logger(label: "test")),
       parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
       startedAt: Date(), actorName: "test", gateway: gateway, scopeHealth: scopeHealth,
-      runners: runners, metrics: metrics, registryCredentials: registryCredentials,
+      runnerVersions: runnerVersions, runners: runners, metrics: metrics,
+      registryCredentials: registryCredentials,
       logger: Logger(label: "test"))
   }
 

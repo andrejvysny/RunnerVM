@@ -40,6 +40,15 @@ struct RunnerD: AsyncParsableCommand {
   @Option(name: .long, help: "Seconds between reconcile ticks.")
   var reconcileInterval: Int = 10
 
+  @Option(
+    name: .long,
+    help: """
+      Also write the JSON log to this file, rotating in process. Defaults to \
+      <state-dir>/logs/runnerd/runnerd.log whenever stderr is not a terminal; "off" disables it.
+      """
+  )
+  var logFile: String?
+
   /// Flag wins over the environment, which wins over the built-in default (spec §42 forward
   /// compatibility with the launchd plists' `RUNNERVM_LOG_LEVEL`).
   private var effectiveLogLevel: String {
@@ -59,10 +68,18 @@ struct RunnerD: AsyncParsableCommand {
   }
 
   func run() async throws {
-    LoggingSystemBootstrap.bootstrapJSON(
-      minimumLevel: Logger.Level(rawValue: effectiveLogLevel) ?? .info)
-    let logger = Logger(component: .daemon)
     let paths = resolvedPaths()
+    let fileSink = openLogFile(paths: paths, logging: pendingLoggingConfig())
+    LoggingSystemBootstrap.bootstrapJSON(
+      minimumLevel: Logger.Level(rawValue: effectiveLogLevel) ?? .info,
+      sink: fileSink.map { LoggingSystemBootstrap.tee([JSONLogHandler.defaultSink, $0.sink()]) }
+        ?? JSONLogHandler.defaultSink)
+    let logger = Logger(component: .daemon)
+    if let fileSink {
+      logger.info(
+        "daemon log file",
+        metadata: ["path": .string(fileSink.url.path(percentEncoded: false))])
+    }
     let runtime = DaemonRuntime(
       options: DaemonRuntime.Options(
         paths: paths,
@@ -85,6 +102,41 @@ struct RunnerD: AsyncParsableCommand {
     await stop.wait()
     withExtendedLifetime(sources) {}
     await runtime.stop()
+  }
+
+  /// stderr always keeps the log — launchd captures it, and an operator running this in a terminal
+  /// reads it there. The file is additional, and only where it earns its place: under launchd
+  /// stderr is already a file nothing rotates in process, while an interactive run would just
+  /// litter the state directory. `isatty` is the only honest signal for that distinction, because
+  /// `--foreground` is mandatory in this build and the launchd plists pass it too.
+  private func openLogFile(paths: RunnerPaths, logging: LoggingConfig) -> RotatingFileSink? {
+    if logFile == "off" { return nil }
+    let explicit = logFile.map { URL(fileURLWithPath: $0) }
+    guard logging.file.enabled || explicit != nil else { return nil }
+    guard let url = explicit ?? (isatty(STDERR_FILENO) == 1 ? nil : paths.daemonLogFile) else {
+      return nil
+    }
+    do {
+      return try RotatingFileSink(
+        url: url,
+        options: RotatingFileSink.Options(
+          maxSizeBytes: logging.file.maxSizeBytes, maxFiles: logging.file.maxFiles))
+    } catch {
+      FileHandle.standardError.write(Data("runnerd: \(error)\n".utf8))
+      return nil
+    }
+  }
+
+  /// Logging has to be up before anything can report a configuration error, so `--config` is
+  /// peeked at here rather than waited for. A document that does not parse simply yields the
+  /// defaults; `DaemonRuntime` re-parses it for real moments later and reports the failure
+  /// properly.
+  private func pendingLoggingConfig() -> LoggingConfig {
+    guard let config,
+          let yaml = try? String(contentsOf: URL(fileURLWithPath: config), encoding: .utf8),
+          let parsed = try? ConfigLoader.load(yaml: yaml)
+    else { return LoggingConfig() }
+    return parsed.logging
   }
 
   private func resolvedPaths() -> RunnerPaths {

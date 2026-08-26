@@ -11,4 +11,14 @@ public enum LoggingSystemBootstrap {
       JSONLogHandler(label: label, logLevel: minimumLevel, redactor: redactor, sink: sink)
     }
   }
+
+  /// Fans one already-redacted line out to several destinations. Used by `runnerd` to keep stderr
+  /// (which launchd captures) while also writing the rotating file.
+  public static func tee(
+    _ sinks: [@Sendable (String) -> Void]
+  ) -> @Sendable (String) -> Void {
+    { line in
+      for sink in sinks { sink(line) }
+    }
+  }
 }

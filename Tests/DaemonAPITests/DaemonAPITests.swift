@@ -115,6 +115,29 @@ import Testing
     }
   }
 
+  /// Spec §53: the freshness verdict is graded daemon-side, so it has to survive the wire.
+  @Test func imageDTOCarriesTheRunnerVersionAndItsHealth() async throws {
+    try await withDaemon { client, _ in
+      let image = try await client.imageImport(
+        ImageImportRequest(path: "/tmp/disk.img", os: "linux", name: "ubuntu-24"))
+      #expect(image.runnerVersion == "2.320.0")
+      #expect(image.runnerVersionHealth == .stale)
+      #expect(image == FakeDaemonService.sampleImage(name: "ubuntu-24", os: "linux"))
+    }
+  }
+
+  /// An older payload with neither field still decodes: both carry a default.
+  @Test func imageDTODefaultsTheRunnerFieldsWhenAbsent() throws {
+    let json = """
+    {"digest":"sha256:a","os":"linux","architecture":"arm64","state":"ready",
+     "virtualSizeBytes":1,"allocatedSizeBytes":1,"localPath":"/tmp/x","pinCount":0,
+     "createdAt":"2026-01-01T00:00:00.000Z","runnerVersionHealth":"unknown"}
+    """
+    let decoded = try JSONDecoder().decode(ImageInfoDTO.self, from: Data(json.utf8))
+    #expect(decoded.runnerVersion == nil)
+    #expect(decoded.runnerVersionHealth == .unknown)
+  }
+
   @Test func imagePruneRoundTripsAndCarriesDryRun() async throws {
     try await withDaemon { client, service in
       let response = try await client.imagePrune(dryRun: true)

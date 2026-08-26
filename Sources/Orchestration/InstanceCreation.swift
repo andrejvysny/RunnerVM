@@ -51,6 +51,7 @@ extension InstanceManager {
     guard image.metadata.os == profile.guestOS else {
       throw ImageError.incompatibleGuestOS(expected: profile.guestOS, actual: image.metadata.os)
     }
+    try await enforceRunnerVersion(digest: digest, image: image)
     let reservation = DiskAccounting.estimatedAdditionalAllocation(
       for: profile.resources.diskBytes, image: image)
     try await InstanceAdmission(
@@ -70,6 +71,30 @@ extension InstanceManager {
       "instance planned",
       metadata: .context(profile: profileRow.id, instance: record.id, imageDigest: digest))
     return record
+  }
+
+  /// Spec §53. An image whose baked-in runner is past GitHub's 30-day update window would be
+  /// refused work by GitHub anyway, so `imageUpdates.denyTooOldRunner` turns that into a refusal
+  /// here — before the clone, and before a worker is spawned for a VM that could never take a job.
+  /// Left off (the default) it warns once per digest and admits the instance: a daemon with no
+  /// GitHub credential grades every image `unknown` and must keep scheduling.
+  private func enforceRunnerVersion(digest: ImageDigest, image: ImageInfo) async throws {
+    guard let runnerVersions,
+          await runnerVersions.health(for: image.metadata) == .tooOld
+    else { return }
+    let latest = await runnerVersions.latest()?.version ?? "-"
+    let imageVersion = image.metadata.runnerVersion
+    guard (configuration?.imageUpdates ?? ImageUpdatesConfig()).denyTooOldRunner else {
+      guard warnedRunnerTooOld.insert(digest).inserted else { return }
+      logger.warning(
+        "image runner software is past GitHub's update window",
+        metadata: .context(imageDigest: digest).merging([
+          "runner_version": .string(imageVersion ?? "-"), "latest_version": .string(latest),
+        ]) { $1 })
+      return
+    }
+    throw ImageError.runnerTooOld(
+      digest: digest, imageVersion: imageVersion, latestVersion: latest)
   }
 
   private func makeRecord(

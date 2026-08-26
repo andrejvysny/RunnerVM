@@ -90,9 +90,19 @@ func exampleConfiguration() throws -> RunnerConfiguration {
   try ConfigLoader.load(yaml: ExampleConfig.example)
 }
 
-/// The example document with `macos-15-xcode-16` removed.
-func exampleWithoutMacOSProfile() throws -> RunnerConfiguration {
+/// A second linux profile alongside the example's `ubuntu-24`, for tests that exercise
+/// profile-level add/remove/update diffing against the applier. (The shipped example now carries
+/// a single profile since this build rejects macOS guests; see `ExampleConfig`.)
+private let secondExampleProfile = RunnerProfileConfig(
+  name: "ubuntu-22",
+  scope: "engineering",
+  image: "ghcr.io/acme/runners/ubuntu-22:stable",
+  guestOS: .linux,
+  limits: ProfileLimits(maxInstances: 4)
+)
+
+func exampleWithSecondProfile() throws -> RunnerConfiguration {
   var config = try exampleConfiguration()
-  config.profiles.removeAll { $0.name == "macos-15-xcode-16" }
+  config.profiles.append(secondExampleProfile)
   return config
 }

@@ -56,6 +56,22 @@ struct DefaultsTests {
     """
     let config = try ConfigLoader.load(yaml: yaml)
     #expect(config.imageUpdates.recycleReusable == false)
+    #expect(config.imageUpdates.denyTooOldRunner == false)
+  }
+
+  /// Spec §53. Off by default, so an existing document keeps scheduling from whatever it has.
+  @Test func denyTooOldRunnerIsReadFromImageUpdates() throws {
+    let yaml = """
+    version: 1
+    github:
+      scopes:
+        - {name: engineering, type: organization, owner: acme}
+    imageUpdates:
+      denyTooOldRunner: true
+    """
+    let config = try ConfigLoader.load(yaml: yaml)
+    #expect(config.imageUpdates.denyTooOldRunner)
+    #expect(config.imageUpdates.recycleReusable)
   }
 
   @Test func reuseMaxRestartsIsReadFromTheProfileSection() throws {
@@ -119,5 +135,27 @@ struct DefaultsTests {
     """
     let profile = try #require(try ConfigLoader.load(yaml: yaml).profile(named: "plain"))
     #expect(profile.guestOS == .linux)
+  }
+
+  /// `os: macos` still decodes to `GuestOS.macos` (loading a document is independent of whether
+  /// this build's validation accepts that OS — see ConfigLoaderTests/ErrorTests for the rejection).
+  @Test func profileWithExplicitMacOSFieldDecodesToMacOS() throws {
+    let yaml = """
+    version: 1
+    github:
+      scopes:
+        - {name: engineering, type: organization, owner: acme}
+    profiles:
+      - name: macos-15-xcode-16
+        scope: engineering
+        image: ghcr.io/acme/runners/macos-15-xcode-16:stable
+        os: macos
+        resources:
+          cpu: 6
+    """
+    let config = try ConfigLoader.load(yaml: yaml)
+    let macos = try #require(config.profile(named: "macos-15-xcode-16"))
+    #expect(macos.guestOS == .macos)
+    #expect(macos.resources.cpuCount == 6)
   }
 }

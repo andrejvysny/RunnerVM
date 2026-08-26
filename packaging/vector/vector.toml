@@ -1,0 +1,105 @@
+# Vector pipeline for RunnerVM host logs. Example, not installed by scripts/install.sh.
+#
+# REPLACE BEFORE USE:
+#   * every /Library/Application Support/RunnerVM below — your --state-dir
+#   * RUNNERVM_HOST_ID / the `host` label, if you do not want Vector's own hostname
+#   * the [sinks.loki] endpoint and auth
+#
+# Run:  vector --config packaging/vector/vector.toml
+# Check: vector validate --config packaging/vector/vector.toml
+#
+# Vector must run as a user that can read <state-dir>/logs (mode 0750, owned by the service
+# account). Running it as the same account is the simplest answer.
+
+data_dir = "/var/lib/vector"
+
+# --- Sources ---------------------------------------------------------------
+
+# The daemon's own JSON log. One object per line; `RotatingFileSink` rotates it to
+# runnerd.log.1 … .N, which `exclude` keeps Vector from re-reading.
+[sources.runnerd]
+type = "file"
+include = ["/Library/Application Support/RunnerVM/logs/runnerd/runnerd.log"]
+exclude = ["/Library/Application Support/RunnerVM/logs/runnerd/runnerd.log.*"]
+read_from = "beginning"
+fingerprint.strategy = "checksum"
+
+# The lifecycle event stream: fixed-shape records, one per state transition and audit event.
+[sources.events]
+type = "file"
+include = ["/Library/Application Support/RunnerVM/logs/events.jsonl"]
+exclude = ["/Library/Application Support/RunnerVM/logs/events.jsonl.*"]
+read_from = "beginning"
+
+# Per-instance guest output. NOT JSON: serial.log is a raw console capture and worker.log is
+# vmworker's stdout/stderr, so these stay plain text and only get labels.
+[sources.instances]
+type = "file"
+include = [
+  "/Library/Application Support/RunnerVM/logs/instances/*/serial.log",
+  "/Library/Application Support/RunnerVM/logs/instances/*/worker.log",
+]
+read_from = "beginning"
+# Guest console output can emit very long lines; do not let one truncate the rest of the file.
+max_line_bytes = 1048576
+
+# --- Transforms ------------------------------------------------------------
+
+[transforms.runnerd_parsed]
+type = "remap"
+inputs = ["runnerd"]
+# A malformed line is kept as-is rather than dropped: losing the one corrupt line that explains a
+# crash is worse than an unparsed field.
+source = '''
+  parsed, err = parse_json(.message)
+  if err == null {
+    . = merge(., object!(parsed))
+    del(.message)
+    .message = parsed.message
+  }
+  .source = "runnerd"
+  .host_id = .host_id || "${RUNNERVM_HOST_ID:-unknown}"
+'''
+
+[transforms.events_parsed]
+type = "remap"
+inputs = ["events"]
+source = '''
+  parsed, err = parse_json(.message)
+  if err == null {
+    . = merge(., object!(parsed))
+    del(.message)
+  }
+  .source = "events"
+  .host_id = .host_id || "${RUNNERVM_HOST_ID:-unknown}"
+'''
+
+[transforms.instances_labelled]
+type = "remap"
+inputs = ["instances"]
+# `file` is "<...>/logs/instances/<instance-id>/<name>.log": the id and the stream name are in the
+# path, which is the only place they exist for these files.
+source = '''
+  .source = "instance"
+  .host_id = "${RUNNERVM_HOST_ID:-unknown}"
+  parts = split(string!(.file), "/")
+  .instance_id = parts[-2]
+  .stream = replace(string!(parts[-1]), ".log", "")
+'''
+
+# --- Sink ------------------------------------------------------------------
+
+# REPLACE: point at your own Loki. Swap this whole block for [sinks.elasticsearch],
+# [sinks.datadog_logs], [sinks.file], … — the transforms above are sink-agnostic.
+[sinks.loki]
+type = "loki"
+inputs = ["runnerd_parsed", "events_parsed", "instances_labelled"]
+endpoint = "http://loki.example.internal:3100"
+encoding.codec = "json"
+# Keep the label set small and bounded: instance_id is unbounded cardinality and belongs in the
+# line, not in a Loki label.
+labels.job = "runnervm"
+labels.host_id = "{{ host_id }}"
+labels.source = "{{ source }}"
+labels.component = "{{ component }}"
+out_of_order_action = "accept"

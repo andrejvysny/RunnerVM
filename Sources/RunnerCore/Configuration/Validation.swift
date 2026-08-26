@@ -86,6 +86,7 @@ extension RunnerConfiguration {
     issues += metrics.validate()
     issues += diagnostics.validate()
     issues += images.validate()
+    issues += logging.validate()
     return issues
   }
 

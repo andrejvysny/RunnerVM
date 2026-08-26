@@ -16,6 +16,7 @@ public enum ImageError: RunnerError {
   case cloneUnsupported(path: String)
   case insufficientDiskSpace(requiredBytes: UInt64, availableBytes: UInt64)
   case stillPinned(digest: ImageDigest)
+  case runnerTooOld(digest: ImageDigest, imageVersion: String?, latestVersion: String)
 
   public var code: String {
     switch self {
@@ -33,6 +34,7 @@ public enum ImageError: RunnerError {
     case .cloneUnsupported: "IMAGE_CLONE_UNSUPPORTED"
     case .insufficientDiskSpace: "IMAGE_INSUFFICIENT_DISK_SPACE"
     case .stillPinned: "IMAGE_STILL_PINNED"
+    case .runnerTooOld: "IMAGE_RUNNER_TOO_OLD"
     }
   }
 
@@ -56,6 +58,10 @@ public enum ImageError: RunnerError {
     case .insufficientDiskSpace(let required, let available):
       "needs \(ByteSize(bytes: required)), only \(ByteSize(bytes: available)) free"
     case .stillPinned(let digest): "image \(digest) is still pinned"
+    case .runnerTooOld(let digest, let imageVersion, let latest):
+      "image \(digest) has actions/runner \(imageVersion ?? "unknown") but \(latest) has been "
+        + "published for more than \(RunnerVersionPolicy.graceDays) days; rebuild the image "
+        + "(imageUpdates.denyTooOldRunner is on)"
     }
   }
 
@@ -64,7 +70,8 @@ public enum ImageError: RunnerError {
     case .pullFailed, .pullTimeout, .cloneFailed, .insufficientDiskSpace, .stillPinned:
       true
     case .referenceInvalid, .notFound, .digestMismatch, .manifestUnsupported, .metadataInvalid,
-         .incompatibleHost, .incompatibleGuestOS, .diskSmallerThanImage, .cloneUnsupported:
+         .incompatibleHost, .incompatibleGuestOS, .diskSmallerThanImage, .cloneUnsupported,
+         .runnerTooOld:
       false
     }
   }

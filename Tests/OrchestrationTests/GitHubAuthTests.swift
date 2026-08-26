@@ -201,3 +201,34 @@ import Testing
     }
   }
 }
+
+/// `github.auth.provider: app` reads both `github-app.json` and the private key it points at
+/// through `SecureFile` (spec §12, §79): a loose mode on either is a configuration error the
+/// operator can act on, not a bare `notFound`.
+@Suite struct GitHubAuthFactoryAppTests {
+  @Test func aWorldReadablePrivateKeyIsRejectedWithAChmodHint() throws {
+    let tree = try TempTree()
+    let paths = tree.paths
+    try FileManager.default.createDirectory(at: paths.stateDir, withIntermediateDirectories: true)
+
+    let keyURL = try tree.file("app-key.pem", contents: "not-a-real-key\n")
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o644], ofItemAtPath: keyURL.path(percentEncoded: false))
+
+    let descriptorURL = paths.stateDir.appending(path: "github-app.json")
+    try Data(
+      """
+      {"appId": "123456", "installationId": 42, "privateKeyPath": "\(keyURL.path(percentEncoded: false))"}
+      """.utf8
+    ).write(to: descriptorURL)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o600], ofItemAtPath: descriptorURL.path(percentEncoded: false))
+
+    let error = #expect(throws: GitHubControlError.self) {
+      _ = try GitHubAuthFactory.resolve(
+        auth: GitHubAuthConfig(provider: .app, source: .keychain), paths: paths)
+    }
+    #expect(error?.errorClass == .permanentConfiguration)
+    #expect(error?.message.contains("chmod 600") == true)
+  }
+}

@@ -104,12 +104,20 @@ public struct ImageCacheConfig: Codable, Sendable, Hashable {
   }
 }
 
-/// Whether a reusable instance still on a superseded image digest is retired (spec §138).
+/// Whether a reusable instance still on a superseded image digest is retired (spec §138), and
+/// how far behind the baked-in `actions/runner` may fall before an image stops being schedulable
+/// (spec §53).
 public struct ImageUpdatesConfig: Codable, Sendable, Hashable {
   public var recycleReusable: Bool
+  /// `true` refuses `vm create` from an image whose runner is `tooOld` — past GitHub's 30-day
+  /// update window — instead of only warning about it. Off by default: a fleet with no GitHub
+  /// credential can never grade its images, and blocking on `unknown`-adjacent data would park
+  /// every profile on the host.
+  public var denyTooOldRunner: Bool
 
-  public init(recycleReusable: Bool = true) {
+  public init(recycleReusable: Bool = true, denyTooOldRunner: Bool = false) {
     self.recycleReusable = recycleReusable
+    self.denyTooOldRunner = denyTooOldRunner
   }
 }
 
@@ -126,6 +134,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
   public var diagnostics: DiagnosticsConfig
   public var images: ImageCacheConfig
   public var imageUpdates: ImageUpdatesConfig
+  public var logging: LoggingConfig
 
   public init(
     version: Int = RunnerConfiguration.currentVersion,
@@ -136,7 +145,8 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
     metrics: MetricsConfig = MetricsConfig(),
     diagnostics: DiagnosticsConfig = DiagnosticsConfig(),
     images: ImageCacheConfig = ImageCacheConfig(),
-    imageUpdates: ImageUpdatesConfig = ImageUpdatesConfig()
+    imageUpdates: ImageUpdatesConfig = ImageUpdatesConfig(),
+    logging: LoggingConfig = LoggingConfig()
   ) {
     self.version = version
     self.host = host
@@ -147,6 +157,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
     self.diagnostics = diagnostics
     self.images = images
     self.imageUpdates = imageUpdates
+    self.logging = logging
   }
 
   public func profile(named name: String) -> RunnerProfileConfig? {
@@ -161,6 +172,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
 extension RunnerConfiguration {
   private enum CodingKeys: String, CodingKey {
     case version, host, github, profiles, security, metrics, diagnostics, images, imageUpdates
+    case logging
   }
 
   /// Every section except `version` defaults, so a minimal document decodes and validation — not
@@ -180,7 +192,9 @@ extension RunnerConfiguration {
       // `imageUpdates` defaults so a document persisted before this field existed still decodes
       // (spec §138 back-compat).
       imageUpdates: try c.decodeIfPresent(ImageUpdatesConfig.self, forKey: .imageUpdates)
-        ?? ImageUpdatesConfig()
+        ?? ImageUpdatesConfig(),
+      // Same back-compat rule: a document written before log durability existed still loads.
+      logging: try c.decodeIfPresent(LoggingConfig.self, forKey: .logging) ?? LoggingConfig()
     )
   }
 }

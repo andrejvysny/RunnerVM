@@ -71,6 +71,8 @@ public actor RunnerSessionManager {
   let tuning: Tuning
   let logger: Logger
   var observers: [RunnerSessionID: Task<Void, Never>] = [:]
+  /// `logs/events.jsonl`. Attached after construction; see `InstanceManager.attachEventLog`.
+  var events: LifecycleEventLog?
 
   public init(
     sessions: any RunnerSessionRepository, instanceRows: any InstanceRepository,
@@ -89,6 +91,10 @@ public actor RunnerSessionManager {
     self.gateway = gateway
     self.tuning = tuning
     self.logger = logger
+  }
+
+  public func attachEventLog(_ log: LifecycleEventLog?) {
+    events = log
   }
 
   // MARK: - Queries
@@ -244,10 +250,10 @@ public actor RunnerSessionManager {
     try await instances.advanceRunnerState(id: instance.id, to: .runnerStarting)
     logger.info(
       "runner session started",
-      metadata: .context(instance: instance.id, session: current.id).merging([
-        "runner_name": .string(current.githubRunnerName ?? "-"),
-        "scope": .string(context.scope.description),
-      ]) { $1 })
+      metadata: .context(
+        profile: current.profileId, instance: instance.id, session: current.id,
+        githubRunnerID: current.githubRunnerId, githubRunnerName: current.githubRunnerName
+      ).merging(["scope": .string(context.scope.description)]) { $1 })
     observe(current, context: context)
     return current
   }
@@ -336,9 +342,18 @@ public actor RunnerSessionManager {
       id: session.id, from: session.state, to: state, mutate: mutate)
     logger.debug(
       "runner session transition",
-      metadata: .context(instance: session.instanceId, session: session.id).merging([
+      metadata: .context(
+        profile: session.profileId, instance: session.instanceId, session: session.id,
+        githubRunnerID: updated.githubRunnerId, githubRunnerName: updated.githubRunnerName
+      ).merging([
         "from": .string(session.state.rawValue), "to": .string(state.rawValue),
       ]) { $1 })
+    await events?.record(
+      LifecycleEventLog.sessionTransition,
+      LifecycleEventLog.Fields(
+        instance: session.instanceId, profile: session.profileId, session: session.id,
+        githubRunnerID: updated.githubRunnerId, from: session.state.rawValue, to: state.rawValue,
+        reason: updated.failureCode))
     return updated
   }
 }

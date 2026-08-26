@@ -232,4 +232,32 @@ struct ErrorTests {
     #expect(issues.contains(code: "PROFILE_CPU_BELOW_MACOS_MINIMUM"))
     #expect(loadError.code == "CONFIG_VALIDATION_FAILED")
   }
+
+  @Test func macOSProfileFailsValidationAsUnsupportedGuestOS() throws {
+    let yaml = """
+    version: 1
+    github:
+      scopes:
+        - {name: engineering, type: organization, owner: acme}
+    profiles:
+      - name: macos-15
+        scope: engineering
+        image: ghcr.io/acme/runners/macos-15:stable
+        os: macos
+    """
+    // Loading alone succeeds: `os: macos` is a well-formed value, just unsupported in this build.
+    let config = try ConfigLoader.load(yaml: yaml)
+    #expect(config.profile(named: "macos-15")?.guestOS == .macos)
+
+    let error = #expect(throws: ConfigLoadError.self) {
+      try ConfigLoader.loadAndValidate(yaml: yaml, host: Fixtures.hostFacts)
+    }
+    let loadError = try #require(error)
+    guard case let .validationFailed(issues) = loadError else {
+      Issue.record("unexpected error \(loadError)")
+      return
+    }
+    let issue = try #require(issues.first(code: "GUEST_OS_UNSUPPORTED"))
+    #expect(issue.path == "profiles[0].os")
+  }
 }

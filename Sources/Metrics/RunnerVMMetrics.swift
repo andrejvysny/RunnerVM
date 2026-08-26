@@ -29,6 +29,10 @@ public enum RunnerVMMetrics {
   public static let diskPressureState = "runnervm_disk_pressure_state"
   public static let instanceCloneMethod = "runnervm_instance_clone_method"
 
+  // Image runner-software freshness (spec §53).
+  public static let imageRunnerVersionHealth = "runnervm_image_runner_version_health"
+  public static let runnerLatestReleaseAgeSeconds = "runnervm_runner_latest_release_age_seconds"
+
   // Host-observed worker figures (spec §40). Never guest memory — see the help text.
   public static let workerRSSBytes = "runnervm_worker_rss_bytes"
   public static let workerCPUPercent = "runnervm_worker_cpu_percent"
@@ -40,6 +44,10 @@ public enum RunnerVMMetrics {
   public static let reconcileErrorsTotal = "runnervm_reconcile_errors_total"
   public static let githubRequestsTotal = "runnervm_github_requests_total"
 
+  // Logging durability (spec §42).
+  public static let logLinesDroppedTotal = "runnervm_log_lines_dropped_total"
+  public static let instanceLogDirsSweptTotal = "runnervm_instance_log_dirs_swept_total"
+
   // Label names. The exposed label values are profile names, instance ids, state names and fixed
   // enumerations only: nothing an operator typed into a workflow reaches a metric label.
   public static let profileLabel = "profile"
@@ -49,6 +57,8 @@ public enum RunnerVMMetrics {
   public static let codeLabel = "code"
   public static let methodLabel = "method"
   public static let classLabel = "class"
+  public static let digestLabel = "digest"
+  public static let healthLabel = "health"
 
   /// `runnervm_disk_pressure_state` is numeric so it can be alerted on: 0 ok, 1 warning,
   /// 2 critical (spec §17).
@@ -60,7 +70,8 @@ public enum RunnerVMMetrics {
     }
   }
 
-  public static let definitions: [MetricDefinition] = timings + capacity + workers + outcomes
+  public static let definitions: [MetricDefinition] =
+    timings + capacity + images + workers + outcomes
 
   private static let timings: [MetricDefinition] = [
     MetricDefinition(
@@ -116,6 +127,17 @@ public enum RunnerVMMetrics {
       help: "Instance directories materialized by clone method since daemon start."),
   ]
 
+  private static let images: [MetricDefinition] = [
+    MetricDefinition(
+      name: imageRunnerVersionHealth, kind: .gauge,
+      help: "1 for the runner-software freshness bucket each local image currently falls in: "
+        + "healthy, stale, tooOld or unknown."),
+    MetricDefinition(
+      name: runnerLatestReleaseAgeSeconds, kind: .gauge,
+      help: "Seconds since GitHub published the newest actions/runner release; absent until it "
+        + "has been read."),
+  ]
+
   private static let workers: [MetricDefinition] = [
     MetricDefinition(
       name: workerRSSBytes, kind: .gauge,
@@ -138,5 +160,11 @@ public enum RunnerVMMetrics {
       name: reconcileErrorsTotal, kind: .counter, help: "Reconcile sweeps that reported an error."),
     MetricDefinition(
       name: githubRequestsTotal, kind: .counter, help: "GitHub API requests by outcome class."),
+    MetricDefinition(
+      name: logLinesDroppedTotal, kind: .counter,
+      help: "Log lines a rotating file sink could not write. Non-zero means logs are being lost."),
+    MetricDefinition(
+      name: instanceLogDirsSweptTotal, kind: .counter,
+      help: "Per-instance log directories deleted by the logging.retention.instanceLogs sweep."),
   ]
 }

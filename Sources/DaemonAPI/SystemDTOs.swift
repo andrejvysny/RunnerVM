@@ -162,11 +162,21 @@ public struct ImageSummary: Codable, Sendable, Hashable {
   public var diskUsageBytes: UInt64
   /// Images whose row is `pulling`: a registry transfer is in flight for them right now.
   public var pulling: Int
+  /// Ready images whose baked-in runner is behind the newest release but still inside GitHub's
+  /// 30-day update window (spec §53).
+  public var runnerStale: Int
+  /// Ready images past that window: GitHub itself stops giving such a runner work.
+  public var runnerTooOld: Int
 
-  public init(cached: Int, diskUsageBytes: UInt64, pulling: Int = 0) {
+  public init(
+    cached: Int, diskUsageBytes: UInt64, pulling: Int = 0, runnerStale: Int = 0,
+    runnerTooOld: Int = 0
+  ) {
     self.cached = cached
     self.diskUsageBytes = diskUsageBytes
     self.pulling = pulling
+    self.runnerStale = runnerStale
+    self.runnerTooOld = runnerTooOld
   }
 }
 

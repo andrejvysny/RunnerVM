@@ -127,19 +127,6 @@ struct RoundTripTests {
           memory: 8GiB
           cpu: 4
         lifecycle: ephemeral
-      - scope: engineering
-        name: macos-15-xcode-16
-        os: macos
-        image: ghcr.io/acme/runners/macos-15-xcode-16:stable
-        limits:
-          maxInstances: 2
-        ssh:
-          enabled: true
-        resources:
-          cpu: 6
-          memory: 12GiB
-          disk: 120GiB
-        lifecycle: ephemeral
     """
     let mapping = try ConfigLoader.load(yaml: equivalent)
     #expect(roundTripped == mapping)

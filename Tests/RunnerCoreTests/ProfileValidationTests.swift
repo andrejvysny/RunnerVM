@@ -249,7 +249,9 @@ import Testing
         $0.warmPool = WarmPoolPolicy(minIdle: 2, maxIdle: 2)
       }]
     }
-    #expect(!issues.hasErrors)
+    // GUEST_OS_UNSUPPORTED always fires for a macOS profile in this build; the aggregate rule
+    // under test must not add an error of its own on top of it.
+    #expect(issues.errors.map(\.code) == ["GUEST_OS_UNSUPPORTED"])
   }
 
   @Test func warnsWhenMacOSMaxInstancesOversubscribeTheTwoGuestLimit() throws {
@@ -264,7 +266,8 @@ import Testing
     }
     let issue = try #require(issues.first(code: "MACOS_MAX_INSTANCES_EXCEEDS_GUEST_LIMIT"))
     #expect(issue.severity == .warning)
-    #expect(!issues.hasErrors)
+    // The only errors present are the (expected) per-profile GUEST_OS_UNSUPPORTED ones.
+    #expect(issues.errors.allSatisfy { $0.code == "GUEST_OS_UNSUPPORTED" })
   }
 
   @Test func linuxProfilesAreNotSubjectToTheMacOSGuestLimit() {

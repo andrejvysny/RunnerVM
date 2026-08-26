@@ -53,7 +53,13 @@ enum ConfigSchema {
     "metrics": .object(["prometheus": .object(["enabled": .scalar, "listen": .scalar])]),
     "diagnostics": .object(["failedInstanceRetention": .scalar]),
     "images": .object(["cache": .object(["maxSize": .scalar, "keepRecentlyUsed": .scalar])]),
-    "imageUpdates": .object(["recycleReusable": .scalar]),
+    "imageUpdates": .object(["recycleReusable": .scalar, "denyTooOldRunner": .scalar]),
+    "logging": .object([
+      "file": .object(["enabled": .scalar, "maxSize": .scalar, "maxFiles": .scalar]),
+      "retention": .object(["instanceLogs": .scalar]),
+      "collectRunnerDiagnostics": .scalar,
+      "diagnosticsTimeout": .scalar,
+    ]),
   ])
 
   /// Path of the first key not present in the allow-list, in document order, or `nil` when clean.

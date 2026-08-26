@@ -89,7 +89,9 @@ enum Mapping {
       placeholder: false)
   }
 
-  static func image(_ managed: ManagedImage) -> ImageInfoDTO {
+  static func image(
+    _ managed: ManagedImage, runnerVersionHealth: RunnerVersionHealth = .unknown
+  ) -> ImageInfoDTO {
     ImageInfoDTO(
       digest: managed.record.digest.rawValue,
       name: managed.name,
@@ -102,7 +104,27 @@ enum Mapping {
       pinCount: managed.pinCount,
       createdAt: RFC3339.string(from: managed.record.createdAt.date),
       canonicalReference: managed.record.canonicalReference,
-      pulledAt: managed.record.pulledAt.map { RFC3339.string(from: $0.date) })
+      pulledAt: managed.record.pulledAt.map { RFC3339.string(from: $0.date) },
+      runnerVersion: managed.record.runnerVersion,
+      runnerVersionHealth: runnerVersionHealth,
+      provenance: managed.metadata?.provenance.map(provenance))
+  }
+
+  /// Summary only: `packages` is the whole `dpkg` manifest and stays in `metadata.json`, where a
+  /// rebuild diff can read it, instead of crossing the socket on every `image list`.
+  static func provenance(_ source: ImageMetadata.Provenance) -> ImageProvenanceSummaryDTO {
+    ImageProvenanceSummaryDTO(
+      baseImageSource: source.baseImage?.source,
+      baseImageSHA256: source.baseImage?.sha256,
+      runnerSHA256: source.actionsRunner?.sha256,
+      guestAgentCommit: source.guestAgent?.gitCommit,
+      dockerVersion: source.docker?.version,
+      kernelVersion: source.kernelVersion,
+      packageUpgrade: source.packageUpgrade,
+      packageCount: source.packages?.count,
+      diskSHA256: source.diskSHA256,
+      builtAt: source.builder?.builtAt,
+      builderCommit: source.builder?.gitCommit)
   }
 
   static func instance(

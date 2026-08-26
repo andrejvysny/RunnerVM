@@ -48,9 +48,13 @@ enum Wire {
 
   struct Release: Decodable {
     let tagName: String
+    /// RFC 3339. The grace window in `RunnerVersionPolicy` is measured from this, so a release
+    /// without it cannot be judged for staleness.
+    let publishedAt: String?
 
     private enum CodingKeys: String, CodingKey {
       case tagName = "tag_name"
+      case publishedAt = "published_at"
     }
   }
 

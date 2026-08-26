@@ -24,11 +24,31 @@ public struct RunnerPaths: Hashable, Sendable {
   public var imageBlobsDir: URL { imagesDir.appending(path: "blobs", directoryHint: .isDirectory) }
   public var daemonLogsDir: URL { logsDir.appending(path: "runnerd", directoryHint: .isDirectory) }
 
+  /// Per-instance *logs*, deliberately separate from `instances/<id>/`: the instance directory is
+  /// the VM's disk and goes away with the VM, while its serial console, worker output and
+  /// collected guest diagnostics have to outlive it (spec §74, §131).
+  public var instanceLogsDir: URL { logsDir.appending(path: "instances", directoryHint: .isDirectory) }
+
   public var databaseURL: URL { stateDir.appending(path: "runnerd.sqlite3") }
   public var daemonSocket: URL { socketDir.appending(path: "runnerd.sock") }
 
+  /// The daemon's own rotating JSON log.
+  public var daemonLogFile: URL { daemonLogsDir.appending(path: "runnerd.log") }
+
+  /// The machine-readable lifecycle event stream.
+  public var eventsLogFile: URL { logsDir.appending(path: "events.jsonl") }
+
   public func instanceDir(_ id: InstanceID) -> URL {
     instancesDir.appending(path: id.rawValue, directoryHint: .isDirectory)
+  }
+
+  public func instanceLogDir(_ id: InstanceID) -> URL {
+    instanceLogsDir.appending(path: id.rawValue, directoryHint: .isDirectory)
+  }
+
+  /// Where `afterSession` streams the guest's `_diag` tarball before an ephemeral VM is destroyed.
+  public func instanceDiagnosticsDir(_ id: InstanceID) -> URL {
+    instanceLogDir(id).appending(path: "diag", directoryHint: .isDirectory)
   }
 
   /// runnerd <-> vmworker control socket.

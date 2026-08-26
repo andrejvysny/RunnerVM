@@ -139,6 +139,12 @@ extension RunnerConfiguration {
           "expected <registry>/<path>[:tag][@sha256:<64 hex>]"
         ))
       }
+      if !HostConstants.supportedGuestOS.contains(profile.guestOS) {
+        issues.append(.error(
+          "GUEST_OS_UNSUPPORTED", "\(path).os",
+          "guest OS \(profile.guestOS.rawValue) is not supported in this build; supported: linux/arm64"
+        ))
+      }
       issues += profile.validateResources(facts: facts, path: path)
       issues += profile.validateWarmPool(path: path)
       issues += profile.validateLifecycle(path: path)
@@ -232,6 +238,41 @@ extension ImageCacheConfig {
     if keepRecentlyUsed < .zero {
       issues.append(.error(
         "IMAGE_CACHE_KEEP_RECENTLY_USED_NEGATIVE", "images.keepRecentlyUsed", "must not be negative"
+      ))
+    }
+    return issues
+  }
+}
+
+extension LoggingConfig {
+  /// A file too small to hold one burst of startup logs rotates continuously, and a `maxFiles`
+  /// of zero silently discards the archive an operator went looking for.
+  func validate() -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if file.enabled, file.maxSizeBytes < ByteSize.mebibytes(1).bytes {
+      issues.append(.error(
+        "LOGGING_FILE_MAX_SIZE_TOO_SMALL", "logging.file.maxSize", "must be at least 1MiB"
+      ))
+    }
+    if file.enabled, !(1...100).contains(file.maxFiles) {
+      issues.append(.error(
+        "LOGGING_FILE_MAX_FILES_INVALID", "logging.file.maxFiles", "must be between 1 and 100"
+      ))
+    }
+    if retention.instanceLogs < .zero {
+      issues.append(.error(
+        "LOGGING_RETENTION_NEGATIVE", "logging.retention.instanceLogs", "must not be negative"
+      ))
+    } else if !retention.instanceLogs.isPositive {
+      issues.append(.warning(
+        "LOGGING_RETENTION_DISABLED", "logging.retention.instanceLogs",
+        "0 keeps every per-instance log directory forever"
+      ))
+    }
+    if collectRunnerDiagnostics, !diagnosticsTimeout.isPositive {
+      issues.append(.error(
+        "LOGGING_DIAGNOSTICS_TIMEOUT_INVALID", "logging.diagnosticsTimeout",
+        "must be positive while collectRunnerDiagnostics is on"
       ))
     }
     return issues

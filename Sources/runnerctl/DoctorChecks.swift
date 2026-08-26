@@ -28,10 +28,13 @@ enum DoctorChecks {
 
     checks.append(hostSleepDisabled())
     checks.append(launchdJobLoaded())
+    checks.append(loginKeychainUnlocked())
 
-    let (daemonCheck, status) = await daemonReachable(url: daemonSocket)
+    let (daemonCheck, status, images) = await daemonReachable(url: daemonSocket)
     checks.append(daemonCheck)
     if let status { checks.append(daemonHealth(status)) }
+    checks.append(
+      runnerVersion(images: images, config: loaded.config, authState: status?.github.authState))
 
     return DoctorReport(checks: checks)
   }
@@ -203,16 +206,21 @@ enum DoctorChecks {
 
   // MARK: Daemon
 
-  static func daemonReachable(url: URL) async -> (check: DoctorCheck, status: SystemStatus?) {
+  /// Also pulls the image catalogue over the same connection: the runner-version check needs the
+  /// per-image freshness the daemon graded, and doctor should not open a second socket for it.
+  static func daemonReachable(
+    url: URL
+  ) async -> (check: DoctorCheck, status: SystemStatus?, images: [ImageInfoDTO]?) {
     do {
       let client = try await DaemonClient.connect(socketPath: url)
       defer { Task { await client.close() } }
       let status = try await client.status()
+      let images = try? await client.imageList().images
       return (
         DoctorCheck(
           id: "daemon_socket", title: "Daemon socket", status: .ok,
           detail: "\(url.path) reachable (\(status.daemon.state.rawValue))"
-        ), status
+        ), status, images
       )
     } catch {
       return (
@@ -220,7 +228,7 @@ enum DoctorChecks {
           id: "daemon_socket", title: "Daemon socket", status: .warn,
           detail: "\(url.path) unreachable (runnerd not running, or a different --socket-dir)"
         ),
-        nil
+        nil, nil
       )
     }
   }

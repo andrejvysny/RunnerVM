@@ -119,8 +119,8 @@ extension M2Harness {
       applier: ConfigApplier(store: GRDBConfigStore(db: database), stateDir: paths.stateDir),
       reconciler: Reconciler(logger: Logger(label: "test")), parseConfig: parseConfig,
       probe: M2Harness.probe(), startedAt: Date(), actorName: "test", gateway: gateway,
-      scopeHealth: scopeHealth, runners: runners, metrics: metrics,
-      logger: Logger(label: "test"))
+      scopeHealth: scopeHealth, runnerVersions: runnerVersions, runners: runners,
+      metrics: metrics, logger: Logger(label: "test"))
   }
 }
 

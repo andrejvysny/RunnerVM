@@ -1,6 +1,7 @@
 import ArgumentParser
 import DaemonAPI
 import Foundation
+import RunnerCore
 
 struct Image: ParsableCommand {
   static let configuration = CommandConfiguration(
@@ -37,6 +38,11 @@ extension Image {
     @Option(name: .long, help: "EFI variable store or macOS auxiliary storage to import with it.")
     var nvram: String?
 
+    @Option(
+      name: .long,
+      help: "Sealed metadata.json to adopt (runner version, capabilities, provenance). Defaults to a metadata.json next to the disk; an explicit path that cannot be used is an error.")
+    var metadata: String?
+
     func validate() throws {
       guard ["linux", "macos"].contains(os) else {
         throw ValidationError("--os must be linux or macos")
@@ -45,7 +51,8 @@ extension Image {
 
     func run() async throws {
       let request = ImageImportRequest(
-        path: Image.absolute(disk), nvramPath: nvram.map(Image.absolute), os: os, name: name)
+        path: Image.absolute(disk), nvramPath: nvram.map(Image.absolute), os: os, name: name,
+        metadataPath: metadata.map(Image.absolute))
       let image = try await options.withDaemon { try await $0.imageImport(request) }
       switch options.output {
       case .json: try JSONOut.print(image)
@@ -151,13 +158,25 @@ extension Image {
 
   static func table(_ images: [ImageInfoDTO]) -> String {
     Table.render(
-      headers: ["NAME", "DIGEST", "OS", "STATE", "VIRTUAL", "ON DISK", "PINS"],
+      headers: ["NAME", "DIGEST", "OS", "STATE", "RUNNER", "VIRTUAL", "ON DISK", "PINS"],
       rows: images.map {
         [
-          Format.optional($0.name), Format.shortDigest($0.digest), $0.os, $0.state,
+          Format.optional($0.name), Format.shortDigest($0.digest), $0.os, $0.state, runner($0),
           Format.bytes($0.virtualSizeBytes), Format.bytes($0.allocatedSizeBytes), "\($0.pinCount)",
         ]
       })
+  }
+
+  /// `2.336.0 (stale)`. A healthy image prints the bare version — the annotation is there to be
+  /// noticed, so it only appears when something is actually behind (spec §53).
+  static func runner(_ image: ImageInfoDTO) -> String {
+    guard let version = image.runnerVersion, !version.isEmpty else { return "-" }
+    switch image.runnerVersionHealth {
+    case .healthy: return version
+    case .stale: return "\(version) (stale)"
+    case .tooOld: return "\(version) (too old)"
+    case .unknown: return "\(version) (unknown)"
+    }
   }
 
   static func fields(_ image: ImageInfoDTO) -> [(String, String)] {
@@ -170,10 +189,32 @@ extension Image {
       ("state", image.state),
       ("virtual size", Format.bytes(image.virtualSizeBytes)),
       ("on disk", Format.bytes(image.allocatedSizeBytes)),
+      ("runner", runner(image)),
+      ("runner health", image.runnerVersionHealth.rawValue),
       ("pins", "\(image.pinCount)"),
       ("path", image.localPath),
       ("created", image.createdAt),
       ("pulled", Format.optional(image.pulledAt)),
+    ] + provenanceFields(image.provenance)
+  }
+
+  /// Provenance is only as complete as the build that sealed it, so every row is dropped when its
+  /// value is missing rather than printed as `-`; an image with no provenance adds nothing.
+  static func provenanceFields(_ source: ImageProvenanceSummaryDTO?) -> [(String, String)] {
+    guard let source else { return [] }
+    let rows: [(String, String?)] = [
+      ("built at", source.builtAt),
+      ("builder commit", source.builderCommit),
+      ("base image", source.baseImageSource),
+      ("base sha256", source.baseImageSHA256),
+      ("runner sha256", source.runnerSHA256),
+      ("guest agent commit", source.guestAgentCommit),
+      ("docker", source.dockerVersion),
+      ("kernel", source.kernelVersion),
+      ("package upgrade", source.packageUpgrade.map { $0 ? "yes" : "no" }),
+      ("packages", source.packageCount.map(String.init)),
+      ("disk sha256", source.diskSHA256),
     ]
+    return rows.compactMap { label, value in value.map { (label, $0) } }
   }
 }

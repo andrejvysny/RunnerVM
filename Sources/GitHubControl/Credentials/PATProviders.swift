@@ -34,46 +34,10 @@ public struct FilePATProvider: GitHubCredentialProvider {
     self.url = url
   }
 
-  private var fileManager: FileManager {
-    .default
-  }
-
   public func credential() async throws -> GitHubCredential {
     let path = url.path(percentEncoded: false)
-    guard fileManager.fileExists(atPath: path) else {
-      throw GitHubControlError.notFound(resource: "token file \(path)")
-    }
-    try checkPermissions(path: path)
-    guard let data = fileManager.contents(atPath: path),
-          let raw = String(data: data, encoding: .utf8)
-    else {
-      throw GitHubControlError.permanentConfiguration(
-        reason: "token file \(path) is not readable UTF-8"
-      )
-    }
+    let raw = try SecureFile.readString(path: path, label: "token file", policy: .ownerOnly)
     return try GitHubCredential.pat(sanitizing: raw, source: "token file \(path)")
-  }
-
-  private func checkPermissions(path: String) throws {
-    let attributes: [FileAttributeKey: Any]
-    do {
-      attributes = try fileManager.attributesOfItem(atPath: path)
-    } catch {
-      throw GitHubControlError.permanentConfiguration(
-        reason: "cannot stat token file \(path): \(error.localizedDescription)"
-      )
-    }
-    guard let mode = (attributes[.posixPermissions] as? NSNumber)?.uint16Value else {
-      throw GitHubControlError.permanentConfiguration(
-        reason: "cannot read the mode of token file \(path)"
-      )
-    }
-    guard mode & 0o077 == 0 else {
-      throw GitHubControlError.permanentConfiguration(
-        reason: "token file \(path) is mode \(String(mode, radix: 8)); it must be owner-only "
-          + "(chmod 600)"
-      )
-    }
   }
 }
 

@@ -99,16 +99,34 @@ public final class VMRuntime {
   /// The descriptor is `dup`ed: `VZVirtioSocketConnection` closes its own descriptor when it is
   /// deallocated, and the caller (NIO, or a relay thread) needs a descriptor whose lifetime it
   /// controls. Both descriptors refer to the same socket, so exactly one close happens per side.
+  ///
+  /// Uses the completion-handler API rather than the async overlay: `VZVirtioSocketConnection` is
+  /// not `Sendable`, so the object must never cross a concurrency boundary (Swift 6.1 rejects the
+  /// overlay's return). The framework invokes the handler on the VM's queue — the main queue here —
+  /// so the connection lives and dies inside that callback and only the integer descriptor leaves.
   public func connectToGuest(port: UInt32) async throws -> CInt {
     let current = Self.map(vm.state)
     guard current == .running else { throw VMRuntimeError.notRunning(current) }
     guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else {
       throw VMRuntimeError.noSocketDevice
     }
-    let connection = try await device.connect(toPort: port)
+    try Task.checkCancellation()
+    return try await withCheckedThrowingContinuation { continuation in
+      device.connect(toPort: port) { result in
+        continuation.resume(with: result.flatMap(Self.duplicateDescriptor))
+      }
+    }
+  }
+
+  /// Runs inside the framework callback; `connection` is released when the callback returns.
+  private nonisolated static func duplicateDescriptor(
+    _ connection: VZVirtioSocketConnection
+  ) -> Result<CInt, any Error> {
     let descriptor = dup(connection.fileDescriptor)
-    guard descriptor >= 0 else { throw VMRuntimeError.posix(operation: "dup", errno: errno) }
-    return descriptor
+    guard descriptor >= 0 else {
+      return .failure(VMRuntimeError.posix(operation: "dup", errno: errno))
+    }
+    return .success(descriptor)
   }
 
   public func finishEvents() {

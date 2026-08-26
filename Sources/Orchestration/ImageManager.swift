@@ -13,6 +13,9 @@ public struct ManagedImage: Sendable, Equatable {
   public var allocatedBytes: UInt64
   public var pinCount: Int
   public var name: String?
+  /// The image's own `metadata.json` as the store holds it; `nil` only when the manifest could not
+  /// be read. `record.metadataJson` carries the same bytes, already encoded.
+  public var metadata: ImageMetadata?
 }
 
 /// One `image.prune` run (spec §110, §57): candidates, what was actually deleted (empty on a dry
@@ -110,19 +113,17 @@ public actor ImageManager {
 
   /// Imports a raw disk that already exists on this host. Idempotent by content: a second import
   /// of identical bytes updates the row and stores no second copy.
+  ///
+  /// A `metadata.json` sealed next to the disk -- or named explicitly with `metadataPath` -- is
+  /// adopted whole, so `runnerVersion`, `guestAgentVersion`, `capabilities` and `provenance`
+  /// survive the import instead of being re-synthesised (see `SealedImageMetadata.swift`).
   public func importLocal(
-    disk: URL, nvram: URL?, os: GuestOS, name: String?, hardwareModel: String? = nil
+    disk: URL, nvram: URL?, os: GuestOS, name: String?, hardwareModel: String? = nil,
+    metadataPath: URL? = nil
   ) async throws -> ManagedImage {
     let size = try Self.fileSize(at: disk)
-    let metadata = ImageMetadata(
-      os: os,
-      architecture: architecture,
-      virtualDiskSizeBytes: size,
-      // The injected clock, not `Date()`: `createdAt` feeds the content digest through
-      // `metadata.json`, so a test that imports the same bytes twice must be able to pin it.
-      createdAt: now(),
-      boot: ImageMetadata.Boot(type: os == .macos ? .macos : .efi),
-      macos: hardwareModel.map { ImageMetadata.MacOSPlatform(hardwareModel: $0) })
+    let metadata = try resolveImportMetadata(
+      disk: disk, size: size, os: os, hardwareModel: hardwareModel, metadataPath: metadataPath)
     let imported = try await store.importLocal(
       disk: disk, nvram: nvram, metadata: metadata, name: name)
     let info = try await store.inspect(digest: imported.digest)
@@ -134,7 +135,7 @@ public actor ImageManager {
         .merging(["name": .string(name ?? "-"), "created": .stringConvertible(imported.created)]) { $1 })
     return ManagedImage(
       record: record, allocatedBytes: info.allocatedBytes, pinCount: 0,
-      name: info.manifest.name ?? name)
+      name: info.manifest.name ?? name, metadata: info.metadata)
   }
 
   func makeRecord(
@@ -252,7 +253,8 @@ public actor ImageManager {
       record: record,
       allocatedBytes: info?.allocatedBytes ?? record.allocatedSizeBytes ?? 0,
       pinCount: try await images.pinCount(digest: record.digest),
-      name: info?.manifest.name ?? record.canonicalReference)
+      name: info?.manifest.name ?? record.canonicalReference,
+      metadata: info?.metadata)
   }
 
   // MARK: - Delete

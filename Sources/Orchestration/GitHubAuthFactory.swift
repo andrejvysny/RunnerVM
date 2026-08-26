@@ -178,9 +178,8 @@ public enum GitHubAuthFactory {
     at url: URL, session: URLSession, baseURL: URL
   ) throws -> any GitHubCredentialProvider {
     let path = url.path(percentEncoded: false)
-    guard let data = FileManager.default.contents(atPath: path) else {
-      throw GitHubControlError.notFound(resource: "GitHub App descriptor \(path)")
-    }
+    let data = try SecureFile.read(
+      path: path, label: "GitHub App descriptor", policy: .ownerAndGroupRead)
     let file: GitHubAppFile
     do {
       file = try JSONDecoder().decode(GitHubAppFile.self, from: data)
@@ -190,12 +189,22 @@ public enum GitHubAuthFactory {
       throw GitHubControlError.permanentConfiguration(
         reason: "\(path) is not a valid GitHub App descriptor: \(error)")
     }
-    guard let pem = try? String(contentsOfFile: file.privateKeyPath, encoding: .utf8) else {
-      throw GitHubControlError.notFound(
-        resource: "GitHub App private key \(file.privateKeyPath)")
-    }
+    let keyPath = resolvedPrivateKeyPath(file.privateKeyPath, relativeTo: url)
+    let pem = try SecureFile.readString(
+      path: keyPath, label: "GitHub App private key", policy: .ownerOnly)
     return try GitHubAppCredentialProvider(
       appID: file.appID, installationID: file.installationID, privateKeyPEM: pem,
       baseURL: baseURL, session: session)
+  }
+
+  /// A relative `privateKeyPath` in `github-app.json` is resolved against the *descriptor's*
+  /// directory, not the process's working directory — `runnerd` is a daemon with no meaningful
+  /// cwd, so a relative path must be anchored to something stable.
+  private static func resolvedPrivateKeyPath(
+    _ privateKeyPath: String, relativeTo descriptorURL: URL
+  ) -> String {
+    guard !privateKeyPath.hasPrefix("/") else { return privateKeyPath }
+    return descriptorURL.deletingLastPathComponent()
+      .appending(path: privateKeyPath).path(percentEncoded: false)
   }
 }

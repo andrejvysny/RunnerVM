@@ -214,7 +214,8 @@ extension ScaleSetDemandProvider {
     states[profileId]?.snapshot.healthy = false
     logger.warning(
       "scale set poll failed",
-      metadata: .context(profile: profileId).merging(["error": .string(reason)]) { $1 })
+      metadata: .context(profile: profileId, scaleSetID: states[profileId]?.scaleSetRowId)
+        .merging(["error": .string(reason)]) { $1 })
     emit(.providerDegraded(profile: profileId, reason: reason))
   }
 

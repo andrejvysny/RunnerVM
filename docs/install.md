@@ -57,6 +57,9 @@ Both plists live in `packaging/launchd/` as templates (`__TOKEN__` placeholders)
 substitutes them and writes the result to `/Library/LaunchAgents/com.runnervm.runnerd.agent.plist`
 or `/Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist`.
 
+Before trusting either variant on unattended hardware, run the cold-boot/power-cut qualification
+loop in `docs/qualification.md` (`scripts/qualify-host.sh`).
+
 ## Dedicated service account and auto-login
 
 ```sh
@@ -100,28 +103,35 @@ v1 does not tolerate the host sleeping out from under a running VM), and whether
 
 ## Log locations
 
-- `<state-dir>/logs/runnerd.log` — the daemon's JSON logs (both launchd plists redirect
-  stdout/stderr there; `runnerd` writes structured JSON to stderr, spec §42).
-- `<state-dir>/logs/instances/<id>/` — per-instance `serial.log` and worker logs (spec §131).
-- `packaging/newsyslog/runnervm.conf` — optional rotation policy; not installed automatically (copy
-  it to `/etc/newsyslog.d/` yourself). Read the caveat in that file and in
-  `packaging/launchd/README.md`: `runnerd` does not reopen its log file descriptor on rotation, so a
-  rotated file only stops growing once the daemon restarts.
+- `<state-dir>/logs/runnerd/runnerd.log` — the daemon's JSON log. `runnerd` writes and rotates it
+  itself (32MiB × 10 by default) and tees the same lines to stderr.
+- `<state-dir>/logs/runnerd/stdio.log` — where both launchd plists point
+  `StandardOutPath`/`StandardErrorPath`. Crash and launch output only; empty is the healthy state.
+- `<state-dir>/logs/events.jsonl` — one JSON line per instance/session lifecycle transition and per
+  audit event.
+- `<state-dir>/logs/instances/<id>/` — per-instance `serial.log`, `worker.log`, `failure.json` and
+  the `diag/` tarball pulled out of the guest before it was destroyed. Swept after
+  `logging.retention.instanceLogs` (default 7d).
+- `packaging/newsyslog/runnervm.conf` — optional additional rotation policy; not installed
+  automatically. `runnerd` now reopens its files on `SIGHUP`, so external rotation takes effect
+  immediately (`launchctl kill HUP …` — see the file).
+
+**Full reference: [`docs/logging.md`](logging.md)** — field glossary, the `logging:` configuration
+block, retention, `_diag` collection and its limits, and ready-made Vector and Fluent Bit
+pipelines.
 
 ## Upgrade procedure
 
-1. Stop new work from landing on this host before touching binaries. `runnerctl system drain`
-   would be the ideal command, but `system.drain` is still `NOT_IMPLEMENTED`
-   (`Sources/DaemonAPI/DaemonMethod.swift`) as of this writing — instead, disable every profile in
-   the configuration (`profiles[].enabled: false`, or remove them) and `runnerctl config apply` the
-   result, then wait for `runnerctl status` to show zero `busy`/`starting` instances.
+1. Stop new work from landing on this host before touching binaries:
+   `runnerctl system drain --wait` advertises zero capacity, admits no new jobs, and blocks until
+   the last active job finishes (`--timeout` bounds the wait, default 900s).
 2. `sudo launchctl bootout gui/$(id -u _runnervm) /Library/LaunchAgents/com.runnervm.runnerd.agent.plist`
    (or `system` + the daemon plist path for the LaunchDaemon variant).
 3. Re-run `scripts/install.sh` with the same flags — it overwrites the binaries and re-signs
    `vmworker` in place; state and runtime directories are untouched.
 4. `runnerctl doctor` to confirm the new binary is signed and `vmworker probe` still succeeds.
-5. Reload the job (`launchctl bootstrap ...`, printed by `install.sh`) and re-enable the profiles
-   you disabled in step 1.
+5. Reload the job (`launchctl bootstrap ...`, printed by `install.sh`), then `runnerctl system
+   resume` to advertise capacity again.
 
 ## Security notes (spec §129)
 
@@ -130,8 +140,13 @@ v1 does not tolerate the host sleeping out from under a running VM), and whether
   `.tmp` rename so a socket is never observed group/world-accessible).
 - RunnerVM never listens on TCP for internal control in v1 — only Unix-domain sockets under
   `<runtime-dir>`.
-- `<state-dir>` is 0750; the `github-token` file (when `github.auth.source: file`) is enforced
-  owner-only (0600) by the code that reads it — a looser mode is treated as a configuration error,
-  not a warning, because a leaked PAT with `admin:org` is a host-wide compromise.
+- `<state-dir>` is 0750. Every GitHub secret file is read through one owner-checked,
+  symlink-rejecting reader (`SecureFile` in `Sources/GitHubControl/Credentials`) that opens the
+  file, `fstat()`s the descriptor, and only then reads it — a looser mode, a symlink, a non-regular
+  file, or an unexpected owner is a configuration error, not a warning, because a leaked PAT or App
+  private key with `admin:org` is a host-wide compromise. Target modes, owner = service user:
+  - `github-token` (when `github.auth.source: file`) — 0600.
+  - `github-app.json` (when `github.auth.provider: app`) — 0640 or stricter.
+  - the GitHub App private key PEM it points at — 0600.
 - Run production workloads as the dedicated `_runnervm` account, never as `root` — `root` is only
   needed transiently, for `sudo scripts/install.sh` itself.

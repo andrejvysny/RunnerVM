@@ -133,6 +133,24 @@ struct ConfigDTO: Decodable {
 
   struct ImageUpdates: Decodable {
     var recycleReusable: Bool?
+    var denyTooOldRunner: Bool?
+  }
+
+  struct Logging: Decodable {
+    struct File: Decodable {
+      var enabled: Bool?
+      var maxSize: ByteSize?
+      var maxFiles: Int?
+    }
+
+    struct Retention: Decodable {
+      var instanceLogs: DurationValue?
+    }
+
+    var file: File?
+    var retention: Retention?
+    var collectRunnerDiagnostics: Bool?
+    var diagnosticsTimeout: DurationValue?
   }
 
   var version: Int
@@ -144,4 +162,5 @@ struct ConfigDTO: Decodable {
   var diagnostics: Diagnostics?
   var images: Images?
   var imageUpdates: ImageUpdates?
+  var logging: Logging?
 }

@@ -28,9 +28,11 @@ import Testing
     #expect(unwrapped.code == "CONFIG_VALIDATION_FAILED")
   }
 
-  @Test func defaultMacOSProfileIsAlsoValid() {
+  @Test func macOSProfileIsRejectedAsUnsupportedGuestOS() throws {
     let issues = Fixtures.issues { $0.profiles = [Fixtures.macosProfile] }
-    #expect(issues.isEmpty)
+    let issue = try #require(issues.first(code: "GUEST_OS_UNSUPPORTED"))
+    #expect(issue.severity == .error)
+    #expect(issue.path == "profiles[0].os")
   }
 
   @Test func issuesCarryASeverityCodePathAndMessage() throws {

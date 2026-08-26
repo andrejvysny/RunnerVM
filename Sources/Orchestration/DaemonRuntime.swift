@@ -103,6 +103,7 @@ public actor DaemonRuntime {
   private var metricsEndpoint: MetricsEndpoint?
   private var shutdownTask: Task<Void, Never>?
   private var hostId: HostID?
+  private var eventLog: LifecycleEventLog?
   private var started = false
 
   /// One registry for the whole daemon (spec §43): every manager writes into it, `metrics.snapshot`
@@ -145,15 +146,21 @@ public actor DaemonRuntime {
     self.database = database
     let hostId = try HostIdentity.load(stateDir: options.paths.stateDir)
     self.hostId = hostId
+    // From here on every log line this process emits carries `host_id`, without the call sites
+    // having to know it (spec §117).
+    LogContext.setGlobalHost(hostId)
     try await GRDBHostRepository(db: database).ensureHost(id: hostId)
     let executable = options.vmworkerPath ?? HostProbe.defaultExecutable()
     let probe = await HostProbe.run(executable: executable, logger: logger)
     let applier = ConfigApplier(
       store: GRDBConfigStore(db: database), stateDir: options.paths.stateDir)
-    let demandMode = resolveInitialDemandMode(applier: applier)
+    let pending = pendingConfiguration(applier: applier)
+    let eventLog = makeEventLog(hostId: hostId, logging: pending?.logging ?? LoggingConfig())
+    self.eventLog = eventLog
+    let demandMode = options.demandMode ?? pending?.github.demand ?? .scaleSet
     let service = try await makeService(
       database: database, hostId: hostId, probe: probe, executable: executable, applier: applier,
-      demandMode: demandMode)
+      demandMode: demandMode, eventLog: eventLog)
     self.service = service
     try await service.bootstrap(configPath: options.configPath)
     await service.setShutdownHandler { [weak self] force in
@@ -208,6 +215,8 @@ public actor DaemonRuntime {
     supervisor = nil
     service = nil
     database = nil
+    await eventLog?.close()
+    eventLog = nil
     lock?.release()
     lock = nil
   }
@@ -266,9 +275,26 @@ public actor DaemonRuntime {
 
   private var lockURL: URL { options.paths.stateDir.appending(path: "runnerd.lock") }
 
+  /// `nil` when the section is disabled, or when the file cannot be opened: the event stream is
+  /// an observability nicety, not a precondition for running VMs.
+  private func makeEventLog(hostId: HostID, logging: LoggingConfig) -> LifecycleEventLog? {
+    guard logging.file.enabled else { return nil }
+    do {
+      return try LifecycleEventLog(
+        url: options.paths.eventsLogFile, hostId: hostId,
+        options: RotatingFileSink.Options(
+          maxSizeBytes: logging.file.maxSizeBytes, maxFiles: logging.file.maxFiles))
+    } catch {
+      logger.warning(
+        "lifecycle event stream disabled",
+        metadata: ["error": .string(String(describing: error))])
+      return nil
+    }
+  }
+
   private func makeService(
     database: RunnerDatabase, hostId: HostID, probe: HostProbeResult, executable: URL?,
-    applier: ConfigApplier, demandMode: DemandMode
+    applier: ConfigApplier, demandMode: DemandMode, eventLog: LifecycleEventLog?
   ) async throws -> DaemonServiceImpl {
     let instanceRows = GRDBInstanceRepository(db: database)
     let imageRows = GRDBImageRepository(db: database)
@@ -293,18 +319,24 @@ public actor DaemonRuntime {
     // (spec §17); injected as a closure so tests can drive every `DiskPressureState` directly.
     let stateDir = options.paths.stateDir
     let diskPressure = DiskPressureMonitor(freeSpace: { APFSClone.freeSpace(at: stateDir) })
+    // Built before the instance manager: admission grades the image's runner version through it
+    // (spec §53), so the manager needs it at construction.
+    let gateway = GitHubGateway(
+      options: options.github ?? GitHubGateway.Options(paths: options.paths))
+    let runnerVersions = RunnerVersionMonitor(gateway: gateway)
     let instances = InstanceManager(
       paths: options.paths, hostId: hostId, instances: instanceRows,
       profiles: GRDBProfileRepository(db: database), imageRows: imageRows, images: images,
-      imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor, probe: probe)
+      imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor, probe: probe,
+      runnerVersions: runnerVersions)
+    await instances.attachEventLog(eventLog)
     self.instances = instances
-    let gateway = GitHubGateway(
-      options: options.github ?? GitHubGateway.Options(paths: options.paths))
     let runners = RunnerSessionManager(
       sessions: GRDBRunnerSessionRepository(db: database), instanceRows: instanceRows,
       profiles: GRDBProfileRepository(db: database), scopes: GRDBScopeRepository(db: database),
       summaries: GRDBJobSummaryRepository(db: database),
       operations: GRDBOperationRepository(db: database), instances: instances, gateway: gateway)
+    await runners.attachEventLog(eventLog)
     self.runners = runners
     await supervisor.setHandlers(
       onState: { id, state in await instances.handleWorkerState(id: id, vmState: state) },
@@ -312,6 +344,7 @@ public actor DaemonRuntime {
     let orchestrator = makeOrchestrator(
       database: database, hostId: hostId, probe: probe, instances: instances, runners: runners,
       gateway: gateway, instanceRows: instanceRows, demandMode: demandMode)
+    await orchestrator.attachEventLog(eventLog)
     self.orchestrator = orchestrator
     await reconciler.attach(
       CompositeReconcileStep([
@@ -337,10 +370,12 @@ public actor DaemonRuntime {
       gateway: gateway,
       scopeHealth: ScopeHealthMonitor(
         scopes: GRDBScopeRepository(db: database), gateway: gateway),
+      runnerVersions: runnerVersions,
       runners: runners,
       orchestrator: orchestrator,
       metrics: metrics,
       registryCredentials: registryCredentials,
+      eventLog: eventLog,
       logger: logger)
   }
 
@@ -369,27 +404,25 @@ public actor DaemonRuntime {
       metrics: metrics)
   }
 
-  /// The demand provider is wired once, before `service.bootstrap` has parsed and applied a
-  /// configuration (spec §69 step 4 runs after the API surface is up), so this peeks at whatever
-  /// `bootstrap` is about to apply -- `--config` if given, else the last persisted document -- to
-  /// pick the right provider up front. `Options.demandMode` always wins outright. A parse failure
-  /// here is silently ignored and falls back to `scaleSet`; `bootstrap` re-parses for real right
-  /// after and surfaces the error properly.
-  private func resolveInitialDemandMode(applier: ConfigApplier) -> DemandMode {
-    if let overridden = options.demandMode { return overridden }
+  /// The demand provider and the log files are wired once, before `service.bootstrap` has parsed
+  /// and applied a configuration (spec §69 step 4 runs after the API surface is up), so this peeks
+  /// at whatever `bootstrap` is about to apply -- `--config` if given, else the last persisted
+  /// document. A parse failure here is silently ignored and every caller falls back to its
+  /// default; `bootstrap` re-parses for real right after and surfaces the error properly.
+  private func pendingConfiguration(applier: ConfigApplier) -> RunnerConfiguration? {
     let yaml: String? = if let configPath = options.configPath {
       try? String(contentsOf: configPath, encoding: .utf8)
     } else {
       applier.loadApplied()?.yaml
     }
-    guard let yaml, let config = try? parseConfig(yaml) else { return .scaleSet }
-    return config.github.demand
+    guard let yaml else { return nil }
+    return try? parseConfig(yaml)
   }
 
   private func createDirectories() throws {
     let manager = FileManager.default
     for directory in [options.paths.stateDir, options.paths.imagesDir, options.paths.instancesDir,
-                      options.paths.daemonLogsDir] {
+                      options.paths.daemonLogsDir, options.paths.instanceLogsDir] {
       try manager.createDirectory(at: directory, withIntermediateDirectories: true)
     }
     // 0700: the socket directory is the daemon's control surface, not a shared temp dir.

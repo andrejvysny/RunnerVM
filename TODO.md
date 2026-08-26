@@ -63,7 +63,7 @@ Plan: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (analysis + milestone
   Open bug (not fixed here, other module): `runnerctl vm ssh` prints docker0's `172.17.0.1` instead of the NIC address — `GuestAgent/internal/system/system.go:132` sorts addresses lexicographically and `Sources/runnerctl/VMGuestCommands.swift:143` takes `.first`.
 
 ## Follow-ups from §147 e2e
-- [ ] `runnerctl image import --metadata <path>` (ImageManager.swift:40 currently synthesises metadata; sealed `metadata.json` is discarded)
+- [x] `runnerctl image import --metadata <path>` + implicit adoption of the sealed `metadata.json` next to the disk (`SealedImageMetadata.swift`); `runnerVersion`/`guestAgentVersion`/`capabilities`/`provenance` survive the import, `image inspect` prints the provenance summary
 - [ ] Rebuild the Ubuntu image after the guest-agent IP ordering fix (`vm ssh` printed docker0 address)
 - [ ] Cross-process Swift⇄Go framing test in CI (currently only proven live)
 
@@ -90,6 +90,7 @@ See plan C2.
   - A JIT runner created with `generateJITConfig(scaleSetID:)` is picked up by the scale set and receives a job.
   - `ensureRunnerRemoved` through the scale-set API for a runner that never came online.
   - Restart runnerd mid-job: new session generation, no duplicate `AcquireJobs`, the running job survives.
+  - Live integration: `scripts/live-github-e2e.sh` (`docs/live-integration.md`) — success/cancel-before-assignment/cancel-during-job/restart-while-booting/restart-during-job/redelivery/long-job/concurrent/queue-overflow scenarios against a real org/repo; scaffolded, not yet run.
 - [x] M6 client: `ActionsScaleSetClient`/`ActionsMessageSession` ported from actions/scaleset v0.4.0 (MIT; PROVENANCE rows), `FakeActionsService` (92 GitHubControl tests). Endpoints/headers documented in `Sources/GitHubControl/ScaleSet/`; live verification pending (S6).
 - [x] M6 orchestration: `DemandProvider` (manual + scale set: registration, sessions/generations, durable inbox, acquireJobs, JobStarted/Completed correlation, advertised capacity), `Orchestrator` tick (capacity → desired plan → round-robin/throttled starts → unbound cancellation → scale-set JIT session assignment → idleTTL reaping; per-profile hold-down), `runnerctl scaleset list`, `debug demand set` (667 tests). Live verification pending (S6).
 - [x] `github.demand: scaleSet|manual` config model
@@ -112,3 +113,19 @@ See plan C2.
 4. Package lives at workspace root, `tart/` as sibling reference (assumed); repo not `git init`ed (user rule: no git ops unless told)
 5. Auto-login service user acceptable if LaunchDaemon spike fails?
 6. Reusable VMs needed at all?
+
+## Production readiness review (2026-08-26) — tasks
+All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: hardware runs of `scripts/qualify-host.sh`, live runs of `scripts/live-github-e2e.sh` (need org/PAT), a real vsock connect on the new completion-handler path (needs image on disk + signed vmworker), CI green on Swift 6.1.2 (unverified locally: dev host is 6.3.3).
+- [x] T1 P0 Swift 6.1 vsock: `VZVirtioSocketConnection` never crosses a concurrency boundary (completion handler + dup inside callback)
+- [x] T2 P0 macOS guests not advertised: drop example profile, `GUEST_OS_UNSUPPORTED` validation error, README/docs say Linux ARM64 only
+- [x] T3 P0 live GitHub integration workflow scaffold (`scripts/live-github-e2e.sh`, `.github/workflows/github-integration.yml`, `docs/e2e/`, `docs/live-integration.md`) — NOT yet run: needs org/repo + PAT
+- [x] T4 P0 Mac mini unattended-boot qualification script + docs (`scripts/qualify-host.sh`, `docs/qualification.md`, doctor `login_keychain` check) — hardware runs still pending
+- [x] T5 P1 vmworker env allowlist + regression test
+- [x] T6 P1 SecureFile reader (open+fstat, owner, 0600, no symlink) for PAT + GitHub App key
+- [x] T7 P1 install.sh fails closed on codesign/entitlement verify
+- [x] T8 P1 reproducible image builds: base/runner sha256, resolved versions, manifest, package list; `image import` keeps sealed metadata
+- [x] T9 P1 runner-version freshness: HEALTHY/STALE/TOO_OLD/UNKNOWN in image list/status/doctor, optional admission deny
+- [x] T10 P1 CI hardening: `permissions: contents: read`, checkout@v7.0.1 + setup-go@v7.0.0 SHA-pinned, no `|| true`, shellcheck + bash tests job, gofmt, go race, codesign/entitlement verify. swiftformat lint NOT enabled: tree predates `.swiftformat` (≈250 files) — run `swiftformat .` as its own commit, then add `swiftformat --lint .` to the lint job
+- [x] T11 P1 external log persistence: in-process rotation, JSON sink, correlation fields, Vector/Fluent Bit example
+- [x] T12 P2 docs sync (install.md drain, README scope)
+- [x] T13 P2 dependabot (swift, gomod, actions)

@@ -16,7 +16,8 @@ enum ConfigMapper {
       metrics: mapMetrics(dto.metrics),
       diagnostics: mapDiagnostics(dto.diagnostics),
       images: mapImages(dto.images),
-      imageUpdates: mapImageUpdates(dto.imageUpdates)
+      imageUpdates: mapImageUpdates(dto.imageUpdates),
+      logging: mapLogging(dto.logging)
     )
   }
 
@@ -190,9 +191,28 @@ enum ConfigMapper {
     )
   }
 
+  private static func mapLogging(_ dto: ConfigDTO.Logging?) -> LoggingConfig {
+    let d = LoggingConfig()
+    let file = LoggingConfig.FileConfig(
+      enabled: dto?.file?.enabled ?? d.file.enabled,
+      maxSizeBytes: dto?.file?.maxSize?.bytes ?? d.file.maxSizeBytes,
+      maxFiles: dto?.file?.maxFiles ?? d.file.maxFiles
+    )
+    let retention = LoggingConfig.RetentionConfig(
+      instanceLogs: dto?.retention?.instanceLogs ?? d.retention.instanceLogs
+    )
+    return LoggingConfig(
+      file: file,
+      retention: retention,
+      collectRunnerDiagnostics: dto?.collectRunnerDiagnostics ?? d.collectRunnerDiagnostics,
+      diagnosticsTimeout: dto?.diagnosticsTimeout ?? d.diagnosticsTimeout
+    )
+  }
+
   private static func mapImageUpdates(_ dto: ConfigDTO.ImageUpdates?) -> ImageUpdatesConfig {
     ImageUpdatesConfig(
-      recycleReusable: dto?.recycleReusable ?? ImageUpdatesConfig().recycleReusable
+      recycleReusable: dto?.recycleReusable ?? ImageUpdatesConfig().recycleReusable,
+      denyTooOldRunner: dto?.denyTooOldRunner ?? ImageUpdatesConfig().denyTooOldRunner
     )
   }
 }

@@ -327,7 +327,8 @@ actor FakeDaemonService: DaemonService {
       digest: "sha256:" + String(repeating: "a", count: 64), name: name, os: os,
       architecture: "arm64", state: "ready", virtualSizeBytes: 21_474_836_480,
       allocatedSizeBytes: 2_000_000_000, localPath: "/tmp/images/sha256-aaa", pinCount: 0,
-      createdAt: "2026-01-01T00:00:00.000Z")
+      createdAt: "2026-01-01T00:00:00.000Z", runnerVersion: "2.320.0",
+      runnerVersionHealth: .stale)
   }
 
   static func sampleInstance(profile: String) -> InstanceInfoDTO {

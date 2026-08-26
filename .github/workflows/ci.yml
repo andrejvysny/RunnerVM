@@ -1,30 +1,79 @@
 name: ci
 on:
   push:
+    branches: [master]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   swift:
+    name: Swift build + tests (Xcode 16.4 / Swift 6.1)
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app || true
-      - run: swift --version
-      - run: swift build
-      - run: swift test
+        # No fallback: testing against a different toolchain than the one we support is a
+        # failure, not a warning.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+          swift --version
+      - name: Resolve packages
+        run: swift package resolve
+      - name: Build (Swift 6 language mode, strict concurrency)
+        run: swift build
+      - name: Test
+        run: swift test --parallel
       - name: Sign vmworker
         run: scripts/sign-dev.sh
-      - run: .build/debug/vmworker probe
+      - name: Verify vmworker entitlement
+        run: |
+          codesign --verify --strict .build/debug/vmworker
+          codesign -d --entitlements :- .build/debug/vmworker 2>&1 \
+            | grep -q com.apple.security.virtualization
+      - name: vmworker probe
+        run: .build/debug/vmworker probe --json
+
+  lint:
+    name: shellcheck + bash syntax
+    # macOS on purpose: scripts/tests sources the image builder, which probes codesign/hdiutil.
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: shellcheck
+        run: shellcheck scripts/*.sh scripts/tests/*.sh
+      - name: bash -n
+        run: for f in scripts/*.sh scripts/tests/*.sh; do bash -n "$f"; done
+      - name: image-builder unit test
+        run: bash scripts/tests/build-ubuntu-image-test.sh
+      # swiftformat --lint is deliberately absent: the tree predates the .swiftformat rules
+      # (≈250 files differ). Enable it in the same commit that runs `swiftformat .` once.
+
   go:
+    name: Guest agent (linux/arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: GuestAgent
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: GuestAgent/go.mod
       - run: go vet ./...
-      - run: go test ./...
-      - run: GOOS=darwin GOARCH=arm64 go build ./cmd/guest-agent
+      - run: gofmt -l . | tee /dev/stderr | test -z "$(cat)"
+      - name: go test -race
+        run: go test -race -count=1 ./...
+      - name: Cross-compile darwin/arm64
+        run: GOOS=darwin GOARCH=arm64 go build ./cmd/guest-agent

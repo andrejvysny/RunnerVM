@@ -131,6 +131,24 @@ privileged() {
     log "$desc — needs root, queued (see 'manual steps' below)"
 }
 
+# Sign one vmworker binary with the production entitlement and prove it took: strict signature
+# verification, the entitlement present, and a `probe` run (which exercises Virtualization.framework
+# without creating a VM). Every failure is fatal — there is no useful vmworker without this.
+sign_and_verify_vmworker() {
+    local bin="$1"
+    codesign --force --sign "$CODESIGN_IDENTITY" \
+        --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$bin" \
+        || { echo "error: codesign failed for $bin" >&2; exit 1; }
+    codesign --verify --strict "$bin" \
+        || { echo "error: signature verification failed for $bin" >&2; exit 1; }
+    if ! codesign -d --entitlements :- "$bin" 2>&1 | grep -q com.apple.security.virtualization; then
+        echo "error: $bin is missing com.apple.security.virtualization" >&2
+        exit 1
+    fi
+    "$bin" probe --json >/dev/null \
+        || { echo "error: $bin probe failed (entitlement not honoured or binary broken)" >&2; exit 1; }
+}
+
 step() {
     local desc="$1"
     shift
@@ -226,13 +244,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
         "$VMWORKER_BUILT"
 else
     log "codesign vmworker (identity: $CODESIGN_IDENTITY)"
-    codesign --force --sign "$CODESIGN_IDENTITY" \
-        --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$VMWORKER_BUILT"
-    if ! codesign -d --entitlements :- "$VMWORKER_BUILT" 2>&1 \
-        | grep -q com.apple.security.virtualization; then
-        echo "error: signed vmworker is missing the virtualization entitlement" >&2
-        exit 1
-    fi
+    sign_and_verify_vmworker "$VMWORKER_BUILT"
     log "vmworker signed and carries com.apple.security.virtualization"
 fi
 
@@ -245,14 +257,24 @@ privileged "install runnerd -> $RUNNERD_DEST" install -m 0755 "$RUNNERD_BUILT" "
 privileged "install vmworker -> $VMWORKER_DEST" install -m 0755 "$VMWORKER_BUILT" "$VMWORKER_DEST"
 privileged "install runnerctl -> $RUNNERCTL_DEST" install -m 0755 "$RUNNERCTL_BUILT" "$RUNNERCTL_DEST"
 # `install` strips the code signature it just copied on some toolchains; codesign is idempotent,
-# so re-assert it on the installed copy rather than relying on cp semantics.
+# so re-assert it on the installed copy and verify. vmworker cannot create a single VM without
+# its entitlement, so this fails closed: a signing or verification failure aborts the install.
+# When the copy itself was deferred to a manual sudo step, the same commands are queued after it.
 if [ "$DRY_RUN" -eq 1 ]; then
     printf '+ codesign --force --sign "%s" --entitlements Resources/vmworker.entitlements %s\n' \
         "$CODESIGN_IDENTITY" "$VMWORKER_DEST"
-elif [ -f "$VMWORKER_DEST" ]; then
-    codesign --force --sign "$CODESIGN_IDENTITY" \
-        --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$VMWORKER_DEST" 2>/dev/null \
-        || warn "could not re-sign $VMWORKER_DEST in place; verify with codesign -d --entitlements :-"
+    printf '+ codesign --verify --strict %s && %s probe --json\n' "$VMWORKER_DEST" "$VMWORKER_DEST"
+elif [ -f "$VMWORKER_DEST" ] && [ -w "$VMWORKER_DEST" ]; then
+    sign_and_verify_vmworker "$VMWORKER_DEST"
+    log "installed vmworker verified: signature, entitlement and probe OK"
+else
+    MANUAL_STEPS+=(
+        "$(quote_cmd codesign --force --sign "$CODESIGN_IDENTITY" \
+            --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$VMWORKER_DEST")"
+        "$(quote_cmd codesign --verify --strict "$VMWORKER_DEST")"
+        "$(quote_cmd "$VMWORKER_DEST" probe --json)"
+    )
+    warn "vmworker not signed/verified in place yet: run the queued codesign steps before starting runnerd"
 fi
 
 # --------------------------------------------------------------------------

@@ -115,6 +115,15 @@ public final class FakeGitHubServer: Sendable {
     state.withLock { $0.routes[Self.key(method.rawValue, path)] = replies }
   }
 
+  /// The `actions/runner` release route the image-freshness check reads (spec §53). GitHub's real
+  /// payload carries far more; only these two fields are decoded.
+  public func stubLatestRunnerRelease(tag: String, publishedAt: Date) {
+    let stamp = ISO8601DateFormatter().string(from: publishedAt)
+    stub(
+      .get, GitHubRunnersAPI.latestReleasePath,
+      .json("{\"tag_name\":\"\(tag)\",\"published_at\":\"\(stamp)\"}"))
+  }
+
   public var recorded: [Recorded] {
     state.withLock { $0.recorded }
   }

@@ -6,3 +6,4 @@
 --stripunusedargs closure-only
 --header ignore
 --exclude .build,tart
+--disable redundantSwiftTestingSuite

@@ -30,7 +30,8 @@ struct Status: AsyncParsableCommand {
 
   private static func imageFields(_ images: ImageSummary) -> [(String, String)] {
     var fields = [
-      ("Cached", "\(images.cached)"),
+      ("Cached", "\(images.cached) ready (\(images.runnerStale) stale, "
+        + "\(images.runnerTooOld) too old)"),
       ("Disk usage", Format.bytes(images.diskUsageBytes)),
     ]
     if images.pulling > 0 { fields.append(("Pulling", "\(images.pulling)")) }

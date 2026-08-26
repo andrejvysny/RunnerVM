@@ -44,12 +44,16 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
   public var boot: Boot
   public var macos: MacOSPlatform?
   public var capabilities: Capabilities
+  /// How this image was built (see `ImageProvenance.swift`). `nil` for images sealed before
+  /// provenance existed, and for anything not produced by `scripts/build-ubuntu-image.sh`.
+  public var provenance: Provenance?
 
   public init(
     schemaVersion: Int = ImageMetadata.currentSchemaVersion, os: GuestOS, architecture: String = "arm64",
     diskFormat: DiskFormat = .raw, virtualDiskSizeBytes: UInt64, runnerVersion: String? = nil,
     guestAgentVersion: String? = nil, minimumHostOS: String = "15.0", createdAt: Date, boot: Boot,
-    macos: MacOSPlatform? = nil, capabilities: Capabilities = Capabilities()
+    macos: MacOSPlatform? = nil, capabilities: Capabilities = Capabilities(),
+    provenance: Provenance? = nil
   ) {
     self.schemaVersion = schemaVersion
     self.os = os
@@ -63,5 +67,6 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
     self.boot = boot
     self.macos = macos
     self.capabilities = capabilities
+    self.provenance = provenance
   }
 }

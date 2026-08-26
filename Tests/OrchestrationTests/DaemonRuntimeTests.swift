@@ -74,7 +74,7 @@ import Testing
       #expect(status.host.probeSucceeded)
       #expect(!status.daemon.hostId.isEmpty)
       #expect(status.daemon.mode == "normal")
-      #expect(Set(status.profiles.map(\.name)) == ["ubuntu-24", "macos-15-xcode-16"])
+      #expect(Set(status.profiles.map(\.name)) == ["ubuntu-24"])
       #expect(status.github.scopeCount == 1)
       // The eager first tick runs before start() returns the socket to callers.
       #expect(status.reconciliation.runCount >= 1)
@@ -152,7 +152,7 @@ import Testing
 
     try await withRunningDaemon(configPath: configPath, tree: tree) { _, client in
       let profiles = try await client.profileList()
-      #expect(profiles.profiles.map(\.name) == ["macos-15-xcode-16", "ubuntu-24"])
+      #expect(profiles.profiles.map(\.name) == ["ubuntu-24"])
       #expect(profiles.profiles.allSatisfy { $0.scope == "engineering" })
 
       let ubuntu = try await client.profileGet(name: "ubuntu-24")
@@ -213,7 +213,7 @@ import Testing
       let response = try await client.configGet()
       #expect(response.yaml == ExampleConfig.example)
       let status = try await client.status()
-      #expect(status.profiles.count == 2)
+      #expect(status.profiles.count == 1)
       #expect(status.capacity.reservedCPUCount == 2)
     }
   }

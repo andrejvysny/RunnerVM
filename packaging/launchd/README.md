@@ -85,12 +85,21 @@ cold reboot.
 
 - `RUNNERVM_LOG_LEVEL` is set in both plists' `EnvironmentVariables`; `runnerd` uses it as the
   fallback when no `--log-level` argument is given (the plists pass `--log-level` too, which wins).
-- Both plists redirect `StandardOutPath`/`StandardErrorPath` to `<state>/logs/runnerd.log`.
-  `runnerd` keeps that file descriptor open for its whole lifetime and does not reopen it on
-  rotation, so `newsyslog`'s rename-based rotation (`packaging/newsyslog/runnervm.conf`) only takes
-  effect the next time the daemon restarts. `KeepAlive` means a crash restart picks it up quickly;
-  a long-lived healthy daemon will keep writing into the renamed file until the next
-  `launchctl kickstart -k` or reboot.
+- Both plists redirect `StandardOutPath`/`StandardErrorPath` to
+  `<state>/logs/runnerd/stdio.log`. That file carries **crash and launch output only** — a dyld
+  failure, a Swift runtime trap, anything that escapes the logging system. The daemon's actual
+  JSON log is `<state>/logs/runnerd/runnerd.log`, which `runnerd` writes and rotates itself
+  (`logging.file` in the configuration; see `docs/logging.md`).
+- launchd creates the stdio *file* but not its directory. `runnerd` creates
+  `<state>/logs/runnerd/` at startup, so it exists from the first run onward; on a brand new host
+  create it once before the first `launchctl bootstrap` so no early crash output is lost:
+  `sudo mkdir -p "<state>/logs/runnerd" && sudo chown _runnervm "<state>/logs/runnerd"`.
+- `runnerd` reopens every log file it owns on `SIGHUP`, so external rename-based rotation
+  (`packaging/newsyslog/runnervm.conf`) takes effect immediately rather than at the next restart.
+  launchd owns the pid and writes no pid file, so signal it with
+  `sudo launchctl kill HUP system/com.runnervm.runnerd` (daemon variant) or
+  `launchctl kill HUP gui/$(id -u _runnervm)/com.runnervm.runnerd` (agent variant). In-process
+  size rotation bounds the files even if you never send the signal.
 - `runnerctl doctor` checks whether the expected job is loaded
   (`launchctl print gui/$(id -u)/com.runnervm.runnerd` for the agent,
   `launchctl print system/com.runnervm.runnerd` for the daemon) and reports a warning, not a

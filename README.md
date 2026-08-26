@@ -1,8 +1,10 @@
 # RunnerVM
 
-A GitHub Actions self-hosted runner orchestrator for a single Mac host, using
-Apple's `Virtualization.framework` to run ephemeral (and, later, reusable)
-Linux/macOS runner VMs on demand — scale-to-zero, no shared cloud infrastructure.
+Linux ARM64 GitHub Actions runners hosted as Apple Virtualization.framework VMs on
+Apple Silicon — scale-to-zero, no shared cloud infrastructure.
+
+RunnerVM is a self-hosted runner orchestrator for a single Mac host: `runnerd` runs
+ephemeral (and, later, reusable) guest VMs on demand as GitHub Actions jobs arrive.
 
 - `runnerd` — the host daemon: config, scheduling, GitHub scale-set demand, SQLite state.
 - `vmworker` — one process per VM; the only binary that links `Virtualization.framework`
@@ -20,6 +22,13 @@ scripts/sign-dev.sh              # ad-hoc sign vmworker for local development
 
 For a production install (release binaries, launchd packaging, dedicated service
 account) see [`docs/install.md`](docs/install.md).
+
+## Status
+
+- Supported guest: Linux/arm64 only. macOS guests are not implemented; `runnerctl config
+  validate` (and `config apply`) reject `os: macos` with `GUEST_OS_UNSUPPORTED`.
+- Recommended production lifecycle: `ephemeral` — one job per VM, then destroy. `reusable`
+  exists but ephemeral is the mode this project is validated against.
 
 ## Documentation
 

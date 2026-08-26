@@ -21,11 +21,11 @@ import Testing
       try exampleConfiguration(), yaml: ExampleConfig.example, actor: "test")
 
     #expect(outcome.diff.addedScopes == ["engineering"])
-    #expect(Set(outcome.diff.addedProfiles) == ["ubuntu-24", "macos-15-xcode-16"])
+    #expect(Set(outcome.diff.addedProfiles) == ["ubuntu-24"])
     #expect(outcome.diff.disabledProfiles.isEmpty)
 
     let profiles = try await GRDBProfileRepository(db: db).list()
-    #expect(profiles.count == 2)
+    #expect(profiles.count == 1)
     #expect(profiles.allSatisfy { $0.enabled })
   }
 
@@ -46,20 +46,20 @@ import Testing
     defer { tree.remove() }
     let (applier, db) = try makeApplier(tree)
     let profiles = GRDBProfileRepository(db: db)
-    let full = try exampleConfiguration()
+    let full = try exampleWithSecondProfile()
 
-    _ = try await applier.apply(full, yaml: ExampleConfig.example, actor: "test")
+    _ = try await applier.apply(full, yaml: "version: 1\n", actor: "test")
     let removed = try await applier.apply(
-      try exampleWithoutMacOSProfile(), yaml: "version: 1\n", actor: "test")
-    #expect(removed.diff.disabledProfiles == ["macos-15-xcode-16"])
-    let disabled = try await profiles.get(name: "macos-15-xcode-16")
+      try exampleConfiguration(), yaml: "version: 1\n", actor: "test")
+    #expect(removed.diff.disabledProfiles == ["ubuntu-22"])
+    let disabled = try await profiles.get(name: "ubuntu-22")
     #expect(disabled?.enabled == false)
     // The row survives so history and foreign keys stay intact.
     #expect(disabled != nil)
 
-    let restored = try await applier.apply(full, yaml: ExampleConfig.example, actor: "test")
-    #expect(restored.diff.updatedProfiles == ["macos-15-xcode-16"])
-    let reenabled = try await profiles.get(name: "macos-15-xcode-16")
+    let restored = try await applier.apply(full, yaml: "version: 1\n", actor: "test")
+    #expect(restored.diff.updatedProfiles == ["ubuntu-22"])
+    let reenabled = try await profiles.get(name: "ubuntu-22")
     #expect(reenabled?.enabled == true)
   }
 
@@ -74,7 +74,7 @@ import Testing
     config.github.scopes = []
     let outcome = try await applier.apply(config, yaml: "version: 1\n", actor: "test")
     #expect(outcome.diff.disabledScopes == ["engineering"])
-    #expect(Set(outcome.diff.disabledProfiles) == ["ubuntu-24", "macos-15-xcode-16"])
+    #expect(Set(outcome.diff.disabledProfiles) == ["ubuntu-24"])
     let scopes = try await GRDBScopeRepository(db: db).list()
     #expect(scopes.count == 1)
     #expect(scopes[0].enabled == false)

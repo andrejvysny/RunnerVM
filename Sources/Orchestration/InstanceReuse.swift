@@ -172,7 +172,9 @@ extension InstanceManager {
     else { return }
     logger.info(
       "instance returned to the pool",
-      metadata: .context(instance: record.id).merging([
+      metadata: .context(
+        profile: record.profileId, instance: record.id, session: session, host: hostId
+      ).merging([
         "jobs_consumed": .stringConvertible(idle.jobsConsumed),
       ]) { $1 })
   }
@@ -248,9 +250,11 @@ extension InstanceManager {
     }
     logger.notice(
       "recycling instance",
-      metadata: .context(instance: record.id).merging([
+      metadata: .context(profile: record.profileId, instance: record.id, host: hostId).merging([
         "reason": .string(verdict.reason), "taint": .string(verdict.taint ?? "-"),
       ]) { $1 })
+    // A recycled VM is destroyed too, so it gets the same one-shot collection window.
+    await collectGuestDiagnostics(record)
     if let code = verdict.failureCode {
       await interrupt(record.id, code: code, message: verdict.detail)
     } else {
@@ -261,7 +265,12 @@ extension InstanceManager {
 
   /// Spec §48 step 22 / §74: one job, then the VM goes — unless the session failed, in which case
   /// the directory and its `failure.json` are the only evidence of why.
+  ///
+  /// The guest is still up here and will not be again, so this is the only window in which the
+  /// runner's `_diag` directory can be read. Collection is bounded and best effort; a guest that
+  /// hangs or refuses still gets torn down on the next line.
   private func retireEphemeral(_ record: InstanceRecord, outcome: SessionOutcome) async {
+    await collectGuestDiagnostics(record)
     guard outcome.completed else {
       await interrupt(
         record.id, code: outcome.failureCode ?? "RUNNER_SESSION_FAILED", message: outcome.detail)

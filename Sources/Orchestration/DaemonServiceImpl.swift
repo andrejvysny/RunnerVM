@@ -38,6 +38,7 @@ actor DaemonServiceImpl: DaemonService {
   let diskPressure: DiskPressureMonitor
   let gateway: GitHubGateway
   let scopeHealth: ScopeHealthMonitor
+  let runnerVersions: RunnerVersionMonitor
   let runners: RunnerSessionManager
   /// `nil` in the unit-test wiring that only exercises the M1-M5 surface.
   let orchestrator: Orchestrator?
@@ -45,6 +46,8 @@ actor DaemonServiceImpl: DaemonService {
   let hostMode: HostModeControl
   /// Owns the registry Keychain item `registry.login` writes and the pull chain reads.
   let registryCredentials: RegistryCredentials
+  /// `logs/events.jsonl`; `nil` when the file could not be opened.
+  let eventLog: LifecycleEventLog?
   let logger: Logger
 
   /// Set by `DaemonRuntime` once it owns both halves. `nil` means nothing can stop the process,
@@ -61,9 +64,11 @@ actor DaemonServiceImpl: DaemonService {
     reconciler: Reconciler, parseConfig: @escaping ConfigParser, probe: HostProbeResult,
     startedAt: Date, actorName: String,
     diskPressure: DiskPressureMonitor = DiskPressureMonitor(freeSpace: { UInt64.max }),
-    gateway: GitHubGateway, scopeHealth: ScopeHealthMonitor, runners: RunnerSessionManager,
+    gateway: GitHubGateway, scopeHealth: ScopeHealthMonitor,
+    runnerVersions: RunnerVersionMonitor, runners: RunnerSessionManager,
     orchestrator: Orchestrator? = nil, metrics: MetricRegistry = MetricRegistry(),
-    registryCredentials: RegistryCredentials = RegistryCredentials(), logger: Logger
+    registryCredentials: RegistryCredentials = RegistryCredentials(),
+    eventLog: LifecycleEventLog? = nil, logger: Logger
   ) {
     self.paths = paths
     self.hostId = hostId
@@ -73,7 +78,14 @@ actor DaemonServiceImpl: DaemonService {
     self.operations = GRDBOperationRepository(db: database)
     self.imageRows = GRDBImageRepository(db: database)
     self.instanceRows = GRDBInstanceRepository(db: database)
-    self.audit = GRDBAuditRepository(db: database)
+    // Every audit row is mirrored into `logs/events.jsonl` by the decorator, so the two can never
+    // disagree about what an operator did.
+    let auditRows = GRDBAuditRepository(db: database)
+    let audit: any AuditRepository = eventLog.map {
+      EventLoggingAuditRepository(base: auditRows, events: $0)
+    } ?? auditRows
+    self.audit = audit
+    self.eventLog = eventLog
     self.images = images
     self.instances = instances
     self.supervisor = supervisor
@@ -86,6 +98,7 @@ actor DaemonServiceImpl: DaemonService {
     self.diskPressure = diskPressure
     self.gateway = gateway
     self.scopeHealth = scopeHealth
+    self.runnerVersions = runnerVersions
     self.runners = runners
     self.orchestrator = orchestrator
     self.metrics = metrics
@@ -93,7 +106,7 @@ actor DaemonServiceImpl: DaemonService {
     self.hostMode = HostModeControl(
       hostId: hostId, hosts: GRDBHostRepository(db: database),
       sessions: GRDBRunnerSessionRepository(db: database),
-      audit: GRDBAuditRepository(db: database), actorName: actorName, logger: logger)
+      audit: audit, actorName: actorName, logger: logger)
     self.logger = logger
   }
 
@@ -175,12 +188,7 @@ actor DaemonServiceImpl: DaemonService {
         appliedConfig, runningVMs: instanceRecords.count { $0.state.hasRunningVM }),
       github: Mapping.github(
         auth: await gateway.snapshot(), scopes: scopeRecords),
-      images: ImageSummary(
-        cached: imageRecords.count { $0.state == .ready },
-        diskUsageBytes: imageRecords.reduce(0) {
-          $0 + ($1.allocatedSizeBytes ?? $1.virtualSizeBytes)
-        },
-        pulling: imageRecords.count { $0.state == .pulling }),
+      images: await imageSummary(imageRecords),
       profiles: profileRecords.map { profile in
         ProfileRuntimeSummary(
           name: profile.name, enabled: profile.enabled,
@@ -195,19 +203,6 @@ actor DaemonServiceImpl: DaemonService {
       diskPressure: DiskPressureSummary(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes,
         state: pressure.state.rawValue))
-  }
-
-  /// Slow-loop upkeep (spec §17, §57): refresh disk pressure and drop abandoned image import
-  /// staging left by a crashed `image.import`. Runs far less often than the reconcile loop and
-  /// never deletes a published image -- that stays behind the explicit `image.prune` gate
-  /// (spec §110 "do not implement aggressive GC before correct reference accounting exists").
-  func runMaintenance() async {
-    let pressure = await diskPressure.refresh(floorBytes: reserveDiskFloor())
-    await refreshHostMetrics(pressure)
-    _ = try? await images.sweepStaging(olderThan: .seconds(3_600))
-    await gateway.probe()
-    await scopeHealth.refresh()
-    await runners.retryPendingRemovals()
   }
 
   /// Profile ids by name, for the API surfaces that take a profile name.
@@ -318,26 +313,7 @@ actor DaemonServiceImpl: DaemonService {
     return Mapping.operation(record)
   }
 
-  // MARK: - image.*
-
-  func imageList() async throws -> ImageListResponse {
-    ImageListResponse(images: try await images.list().map(Mapping.image))
-  }
-
-  func imageGet(_ request: ImageGetRequest) async throws -> ImageInfoDTO {
-    Mapping.image(try await images.get(reference: request.ref))
-  }
-
-  func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {
-    guard let os = GuestOS(rawValue: request.os) else {
-      throw ImageError.metadataInvalid(reason: "unknown guest os '\(request.os)'")
-    }
-    let imported = try await images.importLocal(
-      disk: URL(fileURLWithPath: request.path),
-      nvram: request.nvramPath.map { URL(fileURLWithPath: $0) },
-      os: os, name: request.name)
-    return Mapping.image(imported)
-  }
+  // MARK: - image.* (delete/prune; the rest is in DaemonServiceImages.swift)
 
   func imageDelete(_ request: ImageDeleteRequest) async throws -> ImageDeleteResponse {
     try await images.delete(digest: ImageDigest(rawValue: request.digest))

@@ -54,6 +54,8 @@ public actor Orchestrator {
   var workerCPU: [InstanceID: (cpuSeconds: Double, at: Date)] = [:]
   var nextStartToken = 0
   var events: [OrchestratorEventRecord] = []
+  /// `logs/events.jsonl`. Attached after construction; see `InstanceManager.attachEventLog`.
+  var eventLog: LifecycleEventLog?
   private var eventTask: Task<Void, Never>?
 
   public init(
@@ -139,6 +141,10 @@ public actor Orchestrator {
     }
   }
 
+  public func attachEventLog(_ log: LifecycleEventLog?) {
+    eventLog = log
+  }
+
   // MARK: - Queries
 
   public func recentEvents(limit: Int = 50) -> [OrchestratorEventRecord] {
@@ -197,15 +203,18 @@ public actor Orchestrator {
     case let .jobStarted(profile, runnerName, requestId):
       logger.info(
         "job started",
-        metadata: .context(profile: profile, githubJobRequestID: "\(requestId)")
-          .merging(["runner_name": .string(runnerName)]) { $1 })
+        metadata: .context(
+          profile: profile, githubJobRequestID: "\(requestId)", host: hostId,
+          githubRunnerName: runnerName))
+    // Recorded only. Spec §51: `JobCompleted` never drives teardown — the runner's own exit,
+    // observed through `agent.runnerStatus`, is the authority on when a session is over.
     case let .jobCompleted(profile, runnerName, requestId, result):
       logger.info(
         "job completed",
-        metadata: .context(profile: profile, githubJobRequestID: "\(requestId)")
-          .merging([
-            "runner_name": .string(runnerName), "result": .string(result ?? "-"),
-          ]) { $1 })
+        metadata: .context(
+          profile: profile, githubJobRequestID: "\(requestId)", host: hostId,
+          githubRunnerName: runnerName
+        ).merging(["result": .string(result ?? "-")]) { $1 })
     }
   }
 
@@ -216,10 +225,18 @@ public actor Orchestrator {
     }
     logger.info(
       "orchestrator event",
-      metadata: [
+      metadata: .context(host: hostId).merging([
         "event": .string(event.name), "profile": .string(event.profile),
         "detail": .string(event.detail),
-      ])
+      ]) { $1 })
+    // `OrchestratorEvent.profile` is whatever the emitting site had in hand — a profile name for
+    // the tick, a profile id for the demand stream — so it goes out under `profile_id` verbatim
+    // rather than being guessed at. Handed to a detached task because `note` is synchronous at
+    // every call site; the file's `ts` is what orders these, not the order they are appended in.
+    let log = eventLog
+    let fields = LifecycleEventLog.Fields(
+      profile: RunnerProfileID(rawValue: event.profile), to: event.name, reason: event.detail)
+    Task { await log?.record(event.name, fields) }
   }
 
   static func describe(_ error: any Error) -> String {

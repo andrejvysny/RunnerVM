@@ -1,8 +1,7 @@
-/// The spec §63 example configuration, verbatim except for one addition: `os: macos` on the
-/// second profile. The spec's own example omits it because `os` is new since that section was
-/// written; without it the profile would default to `linux` and fail resource validation (macOS
-/// sizing vs. the linux minimum). `runnerctl config init` prints this so a fresh install starts
-/// from a document that is already known to load and validate cleanly.
+/// The spec §63 example configuration, minus its macOS profile: this build rejects `os: macos` at
+/// validation time (`GUEST_OS_UNSUPPORTED`), so shipping one would make `runnerctl config init`
+/// print a document that fails its own validation. `runnerctl config init` prints this so a fresh
+/// install starts from a document that is already known to load and validate cleanly.
 public enum ExampleConfig {
   public static let example = """
   version: 1
@@ -54,25 +53,20 @@ public enum ExampleConfig {
       ssh:
         enabled: true
 
-    - name: macos-15-xcode-16
-      scope: engineering
-
-      image: ghcr.io/acme/runners/macos-15-xcode-16:stable
-
-      os: macos
-
-      lifecycle: ephemeral
-
-      resources:
-        cpu: 6
-        memory: 12GiB
-        disk: 120GiB
-
-      limits:
-        maxInstances: 2
-
   metrics:
     prometheus:
       enabled: false
+
+  logging:
+    file:
+      enabled: true
+      maxSize: 32MiB
+      maxFiles: 10
+
+    retention:
+      instanceLogs: 7d
+
+    collectRunnerDiagnostics: true
+    diagnosticsTimeout: 60s
   """
 }

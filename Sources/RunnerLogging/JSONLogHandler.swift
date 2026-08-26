@@ -40,7 +40,9 @@ public struct JSONLogHandler: LogHandler {
   }
 
   public func log(event: LogEvent) {
-    let merged = Self.mergeMetadata(base: metadata, provider: metadataProvider, explicit: event.metadata)
+    let merged = Self.mergeMetadata(
+      global: LogContext.global, base: metadata, provider: metadataProvider,
+      explicit: event.metadata)
     let redactedMetadata = redactor.redact(metadata: merged)
 
     var payload: [String: Any] = [
@@ -61,12 +63,15 @@ public struct JSONLogHandler: LogHandler {
     sink(line)
   }
 
-  /// Merge order matches swift-log convention: handler metadata is the base, the
-  /// metadata provider overrides it, and per-call-site metadata overrides both.
+  /// Merge order matches swift-log convention, with `LogContext.global` underneath everything:
+  /// process-wide context is the base, then handler metadata, then the metadata provider, then
+  /// per-call-site metadata.
   private static func mergeMetadata(
-    base: Logger.Metadata, provider: Logger.MetadataProvider?, explicit: Logger.Metadata?
+    global: Logger.Metadata, base: Logger.Metadata, provider: Logger.MetadataProvider?,
+    explicit: Logger.Metadata?
   ) -> Logger.Metadata {
-    var merged = base
+    var merged = global
+    if !base.isEmpty { merged.merge(base) { _, new in new } }
     if let provided = provider?.get(), !provided.isEmpty {
       merged.merge(provided) { _, new in new }
     }

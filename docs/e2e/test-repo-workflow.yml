@@ -1,0 +1,97 @@
+# Copy this file to .github/workflows/e2e.yml in the DEDICATED test repo that
+# scripts/live-github-e2e.sh drives (RUNNERVM_E2E_REPO). See docs/live-integration.md.
+#
+# `runs-on: runnervm-${{ inputs.profile }}` matches the scale-set naming RunnerVM registers for
+# each profile (Sources/Orchestration/DemandProvider.swift: prefix "runnervm-"), so a job here is
+# picked up by that profile's scale set exactly the way any other GitHub Actions job would be.
+#
+# LONG_MINUTES below must match the driver's --long-minutes (default 65): this workflow only
+# takes job/count/profile as inputs, so the "long" job's duration is fixed here, not passed in.
+name: RunnerVM E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Job type"
+        required: true
+        type: choice
+        options: [quick, long, matrix]
+        default: quick
+      count:
+        description: "Matrix size (matrix job only; ignored otherwise)"
+        required: false
+        default: "1"
+      profile:
+        description: "RunnerVM profile name (selects runs-on: runnervm-<profile>)"
+        required: true
+        default: ubuntu-24
+
+permissions:
+  contents: read
+
+env:
+  LONG_MINUTES: 65
+
+jobs:
+  quick:
+    if: ${{ inputs.job == 'quick' }}
+    runs-on: runnervm-${{ inputs.profile }}
+    timeout-minutes: 15
+    steps:
+      - name: Host facts
+        run: |
+          uname -a
+          docker info
+          id
+
+      - name: Write a marker
+        run: |
+          mkdir -p "$RUNNER_TEMP/rvm-e2e"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/rvm-e2e/marker"
+          cat "$RUNNER_TEMP/rvm-e2e/marker"
+
+  long:
+    if: ${{ inputs.job == 'long' }}
+    runs-on: runnervm-${{ inputs.profile }}
+    # LONG_MINUTES + generous headroom for boot/queue/teardown.
+    timeout-minutes: 90
+    steps:
+      - name: Sleep in 1-minute ticks
+        run: |
+          for i in $(seq 1 "$LONG_MINUTES"); do
+            echo "tick $i/$LONG_MINUTES $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            sleep 60
+          done
+
+  # Generates a JSON array [1..count] on a GitHub-hosted runner (cheap, no RunnerVM dependency)
+  # so the matrix job below can fan out to `count` concurrent RunnerVM jobs. GitHub Actions
+  # expressions have no range()/sequence function, hence the extra job instead of an inline matrix.
+  matrix-setup:
+    if: ${{ inputs.job == 'matrix' }}
+    runs-on: ubuntu-latest
+    outputs:
+      indices: ${{ steps.gen.outputs.indices }}
+    steps:
+      - id: gen
+        env:
+          COUNT_INPUT: ${{ inputs.count }}
+        run: |
+          echo "indices=$(seq 1 "$COUNT_INPUT" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    if: ${{ inputs.job == 'matrix' }}
+    needs: matrix-setup
+    runs-on: runnervm-${{ inputs.profile }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        index: ${{ fromJSON(needs.matrix-setup.outputs.indices) }}
+    steps:
+      - name: Host facts (${{ matrix.index }} of ${{ inputs.count }})
+        run: |
+          echo "job ${{ matrix.index }} of ${{ inputs.count }}"
+          uname -a
+          docker info
+          id

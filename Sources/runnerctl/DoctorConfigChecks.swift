@@ -1,4 +1,5 @@
 import ConfigLoader
+import DaemonAPI
 import Foundation
 import RunnerCore
 import Security
@@ -74,6 +75,75 @@ extension DoctorChecks {
       id: "disk_headroom", title: "Disk headroom", status: status,
       detail: "\(Format.bytes(free)) free, host.reserve.disk is \(Format.bytes(reserve))"
     )
+  }
+
+  // MARK: Runner software freshness (spec §53)
+
+  /// Grades the images the configured profiles actually run from. A `tooOld` one fails: GitHub
+  /// stops handing work to a runner that far behind, so the VM would boot and sit idle. `stale`
+  /// warns — there is still time to rebuild — and `unknown` is reported as OK with the reason,
+  /// because "we could not find out" is not a host problem doctor should fail on.
+  static func runnerVersion(
+    images: [ImageInfoDTO]?, config: RunnerConfiguration?, authState: String?
+  ) -> DoctorCheck {
+    guard let images else {
+      return check(.warn, "runnerd is not reachable; skipped")
+    }
+    let referenced = profileImages(images, config: config)
+    guard !referenced.isEmpty else {
+      return check(.ok, "no locally stored image is referenced by a profile")
+    }
+    let counts = Dictionary(grouping: referenced, by: \.runnerVersionHealth).mapValues(\.count)
+    if let tooOld = counts[.tooOld], tooOld > 0 {
+      return check(
+        .fail,
+        "\(tooOld) profile image(s) are past GitHub's \(RunnerVersionPolicy.graceDays)-day runner "
+          + "update window: \(names(referenced, health: .tooOld)). Rebuild and republish them.")
+    }
+    if let stale = counts[.stale], stale > 0 {
+      return check(
+        .warn,
+        "\(stale) profile image(s) are behind the latest actions/runner release: "
+          + "\(names(referenced, health: .stale))")
+    }
+    if counts[.unknown] == referenced.count {
+      return check(.ok, "runner freshness is unknown: \(unknownReason(referenced, authState: authState))")
+    }
+    return check(.ok, "\(referenced.count) profile image(s) are on the latest actions/runner release")
+  }
+
+  private static func check(_ status: DoctorCheck.Status, _ detail: String) -> DoctorCheck {
+    DoctorCheck(id: "runner_version", title: "Runner version", status: status, detail: detail)
+  }
+
+  /// Without a `--config` doctor cannot know which images matter, so it grades all of them rather
+  /// than reporting nothing.
+  private static func profileImages(
+    _ images: [ImageInfoDTO], config: RunnerConfiguration?
+  ) -> [ImageInfoDTO] {
+    guard let config, !config.profiles.isEmpty else { return images }
+    let wanted = Set(config.profiles.map(\.image))
+    return images.filter {
+      wanted.contains($0.digest) || $0.name.map(wanted.contains) == true
+        || $0.canonicalReference.map(wanted.contains) == true
+    }
+  }
+
+  private static func names(_ images: [ImageInfoDTO], health: RunnerVersionHealth) -> String {
+    images
+      .filter { $0.runnerVersionHealth == health }
+      .map { $0.name ?? Format.shortDigest($0.digest) }
+      .joined(separator: ", ")
+  }
+
+  private static func unknownReason(_ images: [ImageInfoDTO], authState: String?) -> String {
+    if images.allSatisfy({ ($0.runnerVersion ?? "").isEmpty }) {
+      return "no image records a runnerVersion (import them with their sealed metadata.json)"
+    }
+    guard let authState, authState == "healthy" || authState == "unknown" else {
+      return "no usable GitHub credential, so the latest release is unknown"
+    }
+    return "runnerd has not read the latest actions/runner release yet"
   }
 
   // MARK: GitHub credential presence

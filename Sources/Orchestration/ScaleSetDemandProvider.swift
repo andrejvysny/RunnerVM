@@ -158,7 +158,7 @@ public actor ScaleSetDemandProvider: DemandProvider {
       registrationFailures[row.id] = nil
       logger.info(
         "scale set ready",
-        metadata: .context(profile: row.id).merging([
+        metadata: .context(profile: row.id, scaleSetID: record.id).merging([
           "scale_set": .string(name), "github_scale_set_id": .stringConvertible(info.id),
           "generation": .stringConvertible(generation),
         ]) { $1 })

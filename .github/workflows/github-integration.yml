@@ -1,0 +1,93 @@
+name: github-integration
+# Manually-triggered, opt-in live GitHub integration suite (TODO.md T3, "Live checklist for M6").
+# Runs scripts/live-github-e2e.sh against a REAL, dedicated test org/repo -- never point
+# vars.E2E_OWNER/vars.E2E_REPO at anything that matters. Setup, PAT scopes and what each
+# scenario asserts: docs/live-integration.md.
+#
+# This job MUST run on a self-hosted runner living on the same Mac mini that RunnerVM manages.
+# GitHub-hosted macOS runners cannot nest Virtualization.framework, so there is no GitHub-hosted
+# alternative -- register a long-lived self-hosted runner on the host with the labels below
+# (outside RunnerVM's own scale sets; this is the *driver*, not a job RunnerVM schedules) before
+# using this workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma-separated scenario names, or 'all' (see docs/live-integration.md)"
+        required: true
+        default: success,cancel-during-job,concurrent
+      profile:
+        description: "RunnerVM profile to exercise"
+        required: true
+        default: ubuntu-24
+
+permissions:
+  contents: read
+
+jobs:
+  live-e2e:
+    name: Live GitHub integration (${{ inputs.profile }})
+    runs-on: [self-hosted, macOS, ARM64, runnervm-host]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build runnerd/runnerctl/vmworker
+        run: swift build
+
+      - name: Sign vmworker for local development
+        run: scripts/sign-dev.sh
+
+      - name: Resolve run inputs
+        id: resolve
+        env:
+          SCENARIOS_INPUT: ${{ inputs.scenarios }}
+          STATE_DIR_INPUT: ${{ vars.E2E_STATE_DIR }}
+        run: |
+          if [ "$SCENARIOS_INPUT" = "all" ]; then
+            echo "flags=--all" >> "$GITHUB_OUTPUT"
+          else
+            flags=""
+            IFS=',' read -ra names <<< "$SCENARIOS_INPUT"
+            for n in "${names[@]}"; do flags="$flags --scenario $n"; done
+            echo "flags=$flags" >> "$GITHUB_OUTPUT"
+          fi
+          state_dir="${STATE_DIR_INPUT:-$HOME/Library/Application Support/RunnerVM}"
+          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Run live E2E suite
+        env:
+          RUNNERVM_E2E_OWNER: ${{ vars.E2E_OWNER }}
+          RUNNERVM_E2E_REPO: ${{ vars.E2E_REPO }}
+          RUNNERVM_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+          PROFILE_INPUT: ${{ inputs.profile }}
+          SCENARIO_FLAGS: ${{ steps.resolve.outputs.flags }}
+          STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-report"
+          # SCENARIO_FLAGS is intentionally left unquoted: it expands to zero or more
+          # "--scenario <name>" pairs that must be word-split into separate arguments.
+          # shellcheck disable=SC2086
+          scripts/live-github-e2e.sh \
+            --profile "$PROFILE_INPUT" \
+            --state-dir "$STATE_DIR" \
+            $SCENARIO_FLAGS \
+            --json-report "$RUNNER_TEMP/e2e-report/report.json"
+
+      - name: Upload JSON report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-report-${{ inputs.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/e2e-report/report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload runnerd logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-logs-${{ inputs.profile }}-${{ github.run_id }}
+          path: ${{ steps.resolve.outputs.state_dir }}/logs
+          if-no-files-found: warn
+          retention-days: 14
