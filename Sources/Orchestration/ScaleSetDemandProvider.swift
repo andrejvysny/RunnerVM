@@ -143,7 +143,7 @@ public actor ScaleSetDemandProvider: DemandProvider {
         profileId: row.id, githubScaleSetName: name)
       let info = try await plane.ensureScaleSet(
         scope: scope, name: name, runnerGroupID: scope.runnerGroupID,
-        labels: [row.name], disableUpdate: true)
+        labels: [name], disableUpdate: true)
       try await scaleSets.updateRegistration(
         scaleSetId: record.id, githubScaleSetId: info.id, state: "ready")
       let applied = try await replayInbox(scaleSetId: record.id, plane: plane, scope: scope)

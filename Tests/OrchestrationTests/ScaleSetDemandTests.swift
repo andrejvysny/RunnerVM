@@ -17,7 +17,8 @@ import Testing
 
       let call = try #require(harness.scaleSetPlane.ensureCalls().first)
       #expect(call.name == "runnervm-linux")
-      #expect(call.labels == ["linux"])
+      // The runs-on label is the scale set name, not the bare profile name (spec §14).
+      #expect(call.labels == [call.name])
       #expect(call.disableUpdate)
       let profile = try await harness.profileID("linux")
       let row = try #require(try await harness.scaleSets.get(profileId: profile))

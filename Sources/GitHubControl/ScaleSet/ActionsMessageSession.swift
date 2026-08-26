@@ -197,7 +197,7 @@ public actor ActionsMessageSession: ScaleSetSession {
 
   /// Runs `body`, and on the queue's 401 refreshes the session token and runs it exactly once
   /// more. A second 401 is a dead session: the caller must open a new one.
-  private func withSessionRefresh<T>(_ body: () async throws -> T) async throws -> T {
+  private func withSessionRefresh<T: Sendable>(_ body: () async throws -> T) async throws -> T {
     do {
       return try await body()
     } catch is QueueTokenExpired {
