@@ -144,8 +144,10 @@ import Testing
 
   @Test func waitUntilReadyPollsFromStartingToReady() async throws {
     try await withAgent(script: .slowStart(attempts: 3, bootId: "boot-xyz")) { client, agent in
+      // Generous timeout on purpose: the assertion is the *number* of health polls, not wall
+      // clock. A loaded CI runner can spend seconds just scheduling the four round trips.
       let hello = try await client.waitUntilReady(
-        timeout: .seconds(5), policy: Self.fastPolling)
+        timeout: .seconds(60), policy: Self.fastPolling)
       #expect(hello.bootId == "boot-xyz")
       #expect(await agent.callCount(.health) == 4)
     }

@@ -136,4 +136,17 @@ All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: ha
 - [x] R2-3 missing guest manifest fails closed (`--allow-partial-provenance` for dev; `provenance.partial`)
 - [x] R2-4 service group default `_runnervm` (refuses `staff` without `--allow-staff-group`), `scripts/tests/install-test.sh`
 - [x] R2-5 `SecureFile.ownerAndGroupRead` rejects `0o037`; `WorkerEnvironment` derives `HOME` from passwd; vsock connect closes the fd if cancelled mid-flight; `actionlint` in CI
-- [ ] R2-6 CI green on `master` — blocked 2026-08-26 by a GitHub Actions major outage (runs `startup_failure`/`queued` with zero jobs, incl. Dependabot's own runs); re-dispatch `ci.yml` when githubstatus.com reports Actions operational
+- [~] R2-6 CI green on `master` — blocked 2026-08-26 by a GitHub Actions major outage (runs `startup_failure`/`queued` with zero jobs, incl. Dependabot's own runs); re-dispatch `ci.yml` when githubstatus.com reports Actions operational
+
+## Live end-to-end PROVEN (2026-08-26)
+- Registered RunnerVM as a repo Runner Scale Set (`runnervm-ubuntu-24`, label `ubuntu-24`) on andrejvysny/github-managed-runners.
+- `.github/workflows/runnervm-selftest.yml` (`runs-on: ubuntu-24`) ran to SUCCESS on an ephemeral Linux VM: JobAvailable -> VM create -> guest agent -> JIT -> runnerOnline -> jobRunning -> completed -> VM destroyed. 12/12 steps green (uname/os, guest-agent active, docker info + `docker run alpine`, checkout, setup-go, `go build`+`go test`, summary).
+- Two live bugs found + fixed this session:
+  - `[x] R2-6` scale-set label was the prefixed scale-set name; GitHub keeps labels from creation, so `runs-on: <profile>` never matched. Fixed: label = profile name (`row.name`); `runs-on` = profile name in all workflows/docs (commit b9ab328).
+  - `[x]` Swift 6.1 strict-concurrency: `VMRuntime.start/stop`, `ActionsMessageSession.withSessionRefresh<T>`, `ImagePulling.gated<T>`, `RegistryClient.mapTransportErrors<T>` sent non-Sendable values across isolation; fixed with completion handlers / `T: Sendable`. CI on Swift 6.1.2 was red for these; local dev host (6.3.3) did not flag them.
+- `[x]` Builder rejects non-GPT/qcow2 base images early (`require_partition_table`); Ubuntu `cloudimg .tar.gz` is a bare rootfs that cannot EFI-boot — use the qcow2 `.img` converted to raw. Verified raw sha256 63cb4783… boots.
+
+## Autoscaling proven (2026-08-26)
+- Run 32999466546: `fanout=5` against a 3-VM host — GitHub assigned exactly 3 concurrently (advertised capacity honoured), RunnerVM ran 3 VMs in parallel, recycled them and booted 2 replacements for the queued legs; 5/5 jobs succeeded, all VMs deleted. Details in `docs/verification.md`.
+- Swift 6.1.2-only CI failures fixed this session: non-Sendable sends (VMRuntime start/stop, `withSessionRefresh<T>`, `gated<T>`, `mapTransportErrors<T>`), `UInt64` tuple inference in OCIRegistryTests, `@Test` macro type-check timeout in ByteSizeTests, and a wall-clock-sensitive `waitUntilReady` test.
+- macOS guests: milestone plan in `docs/macos-guests.md`; IPSW (macOS 26.6.2, build 25G83) downloading for the M8 build.

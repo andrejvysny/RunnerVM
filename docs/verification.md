@@ -39,6 +39,35 @@ against **GitHub.com** (not a fake):
 **Lesson recorded:** the dev host runs Swift 6.3.3; CI's Swift 6.1.2 is stricter about
 sending/inference. Treat a green CI run as the authoritative build gate, not a local `swift build`.
 
+## Autoscaling / parallel jobs (Linux) — PASS
+
+Run [`32999466546`](https://github.com/andrejvysny/github-managed-runners/actions/runs/32999466546),
+2026-08-26. Host configured to **3 VMs** (`host.maxVMs: 3`, `profiles[].limits.maxInstances: 3`,
+2 vCPU / 4 GiB each); workflow dispatched with **`fanout=5`, `sleep_seconds=45`** so demand
+deliberately exceeded capacity.
+
+Observed, in order:
+
+| Phase | Scale set | RunnerVM |
+|-------|-----------|----------|
+| dispatch | `advertised=3`, GitHub assigned **exactly 3** of 5 | 3 VMs created in parallel (`waitingForAgent` → `idle` → `configuringRunner`) |
+| saturation | `assigned=3`, `running=3` | `3 busy` — host at its configured cap, remaining 2 legs stay queued at GitHub |
+| drain + refill | first legs complete | finished VMs `stopping`; **2 replacement VMs booted immediately** for the queued legs (peak 4 instances observed across the overlap) |
+| finish | `assigned=0` | last VMs stopped and deleted; `runnerctl vm list` empty |
+
+Result: **5/5 legs succeeded**, 5 ephemeral VMs consumed one job each.
+
+```
+leg 1  18:24:42 → 18:26:46   leg 3  18:25:02 → 18:27:04   leg 4  18:24:42 → 18:26:39
+leg 2  18:27:07 → 18:28:58   leg 5  18:27:07 → 18:28:54
+```
+
+The second wave starts ~20 s after the first wave's VMs release — i.e. capacity is recycled
+promptly, and `X-ScaleSetMaxCapacity` is honoured (GitHub never assigned a 4th concurrent job).
+
+This closes three items from the M6 live checklist: advertised-capacity enforcement, concurrent
+jobs, and queue-larger-than-capacity.
+
 ## Automated tests — PASS (local)
 
 - Swift: **935 tests / 127 suites** pass (`swift test`). Note: after `ImageMetadata` grew a
@@ -63,9 +92,9 @@ commit's CI is the authoritative check for full green.
 ## Not yet verified (needs hardware time / dedicated org)
 
 - `scripts/qualify-host.sh` cold-boot / power-cut qualification (needs the Mac mini itself).
-- `scripts/live-github-e2e.sh` full scenario matrix (cancel, daemon-restart-mid-job, redelivery,
-  65-min long job, concurrency, queue overflow) — the single-job happy path above is proven; the
-  rest need a dedicated org/repo and dedicated time.
+- `scripts/live-github-e2e.sh` remaining scenarios: cancel-before-assignment, cancel-during-job,
+  daemon restart while booting / mid-job, message redelivery, 65-min long job. (Happy path,
+  concurrency and queue-overflow are proven above.)
 - External log shipping (Vector / Fluent Bit configs ship; a real pipeline is not stood up).
 
 ## Guest OS support
