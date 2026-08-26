@@ -1,0 +1,186 @@
+import Foundation
+
+/// Credential provider selection (spec §12). The credential itself never lives in the config file.
+public struct GitHubAuthConfig: Codable, Sendable, Hashable {
+  public enum Provider: String, Codable, Sendable, CaseIterable { case pat, app }
+  public enum Source: String, Codable, Sendable, CaseIterable { case keychain, env, file }
+
+  public var provider: Provider
+  public var source: Source
+
+  public init(provider: Provider = .pat, source: Source = .keychain) {
+    self.provider = provider
+    self.source = source
+  }
+}
+
+/// Which demand provider drives the orchestrator (spec §13, §118). `scaleSet` talks to GitHub's
+/// own scale-set statistics; `manual` accepts `debug.demandSet` instead and is for tests/debugging
+/// only.
+public enum DemandMode: String, Codable, Sendable, CaseIterable {
+  case scaleSet
+  case manual
+}
+
+public struct GitHubConfig: Codable, Sendable, Hashable {
+  public var auth: GitHubAuthConfig
+  public var scopes: [GitHubScopeConfig]
+  public var demand: DemandMode
+
+  public init(
+    auth: GitHubAuthConfig = GitHubAuthConfig(), scopes: [GitHubScopeConfig] = [],
+    demand: DemandMode = .scaleSet
+  ) {
+    self.auth = auth
+    self.scopes = scopes
+    self.demand = demand
+  }
+}
+
+extension GitHubConfig {
+  private enum CodingKeys: String, CodingKey {
+    case auth, scopes, demand
+  }
+
+  /// `demand` defaults so a document persisted before this field existed still decodes (spec
+  /// §63/§91 back-compat).
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      auth: try c.decode(GitHubAuthConfig.self, forKey: .auth),
+      scopes: try c.decode([GitHubScopeConfig].self, forKey: .scopes),
+      demand: try c.decodeIfPresent(DemandMode.self, forKey: .demand) ?? .scaleSet
+    )
+  }
+}
+
+/// Spec §77: public pull-request workloads on a self-hosted runner are off by default.
+public struct SecurityConfig: Codable, Sendable, Hashable {
+  public var allowPublicRepositories: Bool
+
+  public init(allowPublicRepositories: Bool = false) {
+    self.allowPublicRepositories = allowPublicRepositories
+  }
+}
+
+public struct MetricsConfig: Codable, Sendable, Hashable {
+  public struct Prometheus: Codable, Sendable, Hashable {
+    public var enabled: Bool
+    /// `host:port`. Loopback by default; RunnerVM never exposes metrics off-host (spec §43).
+    public var listen: String
+
+    public init(enabled: Bool = false, listen: String = "127.0.0.1:9095") {
+      self.enabled = enabled
+      self.listen = listen
+    }
+  }
+
+  public var prometheus: Prometheus
+
+  public init(prometheus: Prometheus = Prometheus()) {
+    self.prometheus = prometheus
+  }
+}
+
+/// How long a failed instance directory survives for post-mortem (spec §74).
+public struct DiagnosticsConfig: Codable, Sendable, Hashable {
+  public var failedInstanceRetention: DurationValue
+
+  public init(failedInstanceRetention: DurationValue = .hours(2)) {
+    self.failedInstanceRetention = failedInstanceRetention
+  }
+}
+
+/// Image cache policy (spec §110).
+public struct ImageCacheConfig: Codable, Sendable, Hashable {
+  /// `nil` means "bounded only by the host disk reserve".
+  public var maxSizeBytes: UInt64?
+  /// Grace window in which an unreferenced image is kept anyway.
+  public var keepRecentlyUsed: DurationValue
+
+  public init(maxSizeBytes: UInt64? = nil, keepRecentlyUsed: DurationValue = .days(7)) {
+    self.maxSizeBytes = maxSizeBytes
+    self.keepRecentlyUsed = keepRecentlyUsed
+  }
+}
+
+/// Whether a reusable instance still on a superseded image digest is retired (spec §138).
+public struct ImageUpdatesConfig: Codable, Sendable, Hashable {
+  public var recycleReusable: Bool
+
+  public init(recycleReusable: Bool = true) {
+    self.recycleReusable = recycleReusable
+  }
+}
+
+/// Root of the validated in-memory configuration (spec §63). YAML decoding lives in ConfigLoader.
+public struct RunnerConfiguration: Codable, Sendable, Hashable {
+  public static let currentVersion = 1
+
+  public var version: Int
+  public var host: HostConfig
+  public var github: GitHubConfig
+  public var profiles: [RunnerProfileConfig]
+  public var security: SecurityConfig
+  public var metrics: MetricsConfig
+  public var diagnostics: DiagnosticsConfig
+  public var images: ImageCacheConfig
+  public var imageUpdates: ImageUpdatesConfig
+
+  public init(
+    version: Int = RunnerConfiguration.currentVersion,
+    host: HostConfig = HostConfig(),
+    github: GitHubConfig = GitHubConfig(),
+    profiles: [RunnerProfileConfig] = [],
+    security: SecurityConfig = SecurityConfig(),
+    metrics: MetricsConfig = MetricsConfig(),
+    diagnostics: DiagnosticsConfig = DiagnosticsConfig(),
+    images: ImageCacheConfig = ImageCacheConfig(),
+    imageUpdates: ImageUpdatesConfig = ImageUpdatesConfig()
+  ) {
+    self.version = version
+    self.host = host
+    self.github = github
+    self.profiles = profiles
+    self.security = security
+    self.metrics = metrics
+    self.diagnostics = diagnostics
+    self.images = images
+    self.imageUpdates = imageUpdates
+  }
+
+  public func profile(named name: String) -> RunnerProfileConfig? {
+    profiles.first { $0.name == name }
+  }
+
+  public func scope(named name: String) -> GitHubScopeConfig? {
+    github.scopes.first { $0.name == name }
+  }
+}
+
+extension RunnerConfiguration {
+  private enum CodingKeys: String, CodingKey {
+    case version, host, github, profiles, security, metrics, diagnostics, images, imageUpdates
+  }
+
+  /// Every section except `version` defaults, so a minimal document decodes and validation — not
+  /// the decoder — reports what is actually wrong.
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      version: try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion,
+      host: try c.decodeIfPresent(HostConfig.self, forKey: .host) ?? HostConfig(),
+      github: try c.decodeIfPresent(GitHubConfig.self, forKey: .github) ?? GitHubConfig(),
+      profiles: try c.decodeIfPresent([RunnerProfileConfig].self, forKey: .profiles) ?? [],
+      security: try c.decodeIfPresent(SecurityConfig.self, forKey: .security) ?? SecurityConfig(),
+      metrics: try c.decodeIfPresent(MetricsConfig.self, forKey: .metrics) ?? MetricsConfig(),
+      diagnostics: try c.decodeIfPresent(DiagnosticsConfig.self, forKey: .diagnostics)
+        ?? DiagnosticsConfig(),
+      images: try c.decodeIfPresent(ImageCacheConfig.self, forKey: .images) ?? ImageCacheConfig(),
+      // `imageUpdates` defaults so a document persisted before this field existed still decodes
+      // (spec §138 back-compat).
+      imageUpdates: try c.decodeIfPresent(ImageUpdatesConfig.self, forKey: .imageUpdates)
+        ?? ImageUpdatesConfig()
+    )
+  }
+}

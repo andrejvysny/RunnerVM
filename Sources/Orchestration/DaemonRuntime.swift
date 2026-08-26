@@ -1,0 +1,441 @@
+import DaemonAPI
+import Foundation
+import ImageStore
+import Logging
+import Metrics
+import Persistence
+import RPC
+import RunnerCore
+import RunnerLogging
+
+/// Composition root for `runnerd`: startup order per spec §69, teardown per §108.
+///
+/// M2 adds the image and instance managers, the worker supervisor (spawn, fencing, lease,
+/// reconnect) and the reconcile steps that adopt or interrupt workers after a restart.
+public actor DaemonRuntime {
+  public struct Options: Sendable {
+    public var paths: RunnerPaths
+    /// Applied at startup when present. Absent means "adopt whatever was applied last".
+    public var configPath: URL?
+    public var reconcileInterval: Duration
+    public var reconcileJitter: Duration
+    /// Cadence of the slow maintenance loop: disk-pressure refresh and image staging sweep
+    /// (spec §17, §57). Deliberately independent of `reconcileInterval` -- upkeep this cheap
+    /// doesn't need the fast loop's cadence, and a five-minute default keeps it off the log
+    /// unless something actually changed.
+    public var maintenanceInterval: Duration
+    /// `nil` resolves to `$RUNNERVM_VMWORKER` or a sibling of the running executable.
+    public var vmworkerPath: URL?
+    /// `nil` accepts any peer UID; runnerd restricts this to its own UID.
+    public var allowedUIDs: Set<uid_t>?
+    /// Test seam: `nil` spawns the real `vmworker` binary with `posix_spawn`.
+    public var launcher: (any WorkerLauncher)?
+    /// Recorded in `audit_events.actor`.
+    public var actorName: String
+    /// Test seam: `nil` talks to api.github.com through the shared `URLSession` and the login
+    /// keychain.
+    public var github: GitHubGateway.Options?
+    /// Which demand provider drives the orchestrator. `nil` (the default) reads
+    /// `RunnerConfiguration.github.demand`; a non-nil value overrides the configuration, for
+    /// tests and CLI flags. Changing this on a running daemon has no effect until it restarts —
+    /// providers are wired once at startup and never hot-swapped.
+    public var demandMode: DemandMode?
+    /// How long `system.shutdown` waits before tearing the socket down, so the reply reaches the
+    /// caller first. Tests set it to zero.
+    public var shutdownDelay: Duration
+    /// `false` stops the runtime without calling `exit`, which is the only way a test can drive
+    /// `system.shutdown` end to end.
+    public var exitOnShutdown: Bool
+
+    public init(
+      paths: RunnerPaths,
+      configPath: URL? = nil,
+      reconcileInterval: Duration = .seconds(10),
+      reconcileJitter: Duration = .seconds(2),
+      maintenanceInterval: Duration = .seconds(300),
+      vmworkerPath: URL? = nil,
+      allowedUIDs: Set<uid_t>? = nil,
+      launcher: (any WorkerLauncher)? = nil,
+      actorName: String = "runnerd",
+      github: GitHubGateway.Options? = nil,
+      demandMode: DemandMode? = nil,
+      shutdownDelay: Duration = .milliseconds(200),
+      exitOnShutdown: Bool = true
+    ) {
+      self.paths = paths
+      self.configPath = configPath
+      self.reconcileInterval = reconcileInterval
+      self.reconcileJitter = reconcileJitter
+      self.maintenanceInterval = maintenanceInterval
+      self.vmworkerPath = vmworkerPath
+      self.allowedUIDs = allowedUIDs
+      self.launcher = launcher
+      self.actorName = actorName
+      self.github = github
+      self.demandMode = demandMode
+      self.shutdownDelay = shutdownDelay
+      self.exitOnShutdown = exitOnShutdown
+    }
+  }
+
+  public typealias ConfigParser = @Sendable (String) throws -> RunnerConfiguration
+
+  private let options: Options
+  private let parseConfig: ConfigParser
+  private let logger: Logger
+  private let reconciler: Reconciler
+
+  private var lock: DaemonLock?
+  private var database: RunnerDatabase?
+  private var service: DaemonServiceImpl?
+  private var server: DaemonServer?
+  private var supervisor: WorkerSupervisor?
+  private var instances: InstanceManager?
+  private var runners: RunnerSessionManager?
+  private var orchestrator: Orchestrator?
+  private var reconcileTask: Task<Void, Never>?
+  private var maintenanceTask: Task<Void, Never>?
+  private var metricsEndpoint: MetricsEndpoint?
+  private var shutdownTask: Task<Void, Never>?
+  private var hostId: HostID?
+  private var started = false
+
+  /// One registry for the whole daemon (spec §43): every manager writes into it, `metrics.snapshot`
+  /// and `GET /metrics` read from it.
+  private let metrics = MetricRegistry()
+
+  public init(
+    options: Options,
+    parseConfig: @escaping ConfigParser,
+    logger: Logger = Logger(component: .daemon)
+  ) {
+    self.options = options
+    self.parseConfig = parseConfig
+    self.logger = logger
+    self.reconciler = Reconciler(logger: Logger(component: .reconciler))
+  }
+
+  public var isRunning: Bool { started }
+
+  public var socketPath: URL { options.paths.daemonSocket }
+
+  // MARK: - Lifecycle
+
+  public func start() async throws {
+    guard !started else { throw OrchestrationError.alreadyStarted }
+    do {
+      try await startStages()
+      started = true
+    } catch {
+      await teardown()
+      throw error
+    }
+  }
+
+  private func startStages() async throws {
+    try createDirectories()
+    try options.paths.validateSocketPathLengths()
+    lock = try DaemonLock.acquire(at: lockURL)
+    let database = try RunnerDatabase.open(at: options.paths.databaseURL)
+    self.database = database
+    let hostId = try HostIdentity.load(stateDir: options.paths.stateDir)
+    self.hostId = hostId
+    try await GRDBHostRepository(db: database).ensureHost(id: hostId)
+    let executable = options.vmworkerPath ?? HostProbe.defaultExecutable()
+    let probe = await HostProbe.run(executable: executable, logger: logger)
+    let applier = ConfigApplier(
+      store: GRDBConfigStore(db: database), stateDir: options.paths.stateDir)
+    let demandMode = resolveInitialDemandMode(applier: applier)
+    let service = try await makeService(
+      database: database, hostId: hostId, probe: probe, executable: executable, applier: applier,
+      demandMode: demandMode)
+    self.service = service
+    try await service.bootstrap(configPath: options.configPath)
+    await service.setShutdownHandler { [weak self] force in
+      await self?.beginShutdown(force: force)
+    }
+    let server = DaemonServer(
+      service: service, socketPath: options.paths.daemonSocket, allowedUIDs: options.allowedUIDs)
+    try await server.start()
+    self.server = server
+    // After the socket is up (spec §69): a slow first GitHub round trip must not delay the
+    // control surface, and the first reconcile tick drives the first scheduling pass anyway.
+    try await orchestrator?.start()
+    try await startMetricsEndpoint(service)
+    reconcileTask = startReconcileLoop()
+    maintenanceTask = startMaintenanceLoop(service)
+    logger.info(
+      "runnerd ready",
+      metadata: [
+        "socket": .string(options.paths.daemonSocket.path(percentEncoded: false)),
+        "host_id": .string(hostId.rawValue),
+        "probe": .string(probe.probeSucceeded ? "vmworker" : "fallback"),
+      ])
+  }
+
+  public func stop() async {
+    guard started else { return }
+    started = false
+    await teardown()
+    logger.info("runnerd stopped")
+  }
+
+  private func teardown() async {
+    await metricsEndpoint?.stop()
+    metricsEndpoint = nil
+    reconcileTask?.cancel()
+    await reconcileTask?.value
+    reconcileTask = nil
+    maintenanceTask?.cancel()
+    await maintenanceTask?.value
+    maintenanceTask = nil
+    await server?.stop()
+    server = nil
+    // Closes the GitHub message sessions and lets in-flight creations finish (spec §108).
+    await orchestrator?.stop()
+    orchestrator = nil
+    // Workers keep running on purpose: they own live VMs and are reconnected on the next start.
+    await runners?.detachObservers()
+    runners = nil
+    await instances?.detachGuests()
+    instances = nil
+    await supervisor?.detachAll()
+    supervisor = nil
+    service = nil
+    database = nil
+    lock?.release()
+    lock = nil
+  }
+
+  // MARK: - Queries
+
+  public func status() async throws -> SystemStatus {
+    guard let service else { throw OrchestrationError.notStarted }
+    return try await service.status()
+  }
+
+  public func reconcileState() async -> Reconciler.Snapshot {
+    await reconciler.state()
+  }
+
+  /// The bound Prometheus port, or `nil` when the endpoint is disabled.
+  public func metricsPort() async -> UInt16? {
+    await metricsEndpoint?.port()
+  }
+
+  /// Waits for a `system.shutdown` this runtime accepted. Returns immediately when none is in
+  /// flight; the production daemon never reaches the end of it because `exit(0)` comes first.
+  public func awaitShutdown() async {
+    await shutdownTask?.value
+  }
+
+  // MARK: - Shutdown (spec §108)
+
+  /// The service has already drained and, unless forced, waited the jobs out; all that is left is
+  /// to release the socket, the lock and the database.
+  private func beginShutdown(force: Bool) {
+    guard shutdownTask == nil else { return }
+    let delay = options.shutdownDelay
+    let shouldExit = options.exitOnShutdown
+    logger.notice("shutdown requested", metadata: ["force": .stringConvertible(force)])
+    shutdownTask = Task { [weak self] in
+      if delay > .zero { try? await Task.sleep(for: delay) }
+      await self?.stop()
+      if shouldExit { exit(0) }
+    }
+  }
+
+  /// Spec §43. A `listen` that is not loopback is a configuration error, not a warning: the
+  /// endpoint names profiles, instances and host capacity.
+  private func startMetricsEndpoint(_ service: DaemonServiceImpl) async throws {
+    let config = await service.appliedConfiguration()?.metrics ?? MetricsConfig()
+    guard config.prometheus.enabled else { return }
+    let endpoint = try MetricsEndpoint(
+      listen: config.prometheus.listen,
+      snapshot: { await service.metricsSnapshotValue() })
+    try await endpoint.start()
+    metricsEndpoint = endpoint
+  }
+
+  // MARK: - Wiring
+
+  private var lockURL: URL { options.paths.stateDir.appending(path: "runnerd.lock") }
+
+  private func makeService(
+    database: RunnerDatabase, hostId: HostID, probe: HostProbeResult, executable: URL?,
+    applier: ConfigApplier, demandMode: DemandMode
+  ) async throws -> DaemonServiceImpl {
+    let instanceRows = GRDBInstanceRepository(db: database)
+    let imageRows = GRDBImageRepository(db: database)
+    let imageStore = ImageStore(paths: options.paths)
+    let instanceStore = InstanceStore(paths: options.paths, images: imageStore)
+    guard let executable else {
+      throw VMError.workerSpawnFailed(reason: "no vmworker executable found", cause: nil)
+    }
+    let supervisor = WorkerSupervisor(
+      paths: options.paths, launcher: options.launcher ?? ProcessWorkerLauncher(executable: executable),
+      store: instanceStore, instances: instanceRows)
+    self.supervisor = supervisor
+    let images = ImageManager(
+      store: imageStore, images: imageRows, instances: instanceRows,
+      operations: GRDBOperationRepository(db: database), architecture: probe.architecture)
+    // `.important usage` free space at the state volume, matching what admission already measures
+    // (spec §17); injected as a closure so tests can drive every `DiskPressureState` directly.
+    let stateDir = options.paths.stateDir
+    let diskPressure = DiskPressureMonitor(freeSpace: { APFSClone.freeSpace(at: stateDir) })
+    let instances = InstanceManager(
+      paths: options.paths, hostId: hostId, instances: instanceRows,
+      profiles: GRDBProfileRepository(db: database), imageRows: imageRows, images: images,
+      imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor, probe: probe)
+    self.instances = instances
+    let gateway = GitHubGateway(
+      options: options.github ?? GitHubGateway.Options(paths: options.paths))
+    let runners = RunnerSessionManager(
+      sessions: GRDBRunnerSessionRepository(db: database), instanceRows: instanceRows,
+      profiles: GRDBProfileRepository(db: database), scopes: GRDBScopeRepository(db: database),
+      summaries: GRDBJobSummaryRepository(db: database),
+      operations: GRDBOperationRepository(db: database), instances: instances, gateway: gateway)
+    self.runners = runners
+    await supervisor.setHandlers(
+      onState: { id, state in await instances.handleWorkerState(id: id, vmState: state) },
+      onDisconnect: { id in await instances.handleWorkerDisconnect(id: id) })
+    let orchestrator = makeOrchestrator(
+      database: database, hostId: hostId, probe: probe, instances: instances, runners: runners,
+      gateway: gateway, instanceRows: instanceRows, demandMode: demandMode)
+    self.orchestrator = orchestrator
+    await reconciler.attach(
+      CompositeReconcileStep([
+        InstanceReconciler(
+          instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
+          retention: { await instances.failedInstanceRetention() }, images: images),
+        OrchestratorReconcileStep(orchestrator: orchestrator),
+      ]))
+    return DaemonServiceImpl(
+      paths: options.paths,
+      hostId: hostId,
+      database: database,
+      images: images,
+      instances: instances,
+      supervisor: supervisor,
+      applier: applier,
+      reconciler: reconciler,
+      parseConfig: parseConfig,
+      probe: probe,
+      startedAt: Date(),
+      actorName: options.actorName,
+      diskPressure: diskPressure,
+      gateway: gateway,
+      scopeHealth: ScopeHealthMonitor(
+        scopes: GRDBScopeRepository(db: database), gateway: gateway),
+      runners: runners,
+      orchestrator: orchestrator,
+      metrics: metrics,
+      logger: logger)
+  }
+
+  /// Spec §13: the rest of the daemon only ever sees `any DemandProvider`.
+  private func makeOrchestrator(
+    database: RunnerDatabase, hostId: HostID, probe: HostProbeResult, instances: InstanceManager,
+    runners: RunnerSessionManager, gateway: GitHubGateway, instanceRows: any InstanceRepository,
+    demandMode: DemandMode
+  ) -> Orchestrator {
+    let scaleSets = GRDBScaleSetRepository(db: database)
+    let demand: any DemandProvider = switch demandMode {
+    case .manual:
+      ManualDemandProvider()
+    case .scaleSet:
+      ScaleSetDemandProvider(
+        owner: hostId.rawValue, profiles: GRDBProfileRepository(db: database),
+        scopes: GRDBScopeRepository(db: database), scaleSets: scaleSets,
+        plane: { await gateway.scaleSetControlPlane() })
+    }
+    logger.info("demand provider", metadata: ["mode": .string(demandMode.rawValue)])
+    return Orchestrator(
+      hostId: hostId, paths: options.paths, probe: probe,
+      hosts: GRDBHostRepository(db: database), profiles: GRDBProfileRepository(db: database),
+      instanceRows: instanceRows, sessionRows: GRDBRunnerSessionRepository(db: database),
+      scaleSets: scaleSets, instances: instances, runners: runners, demand: demand,
+      metrics: metrics)
+  }
+
+  /// The demand provider is wired once, before `service.bootstrap` has parsed and applied a
+  /// configuration (spec §69 step 4 runs after the API surface is up), so this peeks at whatever
+  /// `bootstrap` is about to apply -- `--config` if given, else the last persisted document -- to
+  /// pick the right provider up front. `Options.demandMode` always wins outright. A parse failure
+  /// here is silently ignored and falls back to `scaleSet`; `bootstrap` re-parses for real right
+  /// after and surfaces the error properly.
+  private func resolveInitialDemandMode(applier: ConfigApplier) -> DemandMode {
+    if let overridden = options.demandMode { return overridden }
+    let yaml: String? = if let configPath = options.configPath {
+      try? String(contentsOf: configPath, encoding: .utf8)
+    } else {
+      applier.loadApplied()?.yaml
+    }
+    guard let yaml, let config = try? parseConfig(yaml) else { return .scaleSet }
+    return config.github.demand
+  }
+
+  private func createDirectories() throws {
+    let manager = FileManager.default
+    for directory in [options.paths.stateDir, options.paths.imagesDir, options.paths.instancesDir,
+                      options.paths.daemonLogsDir] {
+      try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    // 0700: the socket directory is the daemon's control surface, not a shared temp dir.
+    try manager.createDirectory(
+      at: options.paths.socketDir, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: socketDirPath)
+  }
+
+  private var socketDirPath: String { options.paths.socketDir.path(percentEncoded: false) }
+
+  private func startReconcileLoop() -> Task<Void, Never> {
+    let reconciler = self.reconciler
+    let interval = options.reconcileInterval
+    let jitter = options.reconcileJitter
+    return Task {
+      while !Task.isCancelled {
+        await reconciler.tick()
+        do {
+          try await Task.sleep(for: DaemonRuntime.nextDelay(interval: interval, jitter: jitter))
+        } catch {
+          return
+        }
+      }
+    }
+  }
+
+  /// Disk pressure and staging cleanup (spec §17, §57) run on their own, slower cadence rather
+  /// than piggybacking on `Reconciler`: they report a single maintenance action, not the
+  /// instance/worker counts `ReconcileCounts` is shaped for. Ticks eagerly, like the reconcile
+  /// loop, so `system.status` reports a real reading as soon as the daemon is up.
+  private func startMaintenanceLoop(_ service: DaemonServiceImpl) -> Task<Void, Never> {
+    let interval = options.maintenanceInterval
+    return Task {
+      while !Task.isCancelled {
+        await service.runMaintenance()
+        do {
+          try await Task.sleep(for: interval)
+        } catch {
+          return
+        }
+      }
+    }
+  }
+
+  /// Jitter keeps several hosts from reconciling in lockstep after a shared restart.
+  static func nextDelay(interval: Duration, jitter: Duration) -> Duration {
+    guard jitter > .zero else { return interval }
+    let jitterMillis = jitter.milliseconds
+    let offset = Int64.random(in: -jitterMillis...jitterMillis)
+    return .milliseconds(max(1, interval.milliseconds + offset))
+  }
+}
+
+extension Duration {
+  var milliseconds: Int64 {
+    let parts = components
+    return parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000
+  }
+}

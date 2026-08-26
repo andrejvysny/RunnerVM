@@ -1,0 +1,111 @@
+# RunnerVM TODO
+
+Plan: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (analysis + milestones + spikes).
+
+## M0 — Foundation + spikes
+- [x] Package skeleton (all targets compile)
+- [x] `Resources/vmworker.entitlements`, `scripts/sign-dev.sh`
+- [x] `PROVENANCE.md`, `NOTICE`
+- [x] `.swiftformat`, `.gitignore`, CI workflow
+- [x] `vmworker probe --json` (HostCapabilities) — proves bare-binary signing
+- [x] Go module skeleton `GuestAgent/`
+- [x] S1: signed bare-binary vmworker boots Ubuntu 24.04 cloud image (EFI, NAT, main queue, `dispatchMain`), `requestStop` honored by guest ⇒ GO.
+  Findings: (a) `swift test` rebuilds vmworker and strips the ad-hoc signature — always re-run `scripts/sign-dev.sh` before VZ runs;
+  (b) `VZVirtualMachineConfiguration.validate()` needs the entitlement ⇒ validation only in vmworker (tests use `build(validate:false)`);
+  (c) serial.log empty: Ubuntu cloud image kernel cmdline lacks `console=hvc0` ⇒ image builder must set it;
+  (d) RESOLVED in M3: guest agent reports IPs (`192.168.64.x` NAT lease works); `vm ssh` now skips docker0/bridge interfaces;
+  (e) qcow2→raw conversion done with lima-vm/go-qcow2reader (Apache-2) — reuse in `build-ubuntu-image.sh` instead of requiring qemu-img.
+- [ ] S6: `actions/scaleset` Go oracle against test repo/org — **blocked: need org/repo + PAT from user**
+
+## M1 — Core + persistence + daemon skeleton — DONE 2026-08-25 (445 tests; manual runnerd/runnerctl round trip OK)
+- [x] RunnerCore: IDs, models, state machines (Instance, RunnerSession, HostMode), errors, RunnerConfiguration + validation, Paths, ByteSize/DurationValue/RetryPolicy (147 tests)
+- [x] RunnerLogging: JSON handler + Redactor (23 tests)
+- [x] RPC: framing, strict envelope, budgets, own accept loop + `getpeereid`, CLOEXEC, NIO UDS server/client (34 tests)
+- [ ] Persistence: GRDB open (WAL/FK/busy_timeout), migrations v1 (spec §45 + C1 additions), repositories
+- [x] ConfigLoader: YAML → DTO → RunnerConfiguration (21 tests; `ExampleConfig.example`)
+- [x] DaemonAPI: full `Proto/daemon_api.md` catalogue + typed server/client (unimplemented methods answer `NOT_IMPLEMENTED`); Orchestration `DaemonRuntime` (lock, SQLite, host-id, `vmworker probe` + fallback, config apply, socket, reconcile tick); `runnerd --foreground` with SIGINT/SIGTERM; `runnerctl status|version|config init|validate|apply|get|profile list|show|scope list|show` (47 tests)
+- [x] Persistence `GRDBConfigStore`: whole-document config apply in one transaction (upsert by name, absent ⇒ `enabled=0`, `operations` + `audit_events` rows)
+- [x] S4: Swift↔Go golden fixtures (`Proto/fixtures/envelopes.json`) pass on both sides; cross-process Swift⇄Go socket test still TODO in M3
+- [ ] Freeze worker fencing/handshake spec in `Proto/worker_protocol.md`
+
+## M2 — vmworker + Linux VM + minimal capacity
+- [x] VirtualizationCore: VMInstanceSpec (+hardDeadline, canonical ISO-8601 codec), SpecDigest, WorkerLock, LinuxVMPlatform, VMConfigurationBuilder, VMRuntime (main queue, KVO state), VsockBridge (POSIX relay)
+- [ ] ImageMetadata
+- [x] vmworker `run`: lock → socket → VZ; full worker RPC catalogue; lease; orphan policy; exit codes 0/64/65/75/76/77 verified on a real Ubuntu guest. Hidden helpers: `debug-call`, `prepare-nvram`.
+  Findings: (a) BSD `accept(2)` inherits the listener's `O_NONBLOCK` — the relay must clear it; (b) relay sockets need `SO_NOSIGPIPE` or a vanished peer kills the worker; (c) `RunnerPaths.agentSocket` says `agent-<id>.sock` but Proto/worker_protocol.md says `vm-<id>-agent.sock` — worker implements the Proto name, RunnerCore needs fixing.
+- [ ] WorkerSupervisor: spawn detached, fencing, reconnect
+- [x] ImageStore + InstanceStore: content-addressed local images, clonefile + truncate, tmp→rename, worker.lock, sealer, retention sweep (34 tests); pins/reservations live in Persistence
+- [x] Scheduler: HostBudget, CapacityCalculator (macOS cap 2, disk floor), DesiredCapacity (busy-over-idle, unbound cancellation), Allocator round-robin, StartupThrottle, SingleHostPlacement (58 tests)
+- [x] `runnerctl image import|list|inspect|delete`, `vm create|list|show|stop|delete`; `status` reports real running VMs, image cache and reconcile counts
+- [x] S2: `kill -9 runnerd` → vmworker survived (reparented to PID 1, own session), restart reconnected at the same generation and pid, instance stayed `waitingForAgent` ⇒ GO. No launchd fallback needed.
+- [ ] S3 LaunchDaemon vs LaunchAgent; S5 clonefile bench; S7 macOS identity
+- **M2 findings**: (a) RESOLVED: vmworker `run` now creates the EFI variable store when missing; (b) RESOLVED: `ImageReference.isValidProfileImage` accepts bare local names / `sha256:` digests; (c) `instances.image_digest` is a FK, so deleted-instance tombstones block image GC — `InstanceRepository.purgeDeleted(imageDigest:)` now clears them; (d) worst-case `disk_reservation_bytes` (profile size) makes a 20 GiB profile unschedulable on a Mac with ~9 GiB free.
+
+## Incident 2026-08-26
+- Go-agent subagent ran `agent.cleanup` against a live agent on the HOST (non-root, prod defaults): deleted `~/.npm`, `~/.yarn/cache`, `~/.nuget/packages`, `~/.gradle/caches`, uid-501 entries under `/private/tmp` (incl. session scratchpad: Ubuntu qcow2/raw disk, qcow2tool, codex output). Caches regenerable; codex output already integrated into plan.
+- Fix landed by subagent: non-root ⇒ temp/home/docker sweeps disabled. Follow-ups DONE: host-safe-mode (cleanup/resizeDisk/shutdown refused unless `kern.hv_vmm_present`/DMI says VM, or `--allow-host-destructive`); OrchestrationTests `withHarness` cleanup (0 leaked dirs).
+
+## M3 — Guest agent + Ubuntu image
+- [x] Go `internal/rpc` framing server/client + `internal/vsock` (linux listener; darwin TODO) — fixtures pass
+- [x] Go agent: all guest v1 handlers, runner Manager (setpgid, uid drop, JIT via env), exec stream, cleanup, resizeDisk (linux), darwin AF_VSOCK, systemd/launchd packaging, Makefile (70 tests)
+- [x] GuestControl: `GuestMethod` catalogue, DTOs pinned to `Proto/guest_agent.md`, `GuestAgentClient` (actor, lazy reconnect, `waitUntilReady` 200ms→2s backoff), `FakeGuestAgent` test server (26 tests).
+  Wired into the daemon: `waitingForAgent -> idle` on `agent.hello` + `health == ready` (`boot_id`/`agent_ready_at` persisted), `AGENT_READY_TIMEOUT` ⇒ `failed` (instance kept, `failure.json` written), reconnect re-handshake with `bootId` compare ⇒ `tainted` + `interrupted`.
+  `instance.exec` (stream) / `instance.metrics` / `instance.sshInfo` + `runnerctl vm exec|metrics|ssh`.
+  Findings: (a) the RPC terminal chunk carries no payload, so `agent.exec`'s `{exitCode}` is the last *payload-bearing* chunk before the empty `end:true` frame — same on the daemon side; (b) guest DTO timestamps stay RFC-3339 `String`, because `GuestMetrics` is forwarded verbatim by `DaemonServer`'s stock `JSONEncoder`, which would write a `Date` as a reference-epoch double; (c) a blank raw disk cannot be used to smoke-test agent readiness — VZ EFI finds no boot device and stops the VM ~50ms after `running`, so `VM_STOPPED_UNEXPECTEDLY` beats the deadline; an Alpine `virt` aarch64 ISO boots and idles, which does exercise it.
+- [x] vmworker bridge socket: real guest agent behind it, verified over vsock on an Ubuntu 24.04 guest
+- [x] `scripts/build-ubuntu-image.sh` (cloud-init NoCloud seed disk). `vmworker run` attaches `<instanceDir>/seed.img` as a read-only disk when present (`Run.swift buildConfiguration`); runner instances have none. `docs/images.md` documents build/contents/limits.
+  Build: 127 s wall, virtual 12 GiB / allocated 3.2 GiB, Ubuntu 24.04.4 + docker-ce 29.7.2 + actions-runner 2.336.0 + guest agent.
+  Findings: (a) systemd's getty on `/dev/hvc0` calls `vhangup(2)`, which kills cloud-init's already-open write handle — the build trace silently stopped at the login banner until `bootcmd` masked `serial-getty@hvc0.service`; (b) AF_UNIX's 104-byte cap means the worker socket dir must be short (`/tmp/rvm-build-<id>`), not nested under `--out`; (c) `hdiutil makehybrid -iso -joliet` preserves lowercase `user-data`/`meta-data` names and labels the volume `CIDATA`, so no mkisofs/genisoimage is needed — but the label case is not guaranteed, so the guest resolves it case-insensitively via `lsblk`; (d) `installdependencies.sh` probing `libicu80..75` before finding `libicu74` prints `E: Unable to locate package` and is harmless; (e) `runnerctl image import` does **not** read the sealed `metadata.json` — `ImageManager.importLocal` synthesises its own, so `runnerVersion`/`guestAgentVersion`/`capabilities` are lost on import.
+- [x] `runnerctl vm exec|metrics|ssh` (`exec` streams live and exits with the guest's code; `ssh --connect` execs `/usr/bin/ssh`)
+- [x] **§147 milestone proven end to end** (2026-08-26): `image import` -> `vm create` -> `idle` via the real guest agent over vsock -> `vm exec -- uname -a` / `docker info` / `id runner` -> `vm metrics` -> `vm ssh` -> `vm stop` -> `vm delete`.
+  §102 timings: clone->running 120 ms, running->agent ready 5.4 s (2 vCPU / 2 GiB / 12 GiB profile); `vm stop` 3.6 s; import (hash 3.2 GiB) 4.9 s.
+  M0 finding (c) closed: instance `serial.log` now carries the full kernel+systemd boot (376 lines) because the image appends `console=hvc0`.
+  Open bug (not fixed here, other module): `runnerctl vm ssh` prints docker0's `172.17.0.1` instead of the NIC address — `GuestAgent/internal/system/system.go:132` sorts addresses lexicographically and `Sources/runnerctl/VMGuestCommands.swift:143` takes `.first`.
+
+## Follow-ups from §147 e2e
+- [ ] `runnerctl image import --metadata <path>` (ImageManager.swift:40 currently synthesises metadata; sealed `metadata.json` is discarded)
+- [ ] Rebuild the Ubuntu image after the guest-agent IP ordering fix (`vm ssh` printed docker0 address)
+- [ ] Cross-process Swift⇄Go framing test in CI (currently only proven live)
+
+## M4 — ImageStore proper — DONE
+- [x] `image.prune` (pins + live instances + pending operations exempt; LRU under `maxSize`; staging sweep), `DiskPressureMonitor` (ok/warning/critical; create refused when critical), 5-min maintenance loop
+- [x] Pin race fixed: `ImageManager.reserve` takes a `planning` pin inside the ImageManager actor before inspect; converted to `instance` pin after insert; released on failure; stale planning pins swept on first reconcile tick.
+
+## M5–M13
+See plan C2.
+- [x] M5 groundwork: GitHubControl — HTTP client (timeouts, retry/Retry-After/rate-limit, error classes), PAT providers (env/file 0600/Keychain/chain), GitHub App JWT + installation token, REST JIT (repo/org), runners list/get/remove, runner groups, visibility guard, FakeGitHubServer (50 tests). Unverified against GitHub.com: repo-scope `runner_group_id: 1` requirement, 429 vs 403 for rate limits.
+- [x] M5: `RunnerSessionManager` (row-before-JIT → jitRequested → jitIssued → jitDelivered → runnerStarting, `agent.runnerStatus` poll → runnerOnline/jobRunning → completed; every non-`completed` terminal calls `ensureRunnerRemoved` behind a `remove-runner` operation row retried by the maintenance loop), `agent.startRunner` secret delivery (lost reply recovered via `runnerStatus`, never retried), `job_summaries` on terminal, ephemeral teardown (stop + delete), `GitHubGateway` (one HTTP client, cached auth probe), `GitHubAuthFactory` (env/file 0600/keychain; `provider: app` reads `<stateDir>/github-app.json`), `ScopeHealthMonitor` (runner-group id, visibility, health at apply + 5-min loop, `unknown` after 3 unreachable passes), `runnerctl auth login|status|logout`, `runnerctl github test`, `runnerctl runner list|show`, `runnerctl debug run-jit <profile> [--wait]` (21 new tests, 608 total).
+  Unverified against GitHub.com: everything above runs only against `FakeGitHubServer`. Needs a PAT + repo/org for: `generate-jitconfig` on a real org scope with a named runner group, the claim that GitHub auto-removes a JIT runner after its job (the happy path deliberately issues no DELETE), and `runnerctl debug run-jit --wait` against a queued workflow.
+- [ ] M5 follow-ups: `runnerctl auth app` (writes `github-app.json`). (Reusable-after-one-job resolved by M11.)
+- [x] M6/M7/M10 core: `DemandProvider` seam (`DemandEvent`, `DemandSnapshot`, `DemandProviderReport`) with `ManualDemandProvider` and `ScaleSetDemandProvider` (per-profile scale set `runnervm-<profile>`, one message session per scale set, durable inbox `intent -> processed -> deleted` + monotonic cursor, `AcquireJobs` on `JobAvailable`, `JobStarted`/`JobCompleted` correlation, replay + new generation on restart, jittered backoff, `X-ScaleSetMaxCapacity` from the orchestrator); `Orchestrator` actor (advertise -> `DesiredCapacity.compute` -> `Allocator` + `StartupThrottle` -> `InstanceManager.create`, cancellation of unbound reservations, `idleTTL` reaping, session hand-off with `jitSource = scaleSet`, per-profile start hold-down, `OrchestratorEvent` ring); `RunnerSessionManager.startSession(instanceId:origin:)` + scale-set JIT + scale-set-aware `ensureRunnerRemoved`; `GitHubGateway.scaleSetControlPlane()`; `scaleset.list` / `debug.demandSet`, `runnerctl scaleset list` / `runnerctl debug demand set`, `status` shows `demand / busy / idle / starting`; `FakeScaleSetControlPlane` (13 new tests, 665 total).
+  Unverified against GitHub.com: everything scale-set-shaped runs only against `FakeScaleSetControlPlane` — see the live checklist below.
+- [x] `GitHubConfig.demand: DemandMode` (`scaleSet` default) is now first-class config (`github.demand: scaleSet|manual`), mapped by ConfigLoader and read by `DaemonRuntime`; `Options.demandMode` remains only as a test/CLI override, and the old env-var escape hatch is gone.
+- [ ] M6 follow-ups:
+  - Warm-pool `idleTTL` reaping deletes stale idle VMs whenever the profile has no unserved demand; the replacement is started by the next tick. Still true after M11: `idleTTL` and `reuse.maxAge` are independent clocks.
+  - `runner_sessions` has no `scale_set_id` column, so a scale-set session is correlated to a job only through `github_runner_name`; add the column if job-level attribution is needed.
+- [ ] Live checklist for M6 (needs a PAT + org/repo, see open question 2):
+  - `runnerctl scaleset list` shows a `ready` scale set, an `open` session and a moving cursor against a real org.
+  - `X-ScaleSetMaxCapacity` is honoured: queue more jobs than the host can take and confirm GitHub stops assigning at the advertised number.
+  - `AcquireJobs` partial results on a second host competing for the same scale set.
+  - A JIT runner created with `generateJITConfig(scaleSetID:)` is picked up by the scale set and receives a job.
+  - `ensureRunnerRemoved` through the scale-set API for a runner that never came online.
+  - Restart runnerd mid-job: new session generation, no duplicate `AcquireJobs`, the running job survives.
+- [x] M6 client: `ActionsScaleSetClient`/`ActionsMessageSession` ported from actions/scaleset v0.4.0 (MIT; PROVENANCE rows), `FakeActionsService` (92 GitHubControl tests). Endpoints/headers documented in `Sources/GitHubControl/ScaleSet/`; live verification pending (S6).
+- [x] M6 orchestration: `DemandProvider` (manual + scale set: registration, sessions/generations, durable inbox, acquireJobs, JobStarted/Completed correlation, advertised capacity), `Orchestrator` tick (capacity → desired plan → round-robin/throttled starts → unbound cancellation → scale-set JIT session assignment → idleTTL reaping; per-profile hold-down), `runnerctl scaleset list`, `debug demand set` (667 tests). Live verification pending (S6).
+- [x] `github.demand: scaleSet|manual` config model
+- [x] M9 transport: `OCIRegistry` (reference, token/basic auth, credential chain incl. docker helpers/Keychain, manifest/blob client with ranged resume + chunked upload < 4 MB, RunnerVM artifact schema, LZ4 layerizer with sparse reassembly, `RunnerVMImageTransfer`, `FakeRegistry`; 66 tests; P9 portability round trip proven locally)
+- [ ] M9 daemon integration: `ImageManager.pull/push` (dedup concurrent pulls by digest, staging → importLocal), `runnerctl image pull|push`, profile `image:` registry refs resolved at create; needs GHCR verification with a real token
+- [ ] M8 macOS: blocked on disk (~27 GiB free; cirruslabs base images are 30+ GiB) — needs user to free space or provide an image
+- [x] M11 reusable lifecycle: `InstanceManager.afterSession` (`InstanceReuse.swift`) is the single exit from a runner session. Ephemeral keeps the old behaviour (completed ⇒ stop+delete, failed ⇒ interrupted + `failure.json`). Reusable walks `busy → cleaning → idle` behind `agent.stopRunner` → `agent.cleanup(epoch: jobs_consumed)` → `agent.health == ready` → `agent.hello().bootId == instances.boot_id` → ≥10 % root headroom from `agent.getMetrics`, all inside `timeouts.cleanup`. Recycle triggers (spec §126): public-repository scope, `tainted`, `retire_after_session`, non-`completed` session with `recycleOnFailure`, `jobs_consumed >= reuse.maxJobs`, age ≥ `reuse.maxAge`; a recycle with a taint goes `cleaning → interrupted → deleting → deleted`, a planned retirement `→ stopping → stopped → deleting → deleted`. Taint vocabulary `TaintReason` (`CLEANUP_FAILED` / `AGENT_DEGRADED` / `UNEXPECTED_REBOOT` / `DISK_PRESSURE` / `SESSION_FAILED` / `DISK_LOST` / `MANUAL`). `InstanceManager.taint(id:reason:)` + `instance.taint` + `runnerctl vm taint <id> --reason` (audited `vm.taint`); idle ⇒ recycled now, busy ⇒ `retire_after_session`. `Orchestrator` never assigns a session to a tainted/retiring VM and removes idle ones on the next tick. §138: `config.apply` calls `retireOutdatedReusable()`, marking reusable VMs whose `image_digest` no longer matches the profile's resolved digest. §72: an idle/cleaning reusable VM whose worker dies is restarted once from its own disk (`interrupted → startingWorker → … → idle`, budget = `worker_generation <= 1`), then recycled. New `InstanceRepository.applyReuse(id:_:)` writes `tainted`/`taint_reason`/`retire_after_session`/`jobs_consumed` outside the state CAS. `vm show` adds lifecycle / age / jobs consumed / retire after session. 16 new tests (739 total).
+- [x] M11 follow-up — `imageUpdates.recycleReusable` (spec §138) is real config now: `ImageUpdatesConfig` on `RunnerConfiguration` (lenient decode), DTO/mapper/schema rows; `InstanceTaint.retireOutdatedReusable` reads `configuration?.imageUpdates.recycleReusable` instead of the old `ImageUpdatePolicy` constant.
+- [x] M11 follow-up — `reuse.maxRestarts` (default 1, validated 0-5, `PROFILE_REUSE_MAX_RESTARTS_INVALID`) replaces the `InstanceManager.maxReusableRestarts` constant; `restartInterrupted` resolves it per-profile, falling back to `ReusePolicy.default.maxRestarts` if the profile row is gone.
+- [x] M13 operations: host mode control + metrics. `HostModeControl` (CAS over `hosts.mode` + `audit_events` row) behind `system.drain {wait,timeoutMs}` / `system.resume` / `system.offline` / `system.shutdown {force}` and `runnerctl system drain|resume|offline|shutdown` (aliased `daemon`); draining advertises 0 and admits nothing while active sessions finish, `offline` drains first, shutdown without `--force` refuses while a job runs and leaves vmworkers alive (spec §108, §109). New `Metrics` module: `MetricRegistry` actor (counters/gauges/histograms, fixed seconds buckets, whole-label-set gauge republish), `MetricsSnapshot` DTOs, `PrometheusEncoder` (0.0.4 text). 25 families wired — lifecycle timings §41 from `InstanceCreation`/`InstanceManager`/`RunnerSessionObserver`, worker RSS/CPU §40 from `HostProcessMetrics` each tick, capacity/demand/reservations/disk gauges, session and failure counters. `metrics.snapshot {format}` + `runnerctl metrics [--format human|json|prometheus]`, and an optional loopback-only `NWListener` endpoint (`metrics.prometheus.enabled/listen`, `GET /metrics` + `/healthz`, non-loopback refused at startup). `runnerctl status` prints `Mode: draining (N active jobs)`. 39 new tests.
+- [ ] M13 hardening leftovers: failure-injection matrix §99, launchd packaging; `runnervm_image_pull_seconds` and `runnervm_github_requests_total` are declared but unobserved (their call sites live in `ImageManager`/`GitHubControl`)
+
+## Open questions (need user)
+1. LZ4 (assumed) vs zstd for disk layers
+2. GitHub org/repo + PAT for S6/M5/M6
+3. Naming: `runnerd`/`runnerctl`/`vmworker`, `com.runnervm`, `RUNNERVM_` (assumed); Go module path placeholder `github.com/runnervm/guest-agent`
+4. Package lives at workspace root, `tart/` as sibling reference (assumed); repo not `git init`ed (user rule: no git ops unless told)
+5. Auto-login service user acceptable if LaunchDaemon spike fails?
+6. Reusable VMs needed at all?

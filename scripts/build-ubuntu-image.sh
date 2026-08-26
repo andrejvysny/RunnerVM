@@ -1,0 +1,544 @@
+#!/usr/bin/env bash
+# Build a RunnerVM Ubuntu 24.04 arm64 runner image (spec §18, §19, §60, §62).
+#
+# The whole build runs *inside* a throwaway VM driven by `vmworker run`: a copy
+# of an Ubuntu cloud disk plus a read-only cloud-init NoCloud seed. The host
+# never mounts the guest filesystem; it only watches serial.log, which the guest
+# feeds by teeing cloud-init output to /dev/hvc0 (spec §131).
+#
+# Output: <out>/disk.img, <out>/nvram.bin, <out>/metadata.json.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --------------------------------------------------------------------------
+# Options
+# --------------------------------------------------------------------------
+BASE=""
+OUT=""
+RUNNER_VERSION="latest"
+DISK_GIB=16
+CPUS=4
+MEMORY_GIB=4
+SOCKET_DIR=""
+NO_SUDO=0
+KEEP_BUILD_DIR=0
+TIMEOUT_MIN="${BUILD_TIMEOUT_MIN:-40}"
+VMWORKER="${VMWORKER:-$REPO_ROOT/.build/debug/vmworker}"
+
+usage() {
+    cat <<'USAGE'
+usage: build-ubuntu-image.sh --base <raw.img> --out <dir> [options]
+
+  --base <path>            Raw Ubuntu 24.04 arm64 cloud disk (never modified).
+  --out <dir>              Directory to write disk.img/nvram.bin/metadata.json into.
+  --runner-version <v>     actions/runner version, or "latest" (default: latest).
+  --disk-gib <n>           Virtual size of the built image (default: 16).
+  --cpus <n>               Builder VM vCPUs (default: 4).
+  --memory-gib <n>         Builder VM memory (default: 4).
+  --socket-dir <dir>       Where vmworker publishes its sockets (default: /tmp/rvm-build-<id>).
+  --no-sudo                Do not grant the runner account passwordless sudo.
+  --keep-build-dir         Keep the builder VM directory (disk, seed, serial.log) after sealing.
+
+Environment: VMWORKER (path to a signed vmworker), BUILD_TIMEOUT_MIN (default 40).
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --base) BASE="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;;
+    --runner-version) RUNNER_VERSION="$2"; shift 2 ;;
+    --disk-gib) DISK_GIB="$2"; shift 2 ;;
+    --cpus) CPUS="$2"; shift 2 ;;
+    --memory-gib) MEMORY_GIB="$2"; shift 2 ;;
+    --socket-dir) SOCKET_DIR="$2"; shift 2 ;;
+    --no-sudo) NO_SUDO=1; shift ;;
+    --keep-build-dir) KEEP_BUILD_DIR=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$BASE" ] || { echo "--base is required" >&2; exit 2; }
+[ -n "$OUT" ] || { echo "--out is required" >&2; exit 2; }
+[ -f "$BASE" ] || { echo "base image not found: $BASE" >&2; exit 2; }
+[ -x "$VMWORKER" ] || {
+    echo "vmworker not found or not executable: $VMWORKER" >&2
+    echo "run scripts/sign-dev.sh first" >&2
+    exit 2
+}
+codesign -d --entitlements - "$VMWORKER" 2>&1 | grep -q com.apple.security.virtualization || {
+    echo "vmworker lacks the virtualization entitlement; run scripts/sign-dev.sh" >&2
+    exit 2
+}
+
+log() { printf '[build %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# --------------------------------------------------------------------------
+# 1. Guest agent (linux/arm64)
+# --------------------------------------------------------------------------
+log "building guest agent (linux/arm64)"
+make -C "$REPO_ROOT/GuestAgent" build-linux >/dev/null
+AGENT_BIN="$REPO_ROOT/GuestAgent/bin/linux-arm64/runnervm-guest-agent"
+[ -f "$AGENT_BIN" ] || { echo "guest agent build produced nothing" >&2; exit 1; }
+AGENT_VERSION="$(cd "$REPO_ROOT" && git describe --tags --always --dirty 2>/dev/null || echo dev)"
+log "guest agent version: $AGENT_VERSION"
+
+# --------------------------------------------------------------------------
+# 2. Resolve the actions runner version on the host
+# --------------------------------------------------------------------------
+if [ "$RUNNER_VERSION" = "latest" ]; then
+    log "resolving latest actions/runner release"
+    RUNNER_VERSION="$(curl -sSfL --max-time 30 \
+        https://api.github.com/repos/actions/runner/releases/latest |
+        sed -n 's/.*"tag_name" *: *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$RUNNER_VERSION" ] || { echo "could not resolve latest runner version" >&2; exit 1; }
+fi
+log "actions runner version: $RUNNER_VERSION"
+
+# --------------------------------------------------------------------------
+# 3. Builder VM directory
+# --------------------------------------------------------------------------
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+BUILD_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+BUILD_DIR="$OUT/.build/$BUILD_ID"
+mkdir -p "$BUILD_DIR"
+# AF_UNIX paths cap at 104 bytes, which a build directory nested under a long
+# --out easily blows past, so the sockets live in a short path by default.
+[ -n "$SOCKET_DIR" ] || SOCKET_DIR="/tmp/rvm-build-${BUILD_ID:0:8}"
+mkdir -p "$SOCKET_DIR"
+SOCKET_DIR="$(cd "$SOCKET_DIR" && pwd)"
+
+log "build dir: $BUILD_DIR"
+# clonefile(2): a copy-on-write clone, so the base image is never touched and the
+# copy costs no space until the guest writes to it.
+cp -c "$BASE" "$BUILD_DIR/disk.img" 2>/dev/null || cp "$BASE" "$BUILD_DIR/disk.img"
+truncate -s "${DISK_GIB}G" "$BUILD_DIR/disk.img"
+DISK_BYTES=$((DISK_GIB * 1024 * 1024 * 1024))
+MEMORY_BYTES=$((MEMORY_GIB * 1024 * 1024 * 1024))
+
+"$VMWORKER" prepare-nvram "$BUILD_DIR/nvram.bin" >/dev/null
+
+MAC="$(printf '02:%02x:%02x:%02x:%02x:%02x' \
+    $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))"
+
+# Mirrors VirtualizationCore.VMInstanceSpec; vmworker decodes it with .iso8601.
+cat >"$BUILD_DIR/spec.json" <<SPEC
+{
+  "cpuCount": $CPUS,
+  "diskBytes": $DISK_BYTES,
+  "id": "$BUILD_ID",
+  "imageDigest": "sha256:build",
+  "macAddress": "$MAC",
+  "memoryBytes": $MEMORY_BYTES,
+  "os": "linux",
+  "serialConsole": true
+}
+SPEC
+
+# --------------------------------------------------------------------------
+# 4. cloud-init NoCloud seed
+# --------------------------------------------------------------------------
+SEED_SRC="$BUILD_DIR/seed"
+mkdir -p "$SEED_SRC/runnervm"
+cp "$AGENT_BIN" "$SEED_SRC/runnervm/guest-agent"
+cp "$REPO_ROOT/GuestAgent/packaging/systemd/runnervm-guest-agent.service" \
+    "$SEED_SRC/runnervm/runnervm-guest-agent.service"
+
+cat >"$SEED_SRC/meta-data" <<META
+instance-id: runnervm-build-$BUILD_ID
+local-hostname: runnervm-build
+META
+
+if [ "$NO_SUDO" -eq 1 ]; then
+    RUNNER_SUDO="sudo: false"
+else
+    RUNNER_SUDO="sudo: 'ALL=(ALL) NOPASSWD:ALL'"
+fi
+BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# The template is a *quoted* heredoc so nothing here is expanded by this shell:
+# every `$` below belongs to the guest. Host values arrive as @PLACEHOLDER@.
+cat >"$SEED_SRC/user-data.tmpl" <<'CLOUDCONFIG'
+#cloud-config
+# Mirror every cloud-init stage onto the virtio console so the host can watch the
+# build in serial.log without ever mounting the guest filesystem (spec §131).
+output:
+  all: '| tee -a /var/log/cloud-init-output.log /dev/hvc0'
+
+hostname: runnervm-build
+preserve_hostname: false
+
+# systemd puts a login getty on the virtio console. Its vhangup(2) at session
+# setup invalidates every *other* process's open handle on /dev/hvc0 -- which
+# silently truncates cloud-init's build trace in serial.log the moment the login
+# banner appears. A CI guest has no use for a console login, so stop it from ever
+# starting; bootcmd runs long before multi-user.target. This keeps serial.log a
+# pure boot/diagnostic channel in built instances too (spec §131).
+bootcmd:
+  - [systemctl, mask, --now, 'serial-getty@hvc0.service']
+
+# docker must exist as a group before the runner account is created: users are
+# configured in the init stage, long before the docker package is installed.
+groups:
+  - docker
+
+users:
+  - name: runner
+    uid: 1001
+    gecos: RunnerVM actions runner
+    shell: /bin/bash
+    groups: [docker]
+    lock_passwd: true
+    @RUNNER_SUDO@
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - wget
+  - ca-certificates
+  - jq
+  - tar
+  - gzip
+  - xz-utils
+  - zstd
+  - unzip
+  - zip
+  - rsync
+  - openssh-server
+  - build-essential
+  - python3
+  - python3-pip
+  - pipx
+  - dnsutils
+  - iproute2
+  - netcat-openbsd
+  - cloud-guest-utils
+
+write_files:
+  # console=hvc0 is what makes serial.log useful on Apple Virtualization: the
+  # stock Ubuntu cloud cmdline names only tty1/ttyS0, neither of which exists here.
+  - path: /etc/default/grub.d/99-runnervm.cfg
+    permissions: '0644'
+    content: |
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=hvc0"
+      GRUB_TIMEOUT=0
+      GRUB_RECORDFAIL_TIMEOUT=0
+
+  # cloud-init writes 50-cloud-init.yaml pinned to the *builder* VM's MAC. Every
+  # instance cloned from this image gets a fresh MAC, so match on the interface
+  # name family instead; the pinned file is deleted during sealing.
+  - path: /etc/netplan/99-runnervm.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          runnervm-en:
+            match:
+              name: "en*"
+            dhcp4: true
+            dhcp-identifier: mac
+
+  # The guest agent unit is ordered After=network-online.target; unbounded
+  # wait-online would spend two minutes of the profile's agentReady budget.
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/10-runnervm.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=20
+
+  - path: /etc/ssh/sshd_config.d/99-runnervm.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+
+  # SSH host keys are instance identity, not image content, so sealing removes
+  # them (spec §62). cloud-init is disabled on later boots, so a tiny early
+  # oneshot regenerates them before anything can want sshd.
+  - path: /etc/systemd/system/runnervm-firstboot.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=RunnerVM first-boot instance identity
+      DefaultDependencies=no
+      After=local-fs.target
+      Before=sysinit.target shutdown.target
+      Conflicts=shutdown.target
+      ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/bin/ssh-keygen -A
+
+      [Install]
+      WantedBy=sysinit.target
+
+  # Everything imperative lives in one script: a failure then shows a `set -x`
+  # trace on the serial console instead of an opaque runcmd index.
+  - path: /usr/local/sbin/runnervm-build.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -Eeuxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      APT="apt-get -y -o DPkg::Lock::Timeout=900 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+      marker() { echo "$1" >/dev/hvc0 2>/dev/null || echo "$1"; }
+      trap 'marker RUNNERVM-BUILD-FAILED' ERR
+
+      # Background apt jobs fight the build for the dpkg lock. This image is
+      # rebuilt, not patched in place, so they have no job here.
+      systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
+      systemctl disable unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
+
+      # ---- guest agent, from the read-only NoCloud seed ----
+      # hdiutil's volume label case is not guaranteed, so match case-insensitively.
+      CIDATA=""
+      for _ in $(seq 1 30); do
+        CIDATA="$(lsblk -rno PATH,LABEL 2>/dev/null | awk 'tolower($2)=="cidata"{print $1; exit}')"
+        if [ -n "$CIDATA" ]; then break; fi
+        sleep 1
+      done
+      if [ -z "$CIDATA" ]; then CIDATA=/dev/disk/by-label/cidata; fi
+      mkdir -p /mnt/cidata
+      mount -o ro "$CIDATA" /mnt/cidata
+      install -m 0755 /mnt/cidata/runnervm/guest-agent /usr/local/bin/runnervm-guest-agent
+      install -m 0644 /mnt/cidata/runnervm/runnervm-guest-agent.service \
+        /etc/systemd/system/runnervm-guest-agent.service
+      install -d -m 0750 /var/lib/runnervm-guest-agent
+      umount /mnt/cidata
+      rmdir /mnt/cidata
+      systemctl daemon-reload
+      systemctl enable runnervm-guest-agent.service
+      systemctl enable runnervm-firstboot.service
+
+      # ---- docker engine, official repo (spec §19) ----
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL --retry 5 --retry-delay 3 https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+        >/etc/apt/sources.list.d/docker.list
+      $APT update
+      $APT install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable docker.service containerd.service
+
+      # ---- actions runner (spec §36) ----
+      install -d -o runner -g runner -m 0755 /opt/actions-runner
+      curl -fsSL --retry 5 --retry-delay 3 \
+        "https://github.com/actions/runner/releases/download/v@RUNNER_VERSION@/actions-runner-linux-arm64-@RUNNER_VERSION@.tar.gz" \
+        -o /tmp/actions-runner.tar.gz
+      tar -xzf /tmp/actions-runner.tar.gz -C /opt/actions-runner
+      rm -f /tmp/actions-runner.tar.gz
+      chown -R runner:runner /opt/actions-runner
+      chmod +x /opt/actions-runner/run.sh /opt/actions-runner/config.sh
+      /opt/actions-runner/bin/installdependencies.sh
+
+      update-grub
+
+      cat >/etc/runnervm-image.json <<'JSON'
+      {
+        "runnerVersion": "@RUNNER_VERSION@",
+        "guestAgentVersion": "@AGENT_VERSION@",
+        "builtAt": "@BUILT_AT@"
+      }
+      JSON
+      chmod 0644 /etc/runnervm-image.json
+
+      # ---- seal: drop everything instance-specific (spec §62) ----
+      # The builder's hostname is build-time identity, not image content.
+      echo runnervm >/etc/hostname
+      sed -i 's/runnervm-build/runnervm/g' /etc/hosts
+      rm -f /etc/netplan/50-cloud-init.yaml
+      netplan generate
+      rm -f /etc/ssh/ssh_host_*
+      touch /etc/cloud/cloud-init.disabled
+      $APT clean
+      rm -rf /var/lib/apt/lists/*
+      rm -rf /var/log/journal/* /tmp/* /var/tmp/*
+      : >/etc/machine-id
+      if [ -d /var/lib/dbus ]; then ln -sf /etc/machine-id /var/lib/dbus/machine-id; fi
+      sync
+      fstrim -av || true
+      marker RUNNERVM-BUILD-OK
+
+runcmd:
+  - [bash, /usr/local/sbin/runnervm-build.sh]
+
+power_state:
+  mode: poweroff
+  message: runnervm image build complete
+  timeout: 120
+  condition: true
+CLOUDCONFIG
+
+sed -e "s|@RUNNER_SUDO@|$RUNNER_SUDO|g" \
+    -e "s|@RUNNER_VERSION@|$RUNNER_VERSION|g" \
+    -e "s|@AGENT_VERSION@|$AGENT_VERSION|g" \
+    -e "s|@BUILT_AT@|$BUILT_AT|g" \
+    "$SEED_SRC/user-data.tmpl" >"$SEED_SRC/user-data"
+rm -f "$SEED_SRC/user-data.tmpl"
+
+log "building NoCloud seed"
+rm -f "$BUILD_DIR/seed.iso" "$BUILD_DIR/seed.img"
+hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata \
+    -o "$BUILD_DIR/seed.iso" "$SEED_SRC"
+mv "$BUILD_DIR/seed.iso" "$BUILD_DIR/seed.img"
+
+# --------------------------------------------------------------------------
+# 5. Run the builder VM
+# --------------------------------------------------------------------------
+SHORT_ID="${BUILD_ID:0:8}"
+WORKER_SOCK="$SOCKET_DIR/vm-$SHORT_ID.sock"
+SERIAL_LOG="$BUILD_DIR/serial.log"
+WORKER_LOG="$BUILD_DIR/worker.log"
+WORKER_PID=""
+
+shutdown_worker() {
+    [ -n "$WORKER_PID" ] || return 0
+    kill -0 "$WORKER_PID" 2>/dev/null || return 0
+    "$VMWORKER" debug-call --socket "$WORKER_SOCK" --method worker.shutdown \
+        --payload '{"reason":"stop","gracefulTimeoutMs":30000}' >/dev/null 2>&1 || true
+    for _ in $(seq 1 60); do
+        kill -0 "$WORKER_PID" 2>/dev/null || return 0
+        sleep 1
+    done
+    kill -TERM "$WORKER_PID" 2>/dev/null || true
+}
+
+cleanup() {
+    local code=$?
+    if [ -n "$WORKER_PID" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
+        log "stopping builder worker (pid $WORKER_PID)"
+        shutdown_worker
+    fi
+    return $code
+}
+trap cleanup EXIT
+
+log "starting builder VM (${CPUS} vCPU, ${MEMORY_GIB} GiB RAM, ${DISK_GIB} GiB disk)"
+BUILD_START=$(date +%s)
+"$VMWORKER" run \
+    --instance "$BUILD_ID" \
+    --spec "$BUILD_DIR/spec.json" \
+    --socket-dir "$SOCKET_DIR" \
+    --generation 1 \
+    --nonce build \
+    --lease-ttl-ms 86400000 \
+    --orphan-idle-ms 86400000 \
+    >"$WORKER_LOG" 2>&1 &
+WORKER_PID=$!
+
+for _ in $(seq 1 60); do
+    [ -S "$WORKER_SOCK" ] && break
+    kill -0 "$WORKER_PID" 2>/dev/null || {
+        echo "vmworker exited early:" >&2
+        tail -20 "$WORKER_LOG" >&2
+        exit 1
+    }
+    sleep 1
+done
+[ -S "$WORKER_SOCK" ] || {
+    echo "worker socket never appeared: $WORKER_SOCK" >&2
+    tail -20 "$WORKER_LOG" >&2
+    exit 1
+}
+log "worker socket up: $WORKER_SOCK"
+
+DEADLINE=$((BUILD_START + TIMEOUT_MIN * 60))
+STATE="unknown"
+while :; do
+    if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+        STATE="stopped"
+        break
+    fi
+    STATE="$("$VMWORKER" debug-call --socket "$WORKER_SOCK" --method vm.state 2>/dev/null |
+        sed -n 's/.*"vmState" *: *"\([a-z]*\)".*/\1/p' | head -1)"
+    [ -n "$STATE" ] || STATE="unknown"
+    case "$STATE" in
+    stopped | error) break ;;
+    esac
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        echo "timeout after ${TIMEOUT_MIN} min; vmState=$STATE" >&2
+        echo "--- tail of $SERIAL_LOG ---" >&2
+        tail -80 "$SERIAL_LOG" >&2 || true
+        exit 1
+    fi
+    printf '[build %s] guest %s, %sm elapsed | %s\n' \
+        "$(date +%H:%M:%S)" "$STATE" \
+        "$((($(date +%s) - BUILD_START) / 60))" \
+        "$(tr -d '\r' <"$SERIAL_LOG" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-110)"
+    sleep 5
+done
+BUILD_ELAPSED=$(($(date +%s) - BUILD_START))
+log "guest stopped after ${BUILD_ELAPSED}s (vmState=$STATE)"
+
+if ! grep -q 'RUNNERVM-BUILD-OK' "$SERIAL_LOG"; then
+    echo "guest never reported RUNNERVM-BUILD-OK; provisioning failed" >&2
+    echo "--- tail of $SERIAL_LOG ---" >&2
+    tail -120 "$SERIAL_LOG" >&2 || true
+    exit 1
+fi
+
+# The worker holds worker.lock until it exits; sealing a disk underneath a live
+# vmworker would hash torn bytes.
+shutdown_worker
+wait "$WORKER_PID" 2>/dev/null || true
+WORKER_PID=""
+
+# --------------------------------------------------------------------------
+# 6. Seal
+# --------------------------------------------------------------------------
+log "sealing image into $OUT"
+VIRTUAL_BYTES="$(stat -f %z "$BUILD_DIR/disk.img")"
+mv -f "$BUILD_DIR/disk.img" "$OUT/disk.img"
+mv -f "$BUILD_DIR/nvram.bin" "$OUT/nvram.bin"
+cp -f "$SERIAL_LOG" "$OUT/build-serial.log"
+
+cat >"$OUT/metadata.json" <<META
+{
+  "schemaVersion": 1,
+  "os": "linux",
+  "architecture": "arm64",
+  "diskFormat": "raw",
+  "virtualDiskSizeBytes": $VIRTUAL_BYTES,
+  "runnerVersion": "$RUNNER_VERSION",
+  "guestAgentVersion": "$AGENT_VERSION",
+  "minimumHostOS": "15.0",
+  "createdAt": "$BUILT_AT",
+  "boot": { "type": "efi" },
+  "capabilities": { "docker": true, "ssh": true }
+}
+META
+
+case "$SOCKET_DIR" in
+/tmp/rvm-build-*) rm -rf "$SOCKET_DIR" ;;
+esac
+
+if [ "$KEEP_BUILD_DIR" -eq 0 ]; then
+    rm -rf "$BUILD_DIR"
+    rmdir "$OUT/.build" 2>/dev/null || true
+else
+    log "build dir kept: $BUILD_DIR"
+fi
+
+ALLOCATED="$(du -h "$OUT/disk.img" | awk '{print $1}')"
+log "done in ${BUILD_ELAPSED}s — virtual ${DISK_GIB} GiB, allocated ${ALLOCATED}"
+cat <<IMPORT
+
+Import it with:
+
+  runnerctl image import "$OUT/disk.img" \\
+    --nvram "$OUT/nvram.bin" \\
+    --os linux \\
+    --name ubuntu-24
+IMPORT

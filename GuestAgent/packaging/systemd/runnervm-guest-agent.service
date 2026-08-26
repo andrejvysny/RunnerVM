@@ -1,0 +1,36 @@
+[Unit]
+Description=RunnerVM guest agent (vsock control channel for the host)
+Documentation=file:///usr/share/doc/runnervm-guest-agent/guest_agent.md
+# The agent reports IP addresses and the docker version, so it starts after
+# both are meaningful. Neither is required: Requires= would make a guest
+# without docker fail to serve the host at all.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/runnervm-guest-agent --runner-dir /opt/actions-runner
+Restart=always
+RestartSec=2
+
+# Root is required: the agent switches identity to the runner account when
+# spawning the runner, and grows the root filesystem on request.
+User=root
+Group=root
+
+# Creates and owns /var/lib/runnervm-guest-agent, where the cleanup epoch
+# marker lives.
+StateDirectory=runnervm-guest-agent
+StateDirectoryMode=0750
+
+# The agent is the guest's control plane: if it dies the host loses its only
+# reliable channel, so systemd restarts it indefinitely rather than entering
+# a failed state after a burst.
+StartLimitIntervalSec=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=runnervm-guest-agent
+
+[Install]
+WantedBy=multi-user.target

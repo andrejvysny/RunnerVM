@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.runnervm.runnerd</string>
+
+    <!-- LaunchDaemon variant: no GUI session, runs from boot under a dedicated unprivileged
+         service account (spec §7.2). EXPERIMENTAL (plan C3 S3): as of macOS 15+, Virtualization
+         .framework needs an unlocked login keychain in the session that creates the VM, and a
+         LaunchDaemon's service account normally has none. This variant only works with explicit
+         keychain provisioning (`security unlock-keychain`) wired into the boot sequence; until
+         that is verified, prefer the LaunchAgent variant. See packaging/launchd/README.md. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__RUNNERD_PATH__</string>
+        <string>--foreground</string>
+        <string>--config</string>
+        <string>__CONFIG_PATH__</string>
+        <string>--state-dir</string>
+        <string>__STATE_DIR__</string>
+        <string>--socket-dir</string>
+        <string>__RUNTIME_DIR__</string>
+        <string>--log-level</string>
+        <string>__LOG_LEVEL__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>UserName</key>
+    <string>__SERVICE_USER__</string>
+    <key>GroupName</key>
+    <string>__SERVICE_GROUP__</string>
+    <!-- Gives the daemon its own audit session instead of inheriting launchd's, matching how
+         Apple's own background daemons that are not tied to a GUI session are configured. -->
+    <key>SessionCreate</key>
+    <true/>
+
+    <!-- Host shutdown integration (spec §130): launchd sends SIGTERM on shutdown/unload; runnerd
+         handles it, but must not be allowed to block system shutdown indefinitely. -->
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
+
+    <!-- runnerd reads this as the fallback when --log-level is absent; kept in sync with
+         --log-level, which does take effect. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUNNERVM_LOG_LEVEL</key>
+        <string>__LOG_LEVEL__</string>
+    </dict>
+
+    <!-- launchd has no journal; stderr carries runnerd's JSON logs (spec §42). -->
+    <key>StandardOutPath</key>
+    <string>__LOG_PATH__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_PATH__</string>
+</dict>
+</plist>

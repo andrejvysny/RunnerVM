@@ -7,3 +7,6 @@ GuestAgent/bin/
 *.img
 *.iso
 .DS_Store
+
+# Reference clone of openai/tart (own git repo); never part of RunnerVM
+tart/

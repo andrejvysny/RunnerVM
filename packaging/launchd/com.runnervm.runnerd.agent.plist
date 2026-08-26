@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.runnervm.runnerd</string>
+
+    <!-- LaunchAgent variant (spec §7.2, plan A1-2/D3): runs in a GUI session, not as a
+         LaunchDaemon. macOS 15+ Virtualization.framework needs an unlocked login keychain in the
+         session that creates the VM; a LaunchAgent inherits the keychain state of whoever is
+         logged in. Intended for a dedicated, auto-login service account so the session always
+         exists after a reboot with nobody physically present. See packaging/launchd/README.md. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__RUNNERD_PATH__</string>
+        <string>--foreground</string>
+        <string>--config</string>
+        <string>__CONFIG_PATH__</string>
+        <string>--state-dir</string>
+        <string>__STATE_DIR__</string>
+        <string>--socket-dir</string>
+        <string>__RUNTIME_DIR__</string>
+        <string>--log-level</string>
+        <string>__LOG_LEVEL__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Only runs while a GUI session is active for the user that loaded it — exactly the
+         constraint that makes the auto-login dedicated user necessary. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <!-- runnerd reads this as the fallback when --log-level is absent; kept in sync with
+         --log-level, which does take effect. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUNNERVM_LOG_LEVEL</key>
+        <string>__LOG_LEVEL__</string>
+    </dict>
+
+    <!-- launchd has no journal; stderr carries runnerd's JSON logs (spec §42). -->
+    <key>StandardOutPath</key>
+    <string>__LOG_PATH__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_PATH__</string>
+</dict>
+</plist>

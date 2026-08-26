@@ -1,0 +1,302 @@
+import Foundation
+import GitHubControl
+import GuestControl
+import ImageStore
+import Logging
+import Metrics
+import Persistence
+import RunnerCore
+import Testing
+
+@testable import Orchestration
+
+/// Everything an instance-lifecycle test needs: an in-memory database, a real image store on a
+/// temp tree, a fake worker launcher and the two managers wired the way `DaemonRuntime` wires them.
+struct M2Harness {
+  let tree: TempTree
+  let paths: RunnerPaths
+  let database: RunnerDatabase
+  let imageStore: ImageStore
+  let instanceStore: InstanceStore
+  let launcher: FakeWorkerLauncher
+  let supervisor: WorkerSupervisor
+  let images: ImageManager
+  let instances: InstanceManager
+  let instanceRows: any InstanceRepository
+  let imageRows: any ImageRepository
+  let github: FakeGitHubServer
+  let scaleSetPlane: FakeScaleSetControlPlane
+  let keychain: InMemoryKeychain
+  let gateway: GitHubGateway
+  let scopeHealth: ScopeHealthMonitor
+  let runners: RunnerSessionManager
+  /// One registry shared by every manager the harness builds, so a test can assert on what the
+  /// lifecycle actually observed.
+  let metrics = MetricRegistry()
+  let hostId = HostID(rawValue: "test-host")
+
+  static let linuxImageName = "test-linux"
+  static let macImageName = "test-mac"
+
+  init(
+    configuration: RunnerConfiguration = M2Harness.configuration(),
+    githubToken: String? = M2Harness.token,
+    onDiskDatabase: Bool = false,
+    now: @escaping @Sendable () -> Date = { Date() }
+  ) async throws {
+    tree = try TempTree()
+    paths = tree.paths
+    for directory in [paths.stateDir, paths.imagesDir, paths.instancesDir, paths.socketDir] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    database = onDiskDatabase
+      ? try RunnerDatabase.open(at: paths.databaseURL) : try RunnerDatabase.inMemory()
+    _ = try await GRDBHostRepository(db: database).ensureHost(id: hostId)
+    _ = try await GRDBConfigStore(db: database).apply(configuration, actor: "test")
+
+    imageStore = ImageStore(paths: paths)
+    instanceStore = InstanceStore(paths: paths, images: imageStore, allowFullCopy: true)
+    instanceRows = GRDBInstanceRepository(db: database)
+    imageRows = GRDBImageRepository(db: database)
+    launcher = FakeWorkerLauncher(paths: paths)
+
+    var tuning = WorkerSupervisor.Tuning()
+    tuning.socketPollInterval = .milliseconds(5)
+    tuning.socketPollAttempts = 400
+    tuning.lockGraceAttempts = 4
+    tuning.reconnectPollAttempts = 40
+    // Long enough that no test observes a renewal; the lease loop is exercised manually.
+    tuning.leaseInterval = .seconds(3_600)
+    supervisor = WorkerSupervisor(
+      paths: paths, launcher: launcher, store: launcher, instances: instanceRows, tuning: tuning)
+
+    images = ImageManager(
+      store: imageStore, images: imageRows, instances: instanceRows, architecture: "arm64")
+    var instanceTuning = InstanceManager.Tuning()
+    instanceTuning.workerExitPollInterval = .milliseconds(5)
+    instanceTuning.workerExitPollAttempts = 200
+    // The readiness deadline still comes from the profile; only the poll spacing is compressed,
+    // so readiness is driven by the fake agent's health script instead of by elapsed time.
+    instanceTuning.agentReadiness = GuestAgentClient.ReadinessPolicy(
+      initialBackoff: .milliseconds(2), maxBackoff: .milliseconds(8))
+    // Drives the `reuse.maxAge` check, so a test can age a VM without waiting for one.
+    instanceTuning.now = now
+    instances = InstanceManager(
+      paths: paths, hostId: hostId, instances: instanceRows,
+      profiles: GRDBProfileRepository(db: database), imageRows: imageRows, images: images,
+      imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor,
+      probe: M2Harness.probe(), metrics: metrics, tuning: instanceTuning)
+    let manager = instances
+    await supervisor.setHandlers(
+      onState: { id, state in await manager.handleWorkerState(id: id, vmState: state) },
+      onDisconnect: { id in await manager.handleWorkerDisconnect(id: id) })
+    await instances.updateConfiguration(configuration)
+
+    github = FakeGitHubServer()
+    scaleSetPlane = FakeScaleSetControlPlane()
+    keychain = InMemoryKeychain()
+    // `source: file` in a temp state dir keeps the credential path hermetic: no process
+    // environment, no login keychain, and `FilePATProvider`'s 0600 check runs for real.
+    if let githubToken {
+      try GitHubTokenStore.file(url: paths.stateDir.appending(path: GitHubTokenStore.fileName))
+        .write(token: githubToken)
+    }
+    let plane = scaleSetPlane
+    gateway = GitHubGateway(
+      options: GitHubGateway.Options(
+        paths: paths, baseURL: github.baseURL, session: github.makeSession(),
+        keychain: keychain,
+        http: GitHubHTTPClient.Options(retryPolicy: RetryPolicy(maxAttempts: 1)),
+        scaleSetPlane: { _ in plane }))
+    await gateway.updateConfiguration(configuration)
+    scopeHealth = ScopeHealthMonitor(scopes: GRDBScopeRepository(db: database), gateway: gateway)
+    var sessionTuning = RunnerSessionManager.Tuning()
+    sessionTuning.pollInterval = .milliseconds(5)
+    sessionTuning.lostPollThreshold = 2
+    runners = RunnerSessionManager(
+      sessions: GRDBRunnerSessionRepository(db: database), instanceRows: instanceRows,
+      profiles: GRDBProfileRepository(db: database), scopes: GRDBScopeRepository(db: database),
+      summaries: GRDBJobSummaryRepository(db: database),
+      operations: GRDBOperationRepository(db: database), instances: instances, gateway: gateway,
+      tuning: sessionTuning)
+  }
+
+  func cleanup() async {
+    // Unblocks any `getMessage` a demand provider still has in flight before its task is
+    // cancelled, so cleanup never waits on a fake long poll.
+    scaleSetPlane.close()
+    await runners.detachObservers()
+    github.shutdown()
+    await supervisor.detachAll()
+    // detachAll only drops the daemon-side connections (mirroring production, where a detached
+    // session leaves the real worker running) -- it does not stop the FakeWorker actors' RPC
+    // servers, which each own a listening unix socket and a background accept thread. Stop those
+    // explicitly, and before the temp tree goes away, so nothing is still touching it.
+    await launcher.stopAll()
+    tree.remove()
+  }
+
+  // MARK: - Fixtures
+
+  /// Reserves nothing: the tests run on whatever free space the developer's Mac happens to have.
+  static func configuration(
+    linuxMemory: UInt64 = ByteSize.gibibytes(2).bytes, maxInstances: Int? = nil,
+    agentReady: DurationValue = .minutes(2), ssh: SSHPolicy = SSHPolicy(),
+    runnerOnline: DurationValue = .minutes(2), jobMaxRuntime: DurationValue = .hours(6),
+    lifecycle: InstanceLifecycle = .ephemeral, allowPublicRepositories: Bool = false,
+    warmPool: WarmPoolPolicy = .disabled, concurrentVMStarts: Int = 2,
+    reuse: ReusePolicy? = nil, cleanup: DurationValue = .minutes(5),
+    linuxImage: String = M2Harness.linuxImageName
+  ) -> RunnerConfiguration {
+    var timeouts = TimeoutPolicy.default
+    timeouts.agentReady = agentReady
+    timeouts.runnerOnline = runnerOnline
+    timeouts.jobMaxRuntime = jobMaxRuntime
+    timeouts.cleanup = cleanup
+    return RunnerConfiguration(
+      host: HostConfig(
+        reserve: HostConfig.Reserve(cpu: 0, memoryBytes: 0, diskBytes: 0),
+        limits: HostConfig.Limits(concurrentVMStarts: concurrentVMStarts)),
+      github: GitHubConfig(
+        auth: GitHubAuthConfig(provider: .pat, source: .file),
+        scopes: [
+          GitHubScopeConfig(name: "test", kind: .repository, owner: "acme", repository: "app"),
+        ]),
+      profiles: [
+        RunnerProfileConfig(
+          name: "linux", scope: "test", image: linuxImage, guestOS: .linux,
+          lifecycle: lifecycle,
+          resources: ResourceSpec(
+            cpuCount: 2, memoryBytes: linuxMemory, diskBytes: ByteSize.gibibytes(1).bytes),
+          warmPool: warmPool, limits: ProfileLimits(maxInstances: maxInstances), ssh: ssh,
+          reuse: reuse, timeouts: timeouts),
+        RunnerProfileConfig(
+          name: "mac", scope: "test", image: macImageName, guestOS: .macos,
+          resources: ResourceSpec(
+            cpuCount: 4, memoryBytes: ByteSize.gibibytes(2).bytes,
+            diskBytes: ByteSize.gibibytes(1).bytes)),
+      ],
+      security: SecurityConfig(allowPublicRepositories: allowPublicRepositories))
+  }
+
+  static func probe() -> HostProbeResult {
+    HostProbeResult(
+      facts: HostFacts(
+        logicalCPUCount: 12, physicalMemoryBytes: ByteSize.gibibytes(64).bytes,
+        minimumAllowedCPUCount: 1, maximumAllowedCPUCount: 12,
+        minimumAllowedMemoryBytes: ByteSize.mebibytes(128).bytes,
+        maximumAllowedMemoryBytes: ByteSize.gibibytes(64).bytes),
+      architecture: "arm64", osVersion: "15.4.0", virtualizationSupported: true,
+      nestedVirtualizationSupported: false, macOSGuestLimit: 2, probeSucceeded: true)
+  }
+
+  /// A 32 MiB sparse file: large enough to be a plausible disk, free to create.
+  @discardableResult
+  func importLinuxImage() async throws -> ManagedImage {
+    let disk = try sparseFile(named: "linux.img", bytes: 32 << 20)
+    return try await images.importLocal(
+      disk: disk, nvram: nil, os: .linux, name: Self.linuxImageName)
+  }
+
+  @discardableResult
+  func importMacImage() async throws -> ManagedImage {
+    let disk = try sparseFile(named: "mac.img", bytes: 32 << 20)
+    let nvram = try sparseFile(named: "mac-nvram.bin", bytes: 64 << 10)
+    return try await images.importLocal(
+      disk: disk, nvram: nvram, os: .macos, name: Self.macImageName,
+      hardwareModel: "ZmFrZS1tb2RlbA==")
+  }
+
+  func sparseFile(named name: String, bytes: UInt64) throws -> URL {
+    let url = tree.root.appending(path: name)
+    FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.truncate(atOffset: bytes)
+    try handle.close()
+    return url
+  }
+
+  /// Binds a fake guest agent where vmworker would publish its bridge. Callers stop it; the
+  /// socket itself goes with the temp tree.
+  func startGuestAgent(
+    for id: InstanceID, script: FakeGuestAgent.Script = FakeGuestAgent.Script()
+  ) async throws -> FakeGuestAgent {
+    let agent = FakeGuestAgent(socketPath: paths.agentSocket(id), script: script)
+    try await agent.start()
+    return agent
+  }
+
+  /// The service `DaemonServer` fronts, wired to the same managers the runtime would use.
+  func service() -> DaemonServiceImpl {
+    DaemonServiceImpl(
+      paths: paths, hostId: hostId, database: database, images: images, instances: instances,
+      supervisor: supervisor,
+      applier: ConfigApplier(store: GRDBConfigStore(db: database), stateDir: paths.stateDir),
+      reconciler: Reconciler(logger: Logger(label: "test")),
+      parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
+      startedAt: Date(), actorName: "test", gateway: gateway, scopeHealth: scopeHealth,
+      runners: runners, metrics: metrics, logger: Logger(label: "test"))
+  }
+
+  func record(_ id: InstanceID) async throws -> InstanceRecord {
+    try #require(try await instanceRows.get(id: id))
+  }
+
+  /// Inserts a capacity-consuming row without booting anything, to simulate other tenants.
+  func seedInstance(profile: String, state: InstanceState, digest: ImageDigest) async throws {
+    let row = try #require(try await GRDBProfileRepository(db: database).get(name: profile))
+    let config = try row.decodedConfig()
+    let id = InstanceID.generate()
+    try await instanceRows.insert(
+      InstanceRecord(
+        id: id, profileId: row.id, imageDigest: digest, hostId: hostId,
+        name: "seed-\(RunnerPaths.shortID(id))", lifecycle: .ephemeral, state: state,
+        desiredState: state, cpuCount: config.resources.cpuCount,
+        memoryBytes: config.resources.memoryBytes, diskBytes: config.resources.diskBytes,
+        diskReservationBytes: config.resources.diskBytes,
+        instancePath: paths.instanceDir(id).path(percentEncoded: false), createdAt: .now))
+  }
+}
+
+/// Runs `body` with a fresh `M2Harness`, guaranteeing `harness.cleanup()` -- which stops the fake
+/// workers and removes the `/tmp/rvm-orch-*` temp tree -- completes before returning, whether
+/// `body` throws or not.
+///
+/// This replaces the historical `defer { Task { await harness.cleanup() } }` pattern used
+/// throughout this test target: `defer` closures cannot be `async`, so that pattern fired cleanup
+/// as a new, unstructured `Task` and returned immediately without waiting for it. Nothing then
+/// guaranteed that Task ran to completion before the test process moved on (or, at the end of a
+/// `swift test` invocation, before the process exited), which is how this temp tree leaked by the
+/// hundreds. `withHarness` awaits cleanup directly, so it is always finished before the function
+/// -- and therefore the test -- returns.
+func withHarness(
+  configuration: RunnerConfiguration = M2Harness.configuration(),
+  githubToken: String? = M2Harness.token,
+  onDiskDatabase: Bool = false,
+  now: @escaping @Sendable () -> Date = { Date() },
+  _ body: (M2Harness) async throws -> Void
+) async throws {
+  let harness = try await M2Harness(
+    configuration: configuration, githubToken: githubToken, onDiskDatabase: onDiskDatabase,
+    now: now)
+  do {
+    try await body(harness)
+  } catch {
+    await harness.cleanup()
+    throw error
+  }
+  await harness.cleanup()
+}
+
+/// Bounded poll for an observable condition. Preferred over a fixed sleep: the test fails with a
+/// clear message instead of flaking when the machine is slow.
+func waitUntil(
+  _ description: String, attempts: Int = 400, interval: Duration = .milliseconds(10),
+  _ condition: @Sendable () async throws -> Bool
+) async throws {
+  for _ in 0..<attempts {
+    if try await condition() { return }
+    try await Task.sleep(for: interval)
+  }
+  Issue.record("timed out waiting for \(description)")
+}

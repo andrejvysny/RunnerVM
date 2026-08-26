@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.runnervm.guest-agent</string>
+
+    <!-- A LaunchDaemon, not a LaunchAgent: the agent must run as root with
+         no logged-in session, from the moment the guest boots. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/runnervm-guest-agent</string>
+        <string>--runner-dir</string>
+        <string>/Users/runner/actions-runner</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>2</integer>
+
+    <key>UserName</key>
+    <string>root</string>
+    <key>GroupName</key>
+    <string>wheel</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- launchd has no journal; stderr carries the agent's JSON logs. -->
+    <key>StandardOutPath</key>
+    <string>/var/log/runnervm-guest-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/runnervm-guest-agent.log</string>
+</dict>
+</plist>
