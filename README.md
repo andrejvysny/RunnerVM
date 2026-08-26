@@ -27,6 +27,8 @@ account) see [`docs/install.md`](docs/install.md).
 
 - Supported guest: Linux/arm64 only. macOS guests are not implemented; `runnerctl config
   validate` (and `config apply`) reject `os: macos` with `GUEST_OS_UNSUPPORTED`.
+- Live end-to-end proven on GitHub.com (Linux/arm64 ephemeral runner, full job) — see
+  [docs/verification.md](docs/verification.md). macOS guests: see [docs/macos-guests.md](docs/macos-guests.md).
 - Recommended production lifecycle: `ephemeral` — one job per VM, then destroy. `reusable`
   exists but ephemeral is the mode this project is validated against.
 
