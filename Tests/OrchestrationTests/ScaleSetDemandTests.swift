@@ -17,8 +17,9 @@ import Testing
 
       let call = try #require(harness.scaleSetPlane.ensureCalls().first)
       #expect(call.name == "runnervm-linux")
-      // The runs-on label is the scale set name, not the bare profile name (spec §14).
-      #expect(call.labels == [call.name])
+      // Jobs target `runs-on: <profile>`; the prefixed scale-set name only namespaces GitHub's side.
+      // GitHub keeps the labels from creation, so this must never drift.
+      #expect(call.labels == ["linux"])
       #expect(call.disableUpdate)
       let profile = try await harness.profileID("linux")
       let row = try #require(try await harness.scaleSets.get(profileId: profile))

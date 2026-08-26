@@ -342,7 +342,7 @@ extension ImageManager {
   // MARK: - Concurrency gate (host.limits.concurrentImagePulls)
 
   /// Runs `work` holding one of `host.limits.concurrentImagePulls` slots.
-  private func gated<T>(_ work: () async throws -> T) async rethrows -> T {
+  private func gated<T: Sendable>(_ work: () async throws -> T) async rethrows -> T {
     while activePullCount >= concurrentPulls {
       await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
         pullWaiters.append(continuation)

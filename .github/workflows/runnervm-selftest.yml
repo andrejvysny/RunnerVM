@@ -1,12 +1,12 @@
 name: runnervm-selftest
-# Runs on a RunnerVM-hosted ephemeral Linux VM: the `runs-on` label is the Runner Scale Set that
-# runnerd registers for the `ubuntu-24` profile (scale set name = runnervm-<profile>). Manual only —
+# Runs on a RunnerVM-hosted ephemeral Linux VM: the `runs-on` label is the profile name, which is
+# the label runnerd puts on the Runner Scale Set it registers (named runnervm-<profile>). Manual only —
 # on push it would sit queued whenever the Mac mini is offline.
 on:
   workflow_dispatch:
     inputs:
       profile:
-        description: RunnerVM profile (selects runs-on runnervm-<profile>)
+        description: RunnerVM profile (the runs-on label)
         default: ubuntu-24
         required: true
       sleep_seconds:
@@ -20,7 +20,7 @@ permissions:
 jobs:
   guest:
     name: Guest facts (${{ inputs.profile }})
-    runs-on: runnervm-${{ inputs.profile }}
+    runs-on: ${{ inputs.profile }}
     timeout-minutes: 30
     steps:
       - name: Host and OS

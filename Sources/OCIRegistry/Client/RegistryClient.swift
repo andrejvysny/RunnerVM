@@ -314,7 +314,7 @@ public final class RegistryClient: Sendable {
 
   /// A connection that drops mid-body surfaces as `URLError`; classifying it as transport is what
   /// makes it retryable. Errors thrown by the caller's handler are left untouched.
-  private func mapTransportErrors<T>(
+  private func mapTransportErrors<T: Sendable>(
     _ operation: String, _ work: () async throws -> T
   ) async throws -> T {
     do {

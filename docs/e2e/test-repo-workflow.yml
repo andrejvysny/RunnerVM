@@ -1,7 +1,7 @@
 # Copy this file to .github/workflows/e2e.yml in the DEDICATED test repo that
 # scripts/live-github-e2e.sh drives (RUNNERVM_E2E_REPO). See docs/live-integration.md.
 #
-# `runs-on: runnervm-${{ inputs.profile }}` matches the scale-set naming RunnerVM registers for
+# `runs-on: ${{ inputs.profile }}` matches the scale-set naming RunnerVM registers for
 # each profile (Sources/Orchestration/DemandProvider.swift: prefix "runnervm-"), so a job here is
 # picked up by that profile's scale set exactly the way any other GitHub Actions job would be.
 #
@@ -23,7 +23,7 @@ on:
         required: false
         default: "1"
       profile:
-        description: "RunnerVM profile name (selects runs-on: runnervm-<profile>)"
+        description: "RunnerVM profile name (the runs-on label)"
         required: true
         default: ubuntu-24
 
@@ -36,7 +36,7 @@ env:
 jobs:
   quick:
     if: ${{ inputs.job == 'quick' }}
-    runs-on: runnervm-${{ inputs.profile }}
+    runs-on: ${{ inputs.profile }}
     timeout-minutes: 15
     steps:
       - name: Host facts
@@ -53,7 +53,7 @@ jobs:
 
   long:
     if: ${{ inputs.job == 'long' }}
-    runs-on: runnervm-${{ inputs.profile }}
+    runs-on: ${{ inputs.profile }}
     # LONG_MINUTES + generous headroom for boot/queue/teardown.
     timeout-minutes: 90
     steps:
@@ -82,7 +82,7 @@ jobs:
   matrix:
     if: ${{ inputs.job == 'matrix' }}
     needs: matrix-setup
-    runs-on: runnervm-${{ inputs.profile }}
+    runs-on: ${{ inputs.profile }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
