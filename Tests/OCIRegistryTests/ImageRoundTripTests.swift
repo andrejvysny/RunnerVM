@@ -33,7 +33,7 @@ struct ImageRoundTripTests {
 
     let disk = try Fixtures.makeSparseDisk(
       at: temp.appending("disk.img"), virtualBytes: Self.diskBytes,
-      islands: [(0, 256 * 1024), (17 * 1024 * 1024, 512 * 1024)]
+      islands: [(0 as UInt64, 256 * 1024), (17 * 1024 * 1024 as UInt64, 512 * 1024)]
     )
     let nvram = temp.appending("nvram.bin")
     try Fixtures.pattern(seed: 8, count: 64 * 1024).write(to: nvram)
@@ -81,7 +81,7 @@ struct ImageRoundTripTests {
 
     let disk = try Fixtures.makeSparseDisk(
       at: temp.appending("disk.img"), virtualBytes: Self.diskBytes,
-      islands: [(0, 256 * 1024), (17 * 1024 * 1024, 512 * 1024)]
+      islands: [(0 as UInt64, 256 * 1024), (17 * 1024 * 1024 as UInt64, 512 * 1024)]
     )
     let metadata = Fixtures.linuxMetadata(virtualDiskSizeBytes: Self.diskBytes)
     let reference = try fake.reference(Self.repository, tag: "stable")
@@ -106,7 +106,7 @@ struct ImageRoundTripTests {
     let fake = FakeRegistry()
     defer { fake.shutdown() }
     let disk = try Fixtures.makeSparseDisk(
-      at: temp.appending("disk.img"), virtualBytes: Self.diskBytes, islands: [(0, 4096)]
+      at: temp.appending("disk.img"), virtualBytes: Self.diskBytes, islands: [(0 as UInt64, 4096)]
     )
     await #expect(throws: ImageError.self) {
       _ = try await RunnerVMImageTransfer.push(
