@@ -33,10 +33,27 @@ struct Doctor: AsyncParsableCommand {
   @Option(name: .long, help: "Configuration file to validate against this host.")
   var config: String?
 
+  @Option(
+    name: .long,
+    help: ArgumentHelp(
+      "Expected owner of the state/runtime directories.",
+      discussion: "Default: _runnervm in a production layout, this account in a development "
+        + "layout."))
+  var serviceUser: String?
+
+  @Flag(
+    name: .long,
+    help: ArgumentHelp(
+      "Also re-hash every image blob's sha256 against its manifest (image_store_integrity).",
+      discussion: "Slow for large images, off by default."))
+  var deep = false
+
   func run() async throws {
     let paths = resolvedPaths()
     let socketURL = options.socket.map { URL(fileURLWithPath: $0) } ?? paths.daemonSocket
-    let report = await DoctorChecks.runAll(paths: paths, configPath: config, daemonSocket: socketURL)
+    let report = await DoctorChecks.runAll(
+      paths: paths, configPath: config, daemonSocket: socketURL, serviceUser: serviceUser, deep: deep
+    )
     switch options.output {
     case .json: try JSONOut.print(report)
     case .human: print(DoctorRender.render(report))

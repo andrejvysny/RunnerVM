@@ -61,6 +61,8 @@ jobs:
         run: bash scripts/tests/build-ubuntu-image-test.sh
       - name: install script unit test
         run: bash scripts/tests/install-test.sh
+      - name: qualify-host script unit test
+        run: bash scripts/tests/qualify-host-test.sh
       # swiftformat --lint is deliberately absent: the tree predates the .swiftformat rules
       # (≈250 files differ). Enable it in the same commit that runs `swiftformat .` once.
 

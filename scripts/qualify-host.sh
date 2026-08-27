@@ -30,6 +30,7 @@ VMWORKER_BIN=""
 PROFILE=""
 LAUNCHD_MODE="auto"
 SKIP_VM=0
+SKIP_BUILD=0
 GITHUB_JOB=0
 DRY_RUN=0
 REPORT_PATH=""
@@ -38,6 +39,7 @@ FV_MODE="warn"
 FV_MODE_EXPLICIT=0
 VM_TIMEOUT=180
 WAIT_TIMEOUT=900
+BUILD_RECIPE=""
 
 usage() {
     cat <<'USAGE'
@@ -48,12 +50,16 @@ Design checks (see docs/qualification.md):
   --github-job               Also run `runnerctl debug run-jit <profile> --wait` (needs --profile).
   --launchd agent|daemon|auto  Which launchd variant to check (default: auto-detect the loaded job).
   --skip-vm                  Skip the vm create/idle/exec/delete chain.
+  --skip-build                Skip check_build_as_service's `image build` (the hdiutil-as-service
+                              smoke test still runs).
   --report <path>            Append one JSON-lines record per run to this file.
   --require-filevault-off    Treat "FileVault on + auto-login" as FAIL, not WARN.
   --allow-filevault          Treat "FileVault on + auto-login" as an accepted trade-off, not WARN.
-  --user <name>               Inspect this account's session via `sudo -u` instead of the caller's.
-  --dry-run                  Print the VM-create/exec/delete and GitHub-job commands; run every
-                              other (read-only) check for real.
+  --user <name>               Inspect this account's session via `sudo -u` instead of the caller's;
+                              also the identity `check_build_as_service` builds as and
+                              `runnerctl doctor --service-user` checks ownership against.
+  --dry-run                  Print the VM-create/exec/delete, image-build and GitHub-job commands;
+                              run every other (read-only) check for real.
   -h, --help                  Show this help.
 
 Path overrides (defaults match scripts/install.sh's --launchd install):
@@ -62,8 +68,12 @@ Path overrides (defaults match scripts/install.sh's --launchd install):
   --config <yaml>            Config file passed to `runnerctl doctor --config`.
   --runnerctl-bin <path>      runnerctl binary (default: first found on PATH, then <prefix>/bin).
   --vmworker-bin <path>       vmworker binary (default: RUNNERVM_VMWORKER, then <prefix>/libexec).
+  --build-recipe <path>       Recipe directory/file for check_build_as_service (default:
+                              <state-dir>/share/recipes/ubuntu-24-minimal if installed, else the
+                              repo's images/recipes/ubuntu-24-minimal).
   --vm-timeout <seconds>      Timeout waiting for the test VM to reach idle (default: 180).
-  --wait-timeout <seconds>    Timeout for --github-job's run-jit --wait (default: 900).
+  --wait-timeout <seconds>    Timeout for --github-job's run-jit --wait and for the service-identity
+                              image build to reach a terminal state (default: 900).
 
 Exit: non-zero if any check FAILs.
 USAGE
@@ -79,6 +89,8 @@ parse_args() {
         --github-job) GITHUB_JOB=1; shift ;;
         --launchd) LAUNCHD_MODE="$2"; shift 2 ;;
         --skip-vm) SKIP_VM=1; shift ;;
+        --skip-build) SKIP_BUILD=1; shift ;;
+        --build-recipe) BUILD_RECIPE="$2"; shift 2 ;;
         --report) REPORT_PATH="$2"; shift 2 ;;
         --require-filevault-off) FV_MODE="require-off"; FV_MODE_EXPLICIT=$((FV_MODE_EXPLICIT + 1)); shift ;;
         --allow-filevault) FV_MODE="allow"; FV_MODE_EXPLICIT=$((FV_MODE_EXPLICIT + 1)); shift ;;
@@ -131,7 +143,50 @@ resolve_defaults() {
     if [ -z "$CONFIG_PATH" ] && [ -f "$STATE_DIR/config.yaml" ]; then
         CONFIG_PATH="$STATE_DIR/config.yaml"
     fi
+    if [ -z "$BUILD_RECIPE" ]; then
+        if [ -f "$STATE_DIR/share/recipes/ubuntu-24-minimal/Runnerfile" ]; then
+            BUILD_RECIPE="$STATE_DIR/share/recipes/ubuntu-24-minimal"
+        else
+            BUILD_RECIPE="$REPO_ROOT/images/recipes/ubuntu-24-minimal"
+        fi
+    fi
     BOOT_EPOCH="$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/^\{ sec = ([0-9]+).*/\1/')" || BOOT_EPOCH=""
+    resolve_service_user
+}
+
+# --------------------------------------------------------------------------
+# Which account owns <state-dir> / should run the actual image build. `--user` wins outright
+# (same identity the rest of the script already inspects via `as_user`); otherwise root never
+# builds as itself -- fall back to the well-known default service account -- and a non-root
+# caller with no --user is used as-is, noted as unproven since nothing here can confirm it is
+# actually the account `scripts/install.sh` provisioned.
+# --------------------------------------------------------------------------
+SERVICE_USER=""
+SERVICE_USER_NOTE=""
+
+resolve_service_user() {
+    SERVICE_USER_NOTE=""
+    if [ -n "$RUN_AS_USER" ]; then
+        # Explicitly chosen: no caveat, whatever the name -- the operator already said who.
+        SERVICE_USER="$RUN_AS_USER"
+        return
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        SERVICE_USER="_runnervm"
+        return
+    fi
+    SERVICE_USER="$(id -un)"
+    if [ "$SERVICE_USER" != "_runnervm" ]; then
+        SERVICE_USER_NOTE=" (running as $SERVICE_USER, not the default _runnervm service account -- pass --user _runnervm, or run as root, to validate the real service identity)"
+    fi
+}
+
+as_service_user() {
+    if [ "$(id -un)" != "$SERVICE_USER" ]; then
+        sudo -H -u "$SERVICE_USER" "$@"
+    else
+        "$@"
+    fi
 }
 
 # --------------------------------------------------------------------------
@@ -493,16 +548,68 @@ check_runnerctl_status() {
     fi
 }
 
+# Captured for check_state_ownership/check_runtime_dir/check_free_memory/check_image_store below,
+# so those checks read the ownership/memory/image-store-integrity verdicts `runnerctl doctor`
+# already computed (Sources/runnerctl/Doctor*.swift) instead of re-implementing the same
+# permission/arithmetic/sha256 logic a second time in bash. `--deep` re-hashes every stored image
+# against its manifest -- worth the extra seconds here, where doctor runs once per qualification
+# pass rather than on every `runnerctl doctor` invocation.
+DOCTOR_JSON=""
+
 check_runnerctl_doctor() {
-    local args out rc=0
-    args=(doctor --state-dir "$STATE_DIR" --socket-dir "$RUNTIME_DIR" --output json)
+    local args rc=0
+    args=(doctor --state-dir "$STATE_DIR" --socket-dir "$RUNTIME_DIR" --output json --deep --service-user "$SERVICE_USER")
     [ -z "$CONFIG_PATH" ] || args+=(--config "$CONFIG_PATH")
-    out="$(runctl "${args[@]}" 2>&1)" || rc=$?
+    DOCTOR_JSON="$(runctl "${args[@]}" 2>&1)" || rc=$?
     if [ "$rc" -eq 0 ]; then
         pass runnerctl_doctor "runnerctl doctor" "exit 0 (no failing checks)"
     else
         fail runnerctl_doctor "runnerctl doctor" "exit $rc; run 'runnerctl doctor' for detail"
     fi
+}
+
+# --------------------------------------------------------------------------
+# Per-check breakouts from `runnerctl doctor --output json`'s `checks` array (JSONEncoder,
+# prettyPrinted, sortedKeys: each check is exactly {"detail", "id", "status", "title"} in that
+# alphabetical order, four lines). `doctor_check_block` isolates one check's four lines by its
+# `id` so `jf_str` -- built for a flat single-object blob -- reads the right `status`/`detail`
+# instead of the first match anywhere in the whole report.
+# --------------------------------------------------------------------------
+doctor_check_block() {
+    printf '%s\n' "$1" | grep -B1 -A2 "\"id\" : \"$2\"" || true
+}
+
+record_from_doctor() {
+    local id="$1" title="$2" block status detail
+    block="$(doctor_check_block "$DOCTOR_JSON" "$id")"
+    status="$(jf_str "$block" status)"
+    if [ -z "$status" ]; then
+        warn "$id" "$title" "not present in runnerctl doctor's report (doctor did not run, or predates this check)"
+        return
+    fi
+    detail="$(jf_str "$block" detail)"
+    case "$status" in
+    ok) pass "$id" "$title" "$detail" ;;
+    warn) warn "$id" "$title" "$detail" ;;
+    fail) fail "$id" "$title" "$detail" ;;
+    *) warn "$id" "$title" "unrecognized doctor status '$status': $detail" ;;
+    esac
+}
+
+check_state_ownership() {
+    record_from_doctor service_user_ownership "State/config ownership (service_user_ownership)"
+}
+
+check_runtime_dir() {
+    record_from_doctor runtime_dir_perms "Runtime directory permissions (runtime_dir_perms)"
+}
+
+check_free_memory() {
+    record_from_doctor free_memory "Free memory (free_memory)"
+}
+
+check_image_store() {
+    record_from_doctor image_store_integrity "Image store integrity, deep (image_store_integrity)"
 }
 
 check_vmworker_probe() {
@@ -530,10 +637,15 @@ check_vmworker_probe() {
 # --------------------------------------------------------------------------
 VM_ID=""
 VM_DELETED=1
+BUILD_ID=""
+BUILD_TERMINAL=1
 
 cleanup() {
     if [ -n "$VM_ID" ] && [ "$VM_DELETED" -eq 0 ]; then
         runctl vm delete "$VM_ID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$BUILD_ID" ] && [ "$BUILD_TERMINAL" -eq 0 ]; then
+        as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" build cancel "$BUILD_ID" >/dev/null 2>&1 || true
     fi
 }
 
@@ -622,6 +734,107 @@ vm_boot_chain() {
 }
 
 # --------------------------------------------------------------------------
+# Image build under the service identity: `hdiutil makehybrid` (the same probe doctor's
+# `build_tools`/`build_tools_service_context` run, here guaranteed to execute as $SERVICE_USER
+# rather than merely advising about a mismatch) plus, unless --skip-build, a real
+# `runnerctl image build` through the running daemon -- the one part of the builder that unit
+# tests and fakes cannot reach: whether the LaunchDaemon's service account can actually render a
+# boot seed and drive the build to a sealed image (`docs/status.md`: "hdiutil makehybrid under a
+# LaunchDaemon is gated by doctor build_tools, not yet qualified").
+# --------------------------------------------------------------------------
+build_wait_terminal() {
+    local id="$1" timeout="$2" deadline now json state
+    deadline=$(($(date +%s) + timeout))
+    while true; do
+        now=$(date +%s)
+        json="$(as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" build show "$id" --output json 2>/dev/null)" || json=""
+        state="$(jf_str "$json" state)"
+        case "$state" in
+        succeeded) printf 'succeeded'; return 0 ;;
+        failed | cancelled) printf '%s' "$state"; return 1 ;;
+        esac
+        [ "$now" -lt "$deadline" ] || { printf 'timeout'; return 1; }
+        sleep 5
+    done
+}
+
+check_build_as_service() {
+    local staging iso hdiutil_rc=0
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/rvm-qual-hdiutil-XXXXXX")"
+    iso="$staging/smoke-test.iso"
+    if as_service_user hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$iso" "$staging" >/dev/null 2>&1; then
+        pass build_tools_service_context "Build tools (hdiutil, as service user)" \
+            "hdiutil makehybrid succeeded as $SERVICE_USER$SERVICE_USER_NOTE"
+    else
+        hdiutil_rc=$?
+        fail build_tools_service_context "Build tools (hdiutil, as service user)" \
+            "hdiutil makehybrid failed as $SERVICE_USER (exit $hdiutil_rc)$SERVICE_USER_NOTE"
+    fi
+    rm -rf "$staging"
+
+    if [ "$SKIP_BUILD" -eq 1 ]; then
+        warn image_build_service "Image build (as service user)" "skipped (--skip-build)"
+        return
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        warn image_build_service "Image build (as service user)" \
+            "dry-run: would run: sudo -u $SERVICE_USER $RUNNERCTL_BIN --socket $SOCKET image build $BUILD_RECIPE --name qual-<ts> --no-wait; poll build show (timeout ${WAIT_TIMEOUT}s); image inspect; image delete"
+        return
+    fi
+    if [ ! -e "$BUILD_RECIPE" ]; then
+        fail image_build_service "Image build (as service user)" \
+            "recipe not found at $BUILD_RECIPE; pass --build-recipe <dir-or-Runnerfile>"
+        return
+    fi
+
+    local name t0 t1 json
+    name="qual-$(date -u +%Y%m%d%H%M%S)"
+    t0=$(date +%s)
+    if ! json="$(as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" image build "$BUILD_RECIPE" --name "$name" --no-wait --output json 2>&1)"; then
+        fail image_build_service "Image build (as service user)" \
+            "image build $BUILD_RECIPE failed to start: $(printf '%s' "$json" | tail -1)"
+        return
+    fi
+    BUILD_ID="$(jf_str "$json" buildId)"
+    if [ -z "$BUILD_ID" ]; then
+        fail image_build_service "Image build (as service user)" "could not parse buildId from response"
+        return
+    fi
+    BUILD_TERMINAL=0
+
+    local outcome
+    outcome="$(build_wait_terminal "$BUILD_ID" "$WAIT_TIMEOUT")"
+    BUILD_TERMINAL=1
+    t1=$(date +%s)
+    json="$(as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" build show "$BUILD_ID" --output json 2>/dev/null)" || json=""
+    if [ "$outcome" != "succeeded" ]; then
+        fail image_build_service "Image build (as service user)" \
+            "build $BUILD_ID ($BUILD_RECIPE) ended in $outcome after $((t1 - t0))s as $SERVICE_USER: $(jf_str "$json" failureMessage)"
+        return
+    fi
+
+    local digest inspect_rc=0
+    digest="$(jf_str "$json" imageDigest)"
+    if [ -z "$digest" ]; then
+        fail image_build_service "Image build (as service user)" \
+            "build $BUILD_ID succeeded after $((t1 - t0))s but reported no imageDigest"
+        return
+    fi
+    if ! as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" image inspect "$digest" >/dev/null 2>&1; then
+        inspect_rc=$?
+    fi
+    as_service_user "$RUNNERCTL_BIN" --socket "$SOCKET" image delete "$digest" >/dev/null 2>&1 || true
+
+    if [ "$inspect_rc" -ne 0 ]; then
+        fail image_build_service "Image build (as service user)" \
+            "build $BUILD_ID succeeded ($digest) but image inspect failed (exit $inspect_rc); image deleted anyway"
+        return
+    fi
+    pass image_build_service "Image build (as service user)" \
+        "build $BUILD_ID ($BUILD_RECIPE) succeeded in $((t1 - t0))s as $SERVICE_USER$SERVICE_USER_NOTE; image $digest inspected and deleted"
+}
+
+# --------------------------------------------------------------------------
 # Optional GitHub job (spec §148 debug surface)
 # --------------------------------------------------------------------------
 github_job_check() {
@@ -700,8 +913,13 @@ main() {
     check_disk_reserve
     check_runnerctl_status
     check_runnerctl_doctor
+    check_state_ownership
+    check_runtime_dir
+    check_free_memory
+    check_image_store
     check_vmworker_probe
     vm_boot_chain
+    check_build_as_service
     github_job_check
 
     echo
@@ -711,4 +929,10 @@ main() {
     [ "$FAIL_COUNT" -eq 0 ]
 }
 
-main "$@"
+# Guarded so scripts/tests/qualify-host-test.sh can `source` this file to unit-test its pure
+# helpers (json_escape, byte_size_to_bytes, doctor_check_block, ...) in isolation, without running
+# the checks below -- run directly (`./scripts/qualify-host.sh` or `bash scripts/qualify-host.sh`)
+# this still executes exactly as before.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi

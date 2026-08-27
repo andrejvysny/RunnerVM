@@ -26,6 +26,10 @@ operational context the script cannot see from software alone.
 | Wired Ethernet | Wi-Fi drops during a power event or AP restart are a second failure mode a wired link avoids | script (WARN if only Wi-Fi) |
 | Disk reserve (`host.reserve.disk`, default 50GiB) | Headroom below this and image pulls / VM creation are refused | script, `runnerctl doctor` |
 | Dedicated `_runnervm` service account and `_runnervm` group (never `staff`), no interactive use | Keeps the auto-login session (LaunchAgent path) or the login keychain (LaunchDaemon path) in a known state; a human logging in and out disturbs both. A `staff`-owned state dir would also be readable by every local account, since every macOS user is in `staff` | operational — see §3 step 4; group/account checked by `scripts/install.sh` |
+| `<state-dir>`/`config.yaml`/`state/`/`logs/` owned by the service account, no world-readable bits; runtime socket dir 0700 with 0600 sockets | Ownership/permission drift after an install (a manual `chmod`, a reinstall as the wrong account) silently exposes GitHub credentials and job logs to every local account, the same failure `--group staff` above guards against | script's `check_state_ownership`/`check_runtime_dir`, `runnerctl doctor`'s `service_user_ownership`/`runtime_dir_perms` |
+| Free memory covers `host.reserve.memory` plus the largest configured profile/build workload | A host that can never fit its own configuration boots VMs that are refused or thrash under memory pressure, discovered only once a real job lands | script's `check_free_memory`, `runnerctl doctor`'s `free_memory` (structural shortfall FAILs; transient pressure from `vm_stat` WARNs) |
+| Local image store integrity (every manifest's blob present, right size; `--deep` re-hashes sha256) | A truncated or corrupted image blob (a crashed import, a manually edited file) would otherwise only surface mid-VM-boot in production | script's `check_image_store`, `runnerctl doctor`'s `image_store_integrity --deep` |
+| Image builder works under the actual service identity, not just an interactive login | `hdiutil makehybrid` and the whole `image build` path are easy to verify by hand as yourself and never actually prove out under `_runnervm`/the LaunchDaemon | script's `check_build_as_service` (runs `hdiutil` and a real `image build` as `--user`/`_runnervm`; `--skip-build` to skip the build half) |
 | UPS on the host (and, ideally, the network gear between it and the internet) | `autorestart` only helps once power actually returns; a UPS avoids the power cut in the first place for short outages and gives a clean shutdown for long ones | operational, not checked |
 | Controlled macOS automatic updates | An update-triggered reboot mid-job is the same interruption as a power cut, but self-inflicted and unpredictable | script (WARN, `softwareupdate --schedule`) |
 | `host.overcommit.cpu` / `host.overcommit.memory` at `1.0` for the pilot | A VZ guest touches its whole memory balloon; overcommitting memory swaps the host to death (spec §16). Keep both ratios at `1.0` until you have real headroom data from this host | config review, not checked by the script |
@@ -51,7 +55,7 @@ trade-off that matters for unattended operation specifically.
   before `com.runnervm.runnerd` starts) — `scripts/install.sh` does not set this up; see
   `packaging/launchd/README.md`'s LaunchDaemon section for the manual steps and their own
   trade-offs (the unlock password has to live somewhere on disk). Treat this variant as unverified
-  on your hardware until it passes the full loop in §3 at least 3 times.
+  on your hardware until it passes the full loop in §3 (10 controlled reboots).
   `runnerctl doctor` runs a `login_keychain` check (`security show-keychain-info` on the invoking
   account's `login.keychain-db`) that **fails** when the keychain is missing or locked — run
   doctor as the service account for it to be meaningful. `scripts/qualify-host.sh` repeats the
@@ -65,46 +69,58 @@ hardware and macOS version and pick the one that actually recovers from a cold b
 
 ## 3. Qualification procedure
 
-Run this loop **at least 3 times** before trusting a host with production jobs. Boot recovery is
-exactly the kind of thing that passes once by luck (cached keychain state, a lingering session) and
-fails the second or third time.
+Run this loop for **10 controlled reboots, at least 2 of them real cold power cycles** (power
+disconnected, not just `shutdown -r`), before trusting a host with production jobs. Boot recovery
+is exactly the kind of thing that passes once by luck (cached keychain state, a lingering session)
+and fails the second or third time — 3 runs is not enough evidence to sign a host off for
+unattended production; 10 is.
 
 1. **Cold shutdown.** `sudo shutdown -h now` (or the Apple menu). Wait for the fans/lights to stop
    — a true power-off, not sleep.
 2. **Disconnect power** at the wall or the UPS output for at least 10 seconds, to distinguish a
    real power cut from a soft restart. Skip this sub-step on a pure "reboot" iteration (see step 6)
-   but always do it at least once across the 3 runs.
+   but do it on at least 2 of the 10 runs.
 3. **Reconnect power / power on.** With `autorestart 1` (§1) the host should power itself back on;
    without it, this is exactly the manual-intervention case autorestart exists to avoid — press the
    power button once and note that this run required it.
 4. **Wait for automatic boot to settle**, then run the qualification script **without any
-   interactive login** on the console or over Screen Sharing:
+   interactive login, SSH session, Screen Sharing session, or manual keychain unlock**:
 
    ```sh
    scripts/qualify-host.sh --profile <profile> --report qual.jsonl
    ```
 
+   (`check_build_as_service`, part of every run unless `--skip-build`, also drives a real
+   `runnerctl image build` through the daemon under the service identity — pass `--build-recipe` to
+   point it at a different recipe than the default `ubuntu-24-minimal`.)
+
    Trigger this from something that does not itself require a human-driven session — a LaunchAgent
    with `RunAtLoad`/`StartInterval` in the same auto-login session, a `cron`/`launchd` timer under
    the service account, or an SSH session used **only to read a result file a scheduled run already
-   wrote**. Logging in interactively (console or Screen Sharing) before the check runs invalidates
-   the test: an interactive login can itself unlock the keychain or nudge a stalled session in a
-   way that would never happen with nobody physically present, silently hiding the exact failure
-   mode this loop exists to catch. SSH-ing in *after* a scheduled run has already produced
-   `qual.jsonl`, purely to `cat` or `scp` it, is fine — no state changes there.
-5. Inspect the run: `PASS|WARN|FAIL` lines on stdout (captured in whatever logged the scheduled
-   run), plus the newest line appended to `qual.jsonl`. Any `FAIL` is a blocker — fix it before the
-   next iteration, don't just re-run and hope.
+   wrote**. Logging in interactively (console or Screen Sharing), or unlocking the login keychain by
+   hand, before the check runs invalidates the test: any of those can themselves unlock the keychain
+   or nudge a stalled session in a way that would never happen with nobody physically present,
+   silently hiding the exact failure mode this loop exists to catch. SSH-ing in *after* a scheduled
+   run has already produced `qual.jsonl`, purely to `cat` or `scp` it, is fine — no state changes
+   there.
+5. **Record the cycle's evidence**, not just PASS/FAIL: the newest line appended to `qual.jsonl`
+   (every check, including the new ownership/memory/image-store/service-identity-build ones, is one
+   evidence row in there automatically — see §5), plus, captured alongside it,
+   `launchctl print gui/$(id -u _runnervm)/com.runnervm.runnerd` (or the `system/...` LaunchDaemon
+   path) and `runnerctl status`. Any `FAIL` is a blocker — fix it before the next iteration, don't
+   just re-run and hope.
 6. **Idle reboot.** `sudo shutdown -r now` with no job running. Repeat from step 4 (power-cycle via
    steps 1–3 is not required every time; a plain reboot alone is a valid, and cheaper, iteration —
-   just make sure at least one of your 3+ runs was a real power cut, not only a soft reboot).
-7. **Repeat** steps 1–6 until you have **3 clean runs** (no `FAIL`; WARNs you've consciously
-   accepted are fine) — mix at least one real power cut in among them.
+   just make sure at least 2 of your 10 runs were a real power cut, not only a soft reboot).
+7. **Repeat** steps 1–6 until you have **10 clean runs** (no `FAIL`; WARNs you've consciously
+   accepted are fine) — at least 2 of them real power cuts.
 8. **Reboot under load.** Start a real or synthetic job (`scripts/qualify-host.sh --profile
    <profile> --github-job --report qual.jsonl` end to end once, to have a runner mid-job — or drive
    one by hand with `runnerctl debug run-jit <profile>` without `--wait` so it keeps running), then
-   `sudo shutdown -r now` while it is executing. This is not a pass/fail step by itself; it is
-   where you observe and record the recovery semantics:
+   `sudo shutdown -r now` while it is executing. Across the 10 runs, make sure at least one carries
+   `--github-job` so a real GitHub job's evidence lands in `qual.jsonl` too (§4 requires it when
+   GitHub is in scope). This reboot-under-load step is not a pass/fail step by itself; it is where
+   you observe and record the recovery semantics:
    - The instance's on-disk `runnerd.sqlite3` state persists across the reboot, but the `vmworker`
      process and the running `VZVirtualMachine` do not. Per `docs/state_machines.md`, an instance
      whose owning worker is gone resolves to **`interrupted`** — the state machine explicitly notes
@@ -124,11 +140,15 @@ fails the second or third time.
 
 | Criterion | Requirement |
 | --- | --- |
-| Cold-boot recovery | `scripts/qualify-host.sh --profile <profile> --report qual.jsonl` run non-interactively after a real power cut, 0 `FAIL`, at least 3 times |
-| Idle reboot recovery | Same, after a plain reboot, at least 3 times (may overlap with the power-cut runs) |
+| Cold-boot recovery | `scripts/qualify-host.sh --profile <profile> --report qual.jsonl` run non-interactively after a real power cut, 0 `FAIL`, at least 2 times |
+| Reboot recovery, overall | 10 total controlled-reboot runs (§3), 0 `FAIL`, at least 2 of them real power cuts |
 | launchd job | Loaded, `state = running`, `pid` present, started within a few seconds of `kern.boottime` on every run |
+| State/runtime ownership and permissions | `service_user_ownership`/`runtime_dir_perms` PASS on every run — the state dir, `config.yaml`, `state/`, `logs/` and the runtime socket dir are owned by the service account with no world access |
+| Free memory | `free_memory` PASS on every run — physical RAM covers `host.reserve.memory` plus the largest configured profile/build workload, with headroom to spare at the time of the run |
+| Local image store integrity | `image_store_integrity` PASS on every run (the script always passes `--deep`, so every stored image's blobs are re-hashed against their manifest, not just size-checked) |
+| Image builder under the service identity | `check_build_as_service` PASS at least once: `hdiutil makehybrid` and a full `runnerctl image build` (`--name qual-<ts>`) succeed as the account `runnerd` actually runs as, and the built image is inspected then deleted cleanly |
 | VM boot chain | `vm create` → `idle` (within the script's 180s default) → `vm exec` → `vm delete` all PASS on every run |
-| GitHub job (if in scope) | `runnerctl debug run-jit --wait` completes at least once end to end |
+| GitHub job (if in scope) | `runnerctl debug run-jit --wait` (via `--github-job`) completes at least once end to end |
 | Reboot-under-load | Behavior observed and recorded per §3 step 8, matching the documented `interrupted`/`jobInterrupted` semantics (or a filed discrepancy) |
 | Outstanding WARNs | Each one explicitly accepted in writing (e.g. "FileVault on, `--allow-filevault`, accepted for at-rest encryption") — none silently ignored |
 | `FAIL`s | Zero, full stop |

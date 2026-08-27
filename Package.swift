@@ -61,7 +61,10 @@ let package = Package(
     .executableTarget(name: "runnerctl", dependencies: [
       // ImageBuild is pure parsing (no I/O): `image build` uses RecipeParser for a local,
       // fail-fast syntax pre-flight before ever calling the daemon.
-      "DaemonAPI", "ConfigLoader", "GuestControl", "ImageBuild",
+      // ImageStore reads `images/` directly (no I/O beyond the local filesystem, no Virtualization
+      // link): `doctor`'s `image_store_integrity`/`guest_agent_image` checks work without a
+      // running daemon the same way every other doctor check does.
+      "DaemonAPI", "ConfigLoader", "GuestControl", "ImageBuild", "ImageStore",
       .product(name: "ArgumentParser", package: "swift-argument-parser"),
     ]),
     .executableTarget(name: "vmworker", dependencies: [

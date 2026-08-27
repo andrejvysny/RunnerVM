@@ -138,22 +138,34 @@ depends on that account owning files under `<state-dir>`.
 
 ```sh
 runnerctl doctor [--state-dir <dir>] [--socket-dir <dir>] [--config <yaml>] [--output json]
+                  [--service-user <name>] [--deep]
 ```
 
 Every check runs locally — no daemon required, matching the general RunnerVM principle that the
-CLI never depends on runnerd being up just to inspect the host. Checks (spec §104, plus host-sleep
-and launchd-job checks the implementation plan adds): Apple Silicon, macOS ≥ 15, `vmworker` present
-and signed with the virtualization entitlement, `vmworker probe` succeeds and reports
-`virtualizationSupported`, state directory writable + APFS clone support, socket path lengths,
-configuration validates (when `--config` is given), free disk vs. `host.reserve.disk`, a GitHub
-credential is present for the configured `github.auth.source` (presence only — this never makes a
-network call; use `runnerctl github test` to actually verify it), the in-daemon image builder's
-`hdiutil` (a real `makehybrid` smoke test), guest agent binary (same search order as
-`BuildSeed.resolveAgent` — see [docs/image-build.md](image-build.md#guest-agent-resolution)) and
-shipped recipe root, host sleep is disabled (spec plan: v1 does not tolerate the host sleeping out
-from under a running VM), and whether a `com.runnervm.runnerd` launchd job is loaded. When
-`runnerd.sock` is reachable it also folds in a
-`system.status` summary. Exits 1 if any check fails; `--output json` for automation.
+CLI never depends on runnerd being up just to inspect the host. Checks (spec §104, plus host-sleep,
+launchd-job and the production-hardening checks below the implementation plan adds): Apple Silicon,
+macOS ≥ 15, `vmworker` present and signed with the virtualization entitlement, `vmworker probe`
+succeeds and reports `virtualizationSupported`, state directory writable + APFS clone support,
+socket path lengths, configuration validates (when `--config` is given), free disk vs.
+`host.reserve.disk`, free memory vs. `host.reserve.memory` plus the largest configured profile/build
+workload (structural shortfall fails, transient pressure from `vm_stat` warns), a GitHub credential
+is present for the configured `github.auth.source` (presence only — this never makes a network
+call; use `runnerctl github test` to actually verify it; for `github.auth.provider: app` this also
+checks the private key file `github-app.json` points at exists and is owner-only), the in-daemon
+image builder's `hdiutil` (a real `makehybrid` smoke test, once as whoever invoked `doctor` and
+again noting the uid it ran under so a mismatch against the expected service account is visible),
+guest agent binary (same search order as `BuildSeed.resolveAgent` — see
+[docs/image-build.md](image-build.md#guest-agent-resolution)) and shipped recipe root, every local
+image's manifest still points at a blob of the recorded size (`--deep` also re-hashes every blob's
+sha256 — slow for large images, off by default), at least one local image carries a RunnerVM guest
+agent, `<state-dir>`/`config.yaml`/`state/`/`logs/` are owned by the expected service account with
+no world-readable bits (`--service-user` overrides the default `_runnervm`; a development layout
+under `$HOME` expects the invoking account instead), the runtime socket directory is 0700 with 0600
+sockets, host sleep is disabled (spec plan: v1 does not tolerate the host sleeping out from under a
+running VM), and whether a `com.runnervm.runnerd` launchd job is loaded. When `runnerd.sock` is
+reachable it also folds in a `system.status` summary. Exits 1 if any check fails; `--output json`
+for automation (used by `scripts/qualify-host.sh`, which also runs `hdiutil` and a real
+`image build` under the service identity itself — see `docs/qualification.md`).
 
 ## Log locations
 

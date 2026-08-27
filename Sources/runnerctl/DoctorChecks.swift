@@ -9,7 +9,8 @@ import RunnerCore
 /// host-sleep and launchd-job checks the implementation plan adds); no sleeping anywhere here.
 enum DoctorChecks {
   static func runAll(
-    paths: RunnerPaths, configPath: String?, daemonSocket: URL
+    paths: RunnerPaths, configPath: String?, daemonSocket: URL, serviceUser: String? = nil,
+    deep: Bool = false
   ) async -> DoctorReport {
     var checks: [DoctorCheck] = [appleSilicon(), macOSVersion()]
 
@@ -20,15 +21,22 @@ enum DoctorChecks {
 
     checks.append(stateDirWritable(paths.rootDir))
     checks.append(socketPathLengths(paths))
+    checks.append(serviceUserOwnership(paths: paths, overrideServiceUser: serviceUser))
+    checks.append(runtimeDirPerms(paths: paths, overrideServiceUser: serviceUser))
 
     let loaded = loadConfig(path: configPath, capabilities: capabilities)
     checks.append(loaded.check)
     checks.append(diskHeadroom(rootDir: paths.rootDir, config: loaded.config))
+    checks.append(freeMemory(config: loaded.config, capabilities: capabilities))
     checks.append(githubToken(config: loaded.config, paths: paths))
 
     checks.append(buildTools())
+    checks.append(buildToolsServiceContext(rootDirPath: paths.rootDir.path, overrideServiceUser: serviceUser))
     checks.append(buildGuestAgent(paths: paths, config: loaded.config))
     checks.append(buildRecipes(paths: paths))
+
+    checks.append(await imageStoreIntegrity(paths: paths, deep: deep))
+    checks.append(await guestAgentImage(paths: paths))
 
     checks.append(hostSleepDisabled())
     checks.append(launchdJobLoaded())

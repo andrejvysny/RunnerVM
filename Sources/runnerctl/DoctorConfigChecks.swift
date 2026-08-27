@@ -200,12 +200,7 @@ extension DoctorChecks {
     }
     let auth = config.github.auth
     if auth.provider == .app {
-      let path = paths.stateDir.appending(path: "github-app.json").path
-      let present = FileManager.default.fileExists(atPath: path)
-      return DoctorCheck(
-        id: "github_token", title: "GitHub credential", status: present ? .ok : .fail,
-        detail: present ? "GitHub App descriptor present at \(path)" : "missing \(path)"
-      )
+      return githubAppTokenCheck(paths: paths)
     }
     switch auth.source {
     case .env:
@@ -242,6 +237,63 @@ extension DoctorChecks {
     return DoctorCheck(
       id: "github_token", title: "GitHub credential", status: .ok, detail: "token file \(path)"
     )
+  }
+
+  /// `{clientId|appId, installationId, privateKeyPath}` at `<stateDir>/github-app.json` (spec
+  /// §12) -- mirrors `GitHubAppFile`/`GitHubAuthFactory` in `Sources/Orchestration`, duplicated
+  /// here rather than imported for the same reason as `githubFileTokenCheck`: `runnerctl` does not
+  /// depend on `Orchestration` or `GitHubControl`. Only the field doctor needs (`privateKeyPath`)
+  /// is decoded; a descriptor missing `appId`/`installationId` still lets doctor confirm the key
+  /// file itself is present and owner-only, which is the actual leak risk this check exists for.
+  private struct GitHubAppDescriptor: Decodable {
+    var privateKeyPath: String
+  }
+
+  static func githubAppTokenCheck(paths: RunnerPaths) -> DoctorCheck {
+    let id = "github_token"
+    let title = "GitHub credential"
+    let descriptorURL = paths.stateDir.appending(path: "github-app.json")
+    let descriptorPath = descriptorURL.path
+    guard let data = FileManager.default.contents(atPath: descriptorPath) else {
+      return DoctorCheck(id: id, title: title, status: .fail, detail: "missing \(descriptorPath)")
+    }
+    guard let descriptor = try? JSONDecoder().decode(GitHubAppDescriptor.self, from: data) else {
+      return DoctorCheck(
+        id: id, title: title, status: .fail,
+        detail: "\(descriptorPath) is not a valid GitHub App descriptor (missing privateKeyPath)"
+      )
+    }
+    let keyPath = resolvedPrivateKeyPath(descriptor.privateKeyPath, relativeTo: descriptorURL)
+    guard FileManager.default.fileExists(atPath: keyPath) else {
+      return DoctorCheck(
+        id: id, title: title, status: .fail,
+        detail: "GitHub App descriptor present at \(descriptorPath), but its private key "
+          + "\(keyPath) is missing"
+      )
+    }
+    let mode = (try? FileManager.default.attributesOfItem(atPath: keyPath))?[.posixPermissions]
+      as? NSNumber
+    guard let mode, mode.uint16Value & 0o077 == 0 else {
+      return DoctorCheck(
+        id: id, title: title, status: .fail,
+        detail: "GitHub App private key \(keyPath) must be owner-only (chmod 600)"
+      )
+    }
+    return DoctorCheck(
+      id: id, title: title, status: .ok,
+      detail: "GitHub App descriptor present at \(descriptorPath); private key \(keyPath) is "
+        + "owner-only"
+    )
+  }
+
+  /// A relative `privateKeyPath` in `github-app.json` is resolved against the *descriptor's*
+  /// directory, matching `GitHubAuthFactory.resolvedPrivateKeyPath`.
+  private static func resolvedPrivateKeyPath(
+    _ privateKeyPath: String, relativeTo descriptorURL: URL
+  ) -> String {
+    guard !privateKeyPath.hasPrefix("/") else { return privateKeyPath }
+    return descriptorURL.deletingLastPathComponent()
+      .appending(path: privateKeyPath).path(percentEncoded: false)
   }
 
   /// Service/account match `KeychainPATProvider.defaultService` / `GitHubTokenStore.keychainAccount`.

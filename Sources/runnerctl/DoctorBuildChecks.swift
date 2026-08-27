@@ -12,12 +12,12 @@ extension DoctorChecks {
   /// staging directory; the smoke test here runs the same command over an empty temp directory so
   /// doctor catches a broken/missing `hdiutil` before the first real build pays for the same
   /// discovery forty minutes in. The host is always macOS (every other check already assumes it),
-  /// so there is no platform branch -- only present-and-working vs. not.
-  static func buildTools() -> DoctorCheck {
+  /// so there is no platform branch -- only present-and-working vs. not. Split out of `buildTools()`
+  /// so `buildToolsServiceContext()` can run the identical probe and additionally report the uid it
+  /// ran as.
+  private static func hdiutilSmokeTest() -> (ok: Bool, detail: String) {
     guard FileManager.default.isExecutableFile(atPath: hdiutilPath) else {
-      return DoctorCheck(
-        id: "build_tools", title: "Build tools (hdiutil)", status: .fail,
-        detail: "\(hdiutilPath) not found; image builds cannot render a boot seed")
+      return (false, "\(hdiutilPath) not found; image builds cannot render a boot seed")
     }
     let staging = FileManager.default.temporaryDirectory
       .appendingPathComponent("runnervm-doctor-hdiutil-\(UUID().uuidString)", isDirectory: true)
@@ -25,9 +25,7 @@ extension DoctorChecks {
     do {
       try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
     } catch {
-      return DoctorCheck(
-        id: "build_tools", title: "Build tools (hdiutil)", status: .fail,
-        detail: "could not create a scratch directory to test hdiutil: \(error)")
+      return (false, "could not create a scratch directory to test hdiutil: \(error)")
     }
     let iso = staging.appendingPathComponent("smoke-test.iso")
     let result = runProcess(hdiutilPath, [
@@ -35,14 +33,56 @@ extension DoctorChecks {
       "-o", iso.path, staging.path,
     ])
     guard result.exitCode == 0 else {
+      return (false, "hdiutil makehybrid smoke test failed (exit \(result.exitCode))")
+    }
+    return (true, "\(hdiutilPath) present; makehybrid smoke test succeeded")
+  }
+
+  static func buildTools() -> DoctorCheck {
+    let outcome = hdiutilSmokeTest()
+    return DoctorCheck(
+      id: "build_tools", title: "Build tools (hdiutil)", status: outcome.ok ? .ok : .fail,
+      detail: outcome.detail
+    )
+  }
+
+  /// Same probe as `buildTools()`, run again so this check's detail can say which uid it actually
+  /// executed under -- the production failure mode a plain `hdiutil` smoke test cannot see is
+  /// "works for whoever ran `doctor` interactively, untested under the LaunchDaemon's service
+  /// identity" (`docs/status.md`: "`hdiutil makehybrid` under a LaunchDaemon is gated by doctor
+  /// `build_tools`, not yet qualified"). Doctor has no privilege to become that account itself, so
+  /// a mismatch is only ever a WARN with a pointer at the commands that can: `sudo -u
+  /// <service-user> runnerctl doctor`, or `scripts/qualify-host.sh`'s `check_build_as_service`.
+  static func buildToolsServiceContext(rootDirPath: String, overrideServiceUser: String?) -> DoctorCheck {
+    let id = "build_tools_service_context"
+    let title = "Build tools (service context)"
+    let outcome = hdiutilSmokeTest()
+    let uid = getuid()
+    let username = NSUserName()
+    guard outcome.ok else {
       return DoctorCheck(
-        id: "build_tools", title: "Build tools (hdiutil)", status: .fail,
-        detail: "hdiutil makehybrid smoke test failed (exit \(result.exitCode))"
+        id: id, title: title, status: .fail, detail: "ran as uid \(uid) (\(username)): \(outcome.detail)"
+      )
+    }
+    guard let accountName = DoctorServiceAccount.expectedAccountName(
+      rootDirPath: rootDirPath, override: overrideServiceUser)
+    else {
+      // Development layout: no single service identity to compare against.
+      return DoctorCheck(
+        id: id, title: title, status: .ok, detail: "ran as uid \(uid) (\(username)); \(outcome.detail)"
+      )
+    }
+    guard self.uid(forAccount: accountName) == uid else {
+      return DoctorCheck(
+        id: id, title: title, status: .warn,
+        detail: "hdiutil succeeded but ran as uid \(uid) (\(username)), not the service account "
+          + "\(accountName); this does not prove the service identity can run it. Run: "
+          + "sudo -u \(accountName) runnerctl doctor, or scripts/qualify-host.sh (its "
+          + "check_build_as_service check runs hdiutil as the service user directly)"
       )
     }
     return DoctorCheck(
-      id: "build_tools", title: "Build tools (hdiutil)", status: .ok,
-      detail: "\(hdiutilPath) present; makehybrid smoke test succeeded"
+      id: id, title: title, status: .ok, detail: "ran as \(accountName) (uid \(uid)); \(outcome.detail)"
     )
   }
 
