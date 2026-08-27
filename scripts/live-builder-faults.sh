@@ -234,8 +234,9 @@ start_daemon() {
 }
 
 wait_for_daemon_up() {
-  local deadline
-  deadline=$(($(date +%s) + "${1:-60}"))
+  local deadline timeout
+  timeout="${1:-60}"
+  deadline=$(($(date +%s) + timeout))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if rc status >/dev/null 2>&1; then return 0; fi
     sleep 1
