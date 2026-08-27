@@ -587,7 +587,10 @@ scenario_success() {
 scenario_cancel-before-assignment() {
   local before run_id baseline
   baseline=$(capture_capacity_baseline "$PROFILE")
-  system_drain 30 || { warn "system drain failed"; return 1; }
+  # A drain that "fails" may still have switched the host to draining (it did, live, before the
+  # daemon's `drained` flag was fixed): always resume on the way out, or every later scenario
+  # queues forever against an advertised capacity of 0.
+  system_drain 30 || { warn "system drain failed"; system_resume || true; return 1; }
   before=$(date +%s)
   dispatch_workflow quick 1
   run_id=$(find_dispatched_run "$before") \

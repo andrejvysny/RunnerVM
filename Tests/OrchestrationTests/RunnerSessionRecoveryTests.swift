@@ -49,7 +49,9 @@ import Testing
       #expect(session.failureCode == "DAEMON_RESTART")
       #expect(session.result == "recovered")
       #expect(harness.github.requests(.delete, M2Harness.runnerPath).isEmpty)
-      #expect(try await harness.record(instance.id).state == .interrupted)
+      // Nothing to diagnose after a restart: the ephemeral VM is destroyed, not kept interrupted,
+      // so its capacity returns immediately.
+      try await harness.awaitInstance(instance.id, state: .deleted)
       await agent.stop()
     }
   }
@@ -114,8 +116,8 @@ import Testing
       #expect(session.state == .runnerStartFailed)
       #expect(session.failureCode == "DAEMON_RESTART")
       #expect(harness.github.requests(.delete, M2Harness.runnerPath).count == 1)
-      // Ephemeral and failed: the VM is kept interrupted so its directory can be read.
-      #expect(try await harness.record(instance.id).state == .interrupted)
+      // Ephemeral, and failed only because the daemon restarted: destroyed, not kept for diagnosis.
+      try await harness.awaitInstance(instance.id, state: .deleted)
       #expect(harness.github.requests(.post, M2Harness.jitPath).isEmpty)
       await agent.stop()
     }
@@ -449,8 +451,9 @@ import Testing
       #expect(await harness.runners.recoverSessions().terminalized == 1)
 
       // What `InstanceReconciler.sweepRetired` does once the diagnostics window closes: until the
-      // directory goes, a retired VM still holds its share of the host budget.
-      _ = try? await harness.instances.delete(id: stale.id)
+      // directory goes, a retired VM still holds its share of the host budget. Recovery now
+      // destroys the VM itself; this only waits for that to land.
+      try await harness.awaitInstance(stale.id, state: .deleted)
       await staleAgent.stop()
       let (fresh, freshAgent) = try await harness.idleInstance(
         script: Self.script([.online, .busy, .exited]))

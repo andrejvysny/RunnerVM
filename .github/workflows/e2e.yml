@@ -59,9 +59,13 @@ jobs:
     steps:
       - name: Sleep in 1-minute ticks
         run: |
+          # `sleep 60 & wait` instead of a plain `sleep`: bash defers SIGINT while a foreground
+          # child runs and then carries on when the child did not die of it, so a plain sleep
+          # loop ignores the runner's cancellation until its 5-minute force-kill timeout (seen
+          # live). `wait` returns on the signal, which is what a cancel test needs.
           for i in $(seq 1 "$LONG_MINUTES"); do
             echo "tick $i/$LONG_MINUTES $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            sleep 60
+            sleep 60 & wait $!
           done
 
   # Generates a JSON array [1..count] on a GitHub-hosted runner (cheap, no RunnerVM dependency)

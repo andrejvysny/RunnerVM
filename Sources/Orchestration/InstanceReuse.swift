@@ -53,15 +53,20 @@ public struct SessionOutcome: Sendable {
   /// Spec §9.2: reuse is documented as weaker isolation, so a public repository never gets it
   /// regardless of the profile's `lifecycle`.
   public var publicRepositoryScope: Bool
+  /// Spec §74 keeps a failed ephemeral VM's directory for diagnosis. `false` when there is nothing
+  /// to diagnose -- a session closed only because the daemon restarted -- so the VM is destroyed
+  /// and its capacity returns immediately instead of after `failedInstanceRetention`.
+  public var retainForDiagnosis: Bool
 
   public init(
     completed: Bool, failureCode: String? = nil, detail: String,
-    publicRepositoryScope: Bool = false
+    publicRepositoryScope: Bool = false, retainForDiagnosis: Bool = true
   ) {
     self.completed = completed
     self.failureCode = failureCode
     self.detail = detail
     self.publicRepositoryScope = publicRepositoryScope
+    self.retainForDiagnosis = retainForDiagnosis
   }
 }
 
@@ -274,13 +279,19 @@ extension InstanceManager {
   /// hangs or refuses still gets torn down on the next line.
   private func retireEphemeral(_ record: InstanceRecord, outcome: SessionOutcome) async {
     await collectGuestDiagnostics(record)
-    guard outcome.completed else {
-      await interrupt(
-        record.id, code: outcome.failureCode ?? "RUNNER_SESSION_FAILED", message: outcome.detail)
+    guard !outcome.completed, outcome.retainForDiagnosis else {
+      _ = try? await stop(id: record.id, force: false)
+      _ = try? await delete(id: record.id)
       return
     }
-    _ = try? await stop(id: record.id, force: false)
-    _ = try? await delete(id: record.id)
+    await interrupt(
+      record.id, code: outcome.failureCode ?? "RUNNER_SESSION_FAILED", message: outcome.detail)
+    // The directory is the evidence, not the VM: keep the former, take the latter down so a failed
+    // session does not keep a booted guest burning cpu/memory for the whole retention window
+    // (seen live: an `interrupted` row with its vmworker still running).
+    try? await supervisor.shutdown(
+      id: record.id, reason: .stop, gracefulTimeoutMs: tuning.gracefulShutdownMs)
+    _ = await waitForWorkerExit(id: record.id)
   }
 
   static func seconds(_ value: DurationValue) -> Double {

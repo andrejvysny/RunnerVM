@@ -91,7 +91,11 @@ public actor HostModeControl {
       throw DaemonServiceError.unavailable(
         reason: "the host is offline; run `runnerctl system resume` before draining")
     }
-    return Report(mode: .draining, activeSessions: await activeSessions(), drained: false)
+    // `drained` is a statement about work, not about the transition: a host with nothing running
+    // is drained the moment it stops admitting, and `runnerctl system drain --wait` exits on this
+    // flag. Reporting `false` here made an idle host look undrained and the command fail.
+    return Report(
+      mode: .draining, activeSessions: await activeSessions(), drained: await activeWork() == 0)
   }
 
   @discardableResult

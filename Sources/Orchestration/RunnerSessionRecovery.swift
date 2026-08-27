@@ -84,7 +84,10 @@ extension RunnerSessionManager {
       // Nothing was asked of GitHub yet, so there is nothing to clean up there.
       await finish(
         session, to: .jitFailed, failureCode: Self.restartFailureCode,
-        result: Self.restartResult, context: context)
+        result: Self.restartResult, context: context,
+        // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
+        // capacity comes back now rather than after `failedInstanceRetention`.
+        retainVM: false)
     case .jitRequested:
       // The POST may or may not have been processed before the daemon died; the runner's name is
       // the only handle on a registration whose id never reached the row.
@@ -95,13 +98,19 @@ extension RunnerSessionManager {
       }
       await finish(
         session, to: .jitFailed, failureCode: Self.restartFailureCode,
-        result: Self.restartResult, context: context)
+        result: Self.restartResult, context: context,
+        // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
+        // capacity comes back now rather than after `failedInstanceRetention`.
+        retainVM: false)
     case .jitIssued:
       // The registration exists but its config never reached the guest, and it never will:
       // `finish` drops the runner and hands the VM back.
       await finish(
         session, to: .runnerStartFailed, failureCode: Self.restartFailureCode,
-        result: Self.restartResult, context: context)
+        result: Self.restartResult, context: context,
+        // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
+        // capacity comes back now rather than after `failedInstanceRetention`.
+        retainVM: false)
     case .jitDelivered, .runnerStarting, .runnerOnline, .jobRunning:
       return await reattach(session, context: context)
     default:

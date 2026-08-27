@@ -247,7 +247,7 @@ public actor InstanceManager {
   }
 
   /// Never signals a pid: the only proof a worker is gone is that its `fcntl` lock is released.
-  private func waitForWorkerExit(id: InstanceID) async -> Bool {
+  func waitForWorkerExit(id: InstanceID) async -> Bool {
     for _ in 0..<tuning.workerExitPollAttempts {
       if await supervisor.liveness(id: id) == .dead { return true }
       try? await Task.sleep(for: tuning.workerExitPollInterval)

@@ -98,11 +98,17 @@ scale_set_idle() {
 github_runner_count() {
   local profile="$1" prefix org_count repo_count
   prefix="rvm-$(profile_short_name "$profile")"
+  # `gh api` prints the error body on stdout for a 404 (a user login has no /orgs endpoint), so
+  # a failed call must reset the count instead of appending "0" after the JSON.
   org_count=$(gh api "orgs/$OWNER/actions/runners" --jq \
-    ".runners // [] | [.[] | select(.name | startswith(\"$prefix\"))] | length" 2>/dev/null || echo 0)
+    ".runners // [] | [.[] | select(.name | startswith(\"$prefix\"))] | length" 2>/dev/null) \
+    || org_count=0
   repo_count=$(gh api "repos/$REPO/actions/runners" --jq \
-    ".runners // [] | [.[] | select(.name | startswith(\"$prefix\"))] | length" 2>/dev/null || echo 0)
-  echo $((${org_count:-0} + ${repo_count:-0}))
+    ".runners // [] | [.[] | select(.name | startswith(\"$prefix\"))] | length" 2>/dev/null) \
+    || repo_count=0
+  [[ "$org_count" =~ ^[0-9]+$ ]] || org_count=0
+  [[ "$repo_count" =~ ^[0-9]+$ ]] || repo_count=0
+  echo $((org_count + repo_count))
 }
 
 # $1=profile $2=timeout. Hard-fails once GitHub still lists a runner matching this profile's

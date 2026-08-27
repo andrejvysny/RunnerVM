@@ -90,6 +90,20 @@ import Testing
     }
   }
 
+  /// Found live: `runnerctl system drain --wait` exits on `drained`, and an idle host reported
+  /// `false`, so the operator's drain "failed" while the host had in fact stopped admitting.
+  @Test func drainingAnIdleHostReportsItDrained() async throws {
+    try await withHarness { harness in
+      let mode = control(harness)
+      let report = try await mode.drain()
+      #expect(report.mode == .draining)
+      #expect(report.activeSessions == 0)
+      #expect(report.drained)
+      // Idempotent: a second drain of the same idle host says the same thing.
+      #expect(try await mode.drain().drained)
+    }
+  }
+
   @Test func waitForIdleReturnsImmediatelyWithNoSessions() async throws {
     try await withHarness { harness in
       let mode = control(harness)

@@ -195,7 +195,8 @@ extension RunnerSessionManager {
   /// (spec §48 steps 21-23, `docs/state_machines.md`).
   func finish(
     _ session: RunnerSessionRecord, to state: RunnerSessionState, error: (any Error)? = nil,
-    failureCode: String? = nil, result: String?, context: SessionContext
+    failureCode: String? = nil, result: String?, context: SessionContext,
+    retainVM: Bool = true
   ) async {
     let code = (error as? any RunnerError)?.code ?? failureCode
     guard let settled = await settle(session, to: state, result: result, code: code) else { return }
@@ -203,7 +204,8 @@ extension RunnerSessionManager {
     // A row somebody else closed still owns a VM nobody has handed back. `afterSession` is
     // idempotent, so the teardown runs rather than being lost with the CAS.
     guard settled.closedHere else {
-      await teardown(terminal, context: context, failed: terminal.state != .completed)
+      await teardown(
+      terminal, context: context, failed: terminal.state != .completed, retainVM: retainVM)
       return
     }
     await recordJobSummary(terminal)
@@ -213,7 +215,8 @@ extension RunnerSessionManager {
         session: terminal.id, runnerID: runnerID, scope: context.scope,
         source: terminal.jitSource)
     }
-    await teardown(terminal, context: context, failed: terminal.state != .completed)
+    await teardown(
+      terminal, context: context, failed: terminal.state != .completed, retainVM: retainVM)
     logger.info(
       "runner session finished",
       metadata: .context(instance: terminal.instanceId, session: terminal.id).merging([
@@ -354,7 +357,7 @@ extension RunnerSessionManager {
   /// profile is retired (kept on failure, for `failure.json`), a reusable one goes
   /// `busy -> cleaning -> idle` unless something on the §126 list says it may not be trusted.
   private func teardown(
-    _ session: RunnerSessionRecord, context: SessionContext, failed: Bool
+    _ session: RunnerSessionRecord, context: SessionContext, failed: Bool, retainVM: Bool
   ) async {
     let startedAt = ContinuousClock.now
     await instances.afterSession(
@@ -363,7 +366,8 @@ extension RunnerSessionManager {
         completed: !failed,
         failureCode: session.failureCode ?? (failed ? "RUNNER_SESSION_FAILED" : nil),
         detail: "runner session \(session.id.rawValue) ended as \(session.state.rawValue)",
-        publicRepositoryScope: context.scopeRecord?.isPublicRepository == true))
+        publicRepositoryScope: context.scopeRecord?.isPublicRepository == true,
+        retainForDiagnosis: retainVM))
     // `afterSession` is where a reusable VM is wiped and an ephemeral one is retired, so the call
     // itself is the cleanup window spec §41 asks about; `InstanceReuse` owns the steps inside it.
     await instances.metricRegistry().observe(
