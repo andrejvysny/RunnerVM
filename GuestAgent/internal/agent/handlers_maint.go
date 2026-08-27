@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/runnervm/guest-agent/internal/cleanup"
 	"github.com/runnervm/guest-agent/internal/disk"
 	"github.com/runnervm/guest-agent/internal/rpc"
 )
@@ -41,6 +42,9 @@ func (s *Service) handleCleanup(ctx context.Context, req rpc.Envelope) (any, err
 	}
 
 	result, err := s.cleaner.Run(ctx, p.Epoch)
+	if errors.Is(err, cleanup.ErrHomeSnapshotMissing) {
+		return nil, errCode(CodeHomeSnapshotMissing, err, false)
+	}
 	if err != nil {
 		return nil, errInternal(err)
 	}

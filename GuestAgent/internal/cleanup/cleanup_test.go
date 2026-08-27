@@ -2,6 +2,7 @@ package cleanup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,15 +39,36 @@ func mkfile(t *testing.T, path string) {
 	}
 }
 
+// mkStateDir creates dir for tests that call SnapshotHome directly: normally
+// Cleaner.EnsureHomeSnapshot creates it, but these tests bypass that to set
+// up a pristine baseline before mutating cfg.RunnerHome further.
+func mkStateDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunRemovesRunnerAndHomeCaches(t *testing.T) {
-	c, cfg := newCleaner(t, nil)
+	c, cfg := newCleaner(t, func(cfg *Config) {
+		cfg.HomeSnapshotPath = filepath.Join(cfg.StateDir, "home-pristine.tar")
+	})
+	// Content present when the snapshot is taken is the pristine baseline
+	// and must survive a restore.
+	survivor := filepath.Join(cfg.RunnerHome, ".ssh", "known_hosts")
+	mkfile(t, survivor)
+	mkStateDir(t, cfg.StateDir)
+	if err := SnapshotHome(cfg.RunnerHome, cfg.HomeSnapshotPath); err != nil {
+		t.Fatalf("SnapshotHome: %v", err)
+	}
+
 	mkfile(t, filepath.Join(cfg.RunnerDir, "_work", "job", "a"))
 	mkfile(t, filepath.Join(cfg.RunnerDir, "_diag", "Worker_1.log"))
 	mkfile(t, filepath.Join(cfg.RunnerHome, ".cache", "pip", "wheel"))
 	mkfile(t, filepath.Join(cfg.RunnerHome, ".npm", "_cacache", "x"))
-	// A path outside the configured list must survive.
-	keep := filepath.Join(cfg.RunnerHome, ".ssh", "id_ed25519")
-	mkfile(t, keep)
+	// A credential a job writes after the snapshot must not survive cleanup.
+	leaked := filepath.Join(cfg.RunnerHome, ".ssh", "id_ed25519")
+	mkfile(t, leaked)
 
 	res, err := c.Run(context.Background(), 1)
 	if err != nil {
@@ -68,8 +90,56 @@ func TestRunRemovesRunnerAndHomeCaches(t *testing.T) {
 			t.Fatalf("%s survived cleanup", want)
 		}
 	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Fatalf("cleanup deleted an unconfigured path: %v", err)
+	if _, err := os.Stat(leaked); !os.IsNotExist(err) {
+		t.Fatalf("%s survived cleanup", leaked)
+	}
+	if _, err := os.Stat(survivor); err != nil {
+		t.Fatalf("pristine %s did not survive restore: %v", survivor, err)
+	}
+}
+
+// A reusable-lifecycle Cleaner (HomeSnapshotPath set) must refuse to report
+// success when it has no pristine baseline to restore -- fail closed, not
+// a silent gap that lets a prior job's credentials survive.
+func TestCleanupRunFailsClosedWithoutSnapshot(t *testing.T) {
+	c, cfg := newCleaner(t, func(cfg *Config) {
+		cfg.HomeSnapshotPath = filepath.Join(cfg.StateDir, "home-pristine.tar")
+	})
+	mkfile(t, filepath.Join(cfg.RunnerHome, ".gitconfig"))
+
+	if _, err := c.Run(context.Background(), 1); !errors.Is(err, ErrHomeSnapshotMissing) {
+		t.Fatalf("Run: err = %v, want ErrHomeSnapshotMissing", err)
+	}
+}
+
+func TestCleanupRunRestoresHome(t *testing.T) {
+	c, cfg := newCleaner(t, func(cfg *Config) {
+		cfg.HomeSnapshotPath = filepath.Join(cfg.StateDir, "home-pristine.tar")
+	})
+	survivor := filepath.Join(cfg.RunnerHome, ".bashrc")
+	mkfile(t, survivor)
+	mkStateDir(t, cfg.StateDir)
+	if err := SnapshotHome(cfg.RunnerHome, cfg.HomeSnapshotPath); err != nil {
+		t.Fatalf("SnapshotHome: %v", err)
+	}
+	leaked := filepath.Join(cfg.RunnerHome, ".gitconfig")
+	mkfile(t, leaked)
+
+	res, err := c.Run(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.OK {
+		t.Fatal("ok = false")
+	}
+	if !slices.Contains(res.Removed, "home:restored") {
+		t.Fatalf("removed %v does not report the home restore", res.Removed)
+	}
+	if _, err := os.Stat(leaked); !os.IsNotExist(err) {
+		t.Fatalf("%s survived restore", leaked)
+	}
+	if _, err := os.Stat(survivor); err != nil {
+		t.Fatalf("%s did not survive restore: %v", survivor, err)
 	}
 }
 

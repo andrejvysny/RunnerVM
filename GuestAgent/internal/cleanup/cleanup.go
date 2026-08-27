@@ -25,6 +25,12 @@ const epochFileName = "cleanup.epoch"
 // guest with a large image cache but must not hang the RPC forever.
 const dockerTimeout = 5 * time.Minute
 
+// ErrHomeSnapshotMissing is wrapped by the error Run returns when it is
+// configured to restore RunnerHome (HomeSnapshotPath is set) but no
+// pristine snapshot exists yet. Cleanup fails closed here rather than
+// silently reporting {ok:true} while a prior job's credentials survive.
+var ErrHomeSnapshotMissing = errors.New("cleanup: home snapshot missing")
+
 // DefaultHomeRelPaths are the caches a job typically fills in the runner's
 // home directory.
 var DefaultHomeRelPaths = []string{".cache", ".npm", ".yarn/cache", ".nuget/packages", ".gradle/caches"}
@@ -39,8 +45,11 @@ type Config struct {
 	StateDir  string
 	// RunnerHome is the runner account's home directory.
 	RunnerHome string
-	// RunnerUID selects which temp-directory entries are removed.
+	// RunnerUID selects which temp-directory entries are removed, and becomes
+	// the owner RestoreHome chowns RunnerHome itself to.
 	RunnerUID int
+	// RunnerGID is RunnerHome's group after a RestoreHome pass.
+	RunnerGID int
 	// TempDirs defaults to DefaultTempDirs when nil.
 	TempDirs []string
 	// HomeRelPaths defaults to DefaultHomeRelPaths when nil.
@@ -49,7 +58,12 @@ type Config struct {
 	ExtraPaths []string
 	// PruneDocker enables `docker system prune -af` when docker is present.
 	PruneDocker bool
-	Logger      *slog.Logger
+	// HomeSnapshotPath is where the pristine-HOME baseline (see home.go)
+	// lives. Empty disables home-restore entirely: Run falls back to the
+	// HomeRelPaths sweep only, which is what every Cleaner built before this
+	// field existed still gets.
+	HomeSnapshotPath string
+	Logger           *slog.Logger
 }
 
 // Result is the agent.cleanup reply. Removed lists the paths this call
@@ -99,11 +113,78 @@ func (c *Cleaner) Run(ctx context.Context, epoch int64) (Result, error) {
 	}
 
 	removed := c.sweep(ctx)
+	restored, err := c.restoreHome()
+	if err != nil {
+		return Result{}, err
+	}
+	if restored != "" {
+		removed = append(removed, restored)
+	}
 	if err := c.writeEpoch(epoch); err != nil {
 		return Result{}, err
 	}
 	c.log.Info("cleanup complete", "epoch", epoch, "removedCount", len(removed))
 	return Result{OK: true, Removed: removed}, nil
+}
+
+// restoreHome resets RunnerHome to the pristine snapshot taken before any
+// job ran, so a credential a job wrote under HOME cannot survive into the
+// next session on a reused VM. Disabled (a silent no-op) when the Cleaner
+// was not configured with a HomeSnapshotPath; otherwise fails closed if the
+// snapshot is missing, rather than reporting {ok:true} while HOME still
+// carries the previous job's residue.
+func (c *Cleaner) restoreHome() (string, error) {
+	if c.cfg.RunnerHome == "" || c.cfg.HomeSnapshotPath == "" {
+		return "", nil
+	}
+	if _, err := os.Stat(c.cfg.HomeSnapshotPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: %s", ErrHomeSnapshotMissing, c.cfg.HomeSnapshotPath)
+		}
+		return "", fmt.Errorf("cleanup: stat home snapshot: %w", err)
+	}
+	if err := RestoreHome(c.cfg.RunnerHome, c.cfg.HomeSnapshotPath, c.cfg.RunnerUID, c.cfg.RunnerGID); err != nil {
+		return "", fmt.Errorf("cleanup: restore home: %w", err)
+	}
+	return "home:restored", nil
+}
+
+// EnsureHomeSnapshot takes the one-time pristine-HOME baseline RestoreHome
+// restores into, if RunnerHome/HomeSnapshotPath are configured and no
+// snapshot exists yet. It is meant to run once, at agent startup: a
+// snapshot is only ever taken before the first job (no cleanup epoch
+// recorded yet), because once a job has run, HOME is no longer pristine and
+// a later restart must not silently baseline whatever state a job left it
+// in.
+func (c *Cleaner) EnsureHomeSnapshot() error {
+	if c.cfg.RunnerHome == "" || c.cfg.HomeSnapshotPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(c.cfg.HomeSnapshotPath); err == nil {
+		return nil // already have one
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cleanup: stat home snapshot: %w", err)
+	}
+	last, err := c.lastEpoch()
+	if err != nil {
+		return err
+	}
+	if last > 0 {
+		c.log.Warn("cleanup: no home snapshot but a job already ran; refusing to baseline a dirty HOME",
+			"lastEpoch", last)
+		return nil
+	}
+	if err := os.MkdirAll(c.cfg.StateDir, 0o750); err != nil {
+		return fmt.Errorf("cleanup: create state dir: %w", err)
+	}
+	if err := os.MkdirAll(c.cfg.RunnerHome, 0o700); err != nil {
+		return fmt.Errorf("cleanup: create runner home: %w", err)
+	}
+	if err := SnapshotHome(c.cfg.RunnerHome, c.cfg.HomeSnapshotPath); err != nil {
+		return fmt.Errorf("cleanup: snapshot home: %w", err)
+	}
+	c.log.Info("cleanup: took pristine home snapshot", "home", c.cfg.RunnerHome)
+	return nil
 }
 
 // sweep deletes every configured target, collecting the paths it removed.

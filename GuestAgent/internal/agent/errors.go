@@ -17,6 +17,11 @@ const (
 	// CodeOutputLimit terminates an agent.exec stream that exceeded
 	// maxOutputBytes.
 	CodeOutputLimit = "OUTPUT_LIMIT"
+	// CodeHomeSnapshotMissing answers agent.cleanup when it is configured to
+	// restore the runner's HOME from a pristine snapshot but none exists.
+	// Fails closed rather than reporting {ok:true} while a prior job's
+	// credentials could still be sitting under HOME.
+	CodeHomeSnapshotMissing = "HOME_SNAPSHOT_MISSING"
 )
 
 // hostSafeModeMessage is the exact text returned by agent.cleanup,

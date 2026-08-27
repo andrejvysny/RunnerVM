@@ -76,6 +76,37 @@ func TestCleanupIsIdempotentPerEpoch(t *testing.T) {
 	}
 }
 
+// A fresh harness takes its home snapshot automatically at startup (see
+// Service.New / cleaner.EnsureHomeSnapshot), so a first agent.cleanup call
+// must already succeed with the restore applied.
+func TestCleanupSucceedsWithAutoTakenHomeSnapshot(t *testing.T) {
+	h := newHarness(t, nil)
+
+	var res CleanupResult
+	h.call(t, "agent.cleanup", map[string]any{"epoch": 1}, &res)
+	if !res.OK {
+		t.Fatal("ok = false")
+	}
+}
+
+// A VM that already ran a job in a previous agent lifetime, but never took
+// a home snapshot (e.g. an agent binary predating this feature), must not
+// have agent.cleanup silently skip the restore: it fails closed instead.
+func TestCleanupFailsClosedWithoutHomeSnapshot(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "cleanup.epoch"), []byte("1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(cfg *Config) {
+		cfg.StateDir = stateDir
+	})
+
+	err := h.callErr(t, "agent.cleanup", map[string]any{"epoch": 2})
+	if err.Code != CodeHomeSnapshotMissing {
+		t.Fatalf("code = %q, want %s", err.Code, CodeHomeSnapshotMissing)
+	}
+}
+
 func TestCleanupRejectsNonPositiveEpoch(t *testing.T) {
 	h := newHarness(t, nil)
 	if code := h.callErr(t, "agent.cleanup", map[string]any{"epoch": 0}).Code; code != "INVALID_PARAMS" {

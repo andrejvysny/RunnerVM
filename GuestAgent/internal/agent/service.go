@@ -43,6 +43,10 @@ const startupGrace = 30 * time.Second
 // response frame before the kernel halts.
 const defaultShutdownDelay = 500 * time.Millisecond
 
+// homeSnapshotFileName holds the pristine-HOME tar under Config.StateDir;
+// see cleanup.EnsureHomeSnapshot / cleanup.RestoreHome.
+const homeSnapshotFileName = "home-pristine.tar"
+
 // capabilities advertises which optional method families this build serves.
 var capabilities = []string{"exec", "metrics", "runner", "resizeDisk", "cleanup", "shutdown"}
 
@@ -181,14 +185,16 @@ func New(cfg Config) (*Service, error) {
 		}
 	}
 	cleaner, err := cleanup.New(cleanup.Config{
-		RunnerDir:   cfg.RunnerDir,
-		StateDir:    cfg.StateDir,
-		RunnerHome:  cleanupHome,
-		RunnerUID:   account.UID,
-		TempDirs:    cfg.CleanupTempDirs,
-		ExtraPaths:  cfg.CleanupExtraPaths,
-		PruneDocker: cfg.PruneDocker,
-		Logger:      log,
+		RunnerDir:        cfg.RunnerDir,
+		StateDir:         cfg.StateDir,
+		RunnerHome:       cleanupHome,
+		RunnerUID:        account.UID,
+		RunnerGID:        account.GID,
+		TempDirs:         cfg.CleanupTempDirs,
+		ExtraPaths:       cfg.CleanupExtraPaths,
+		PruneDocker:      cfg.PruneDocker,
+		HomeSnapshotPath: filepath.Join(cfg.StateDir, homeSnapshotFileName),
+		Logger:           log,
 	})
 	if err != nil {
 		return nil, err
@@ -217,6 +223,11 @@ func New(cfg Config) (*Service, error) {
 			"reason", "could not confirm the agent is running inside a virtual machine",
 			"evidence", evidence,
 			"hint", "pass --allow-host-destructive to override for guest image builds on real hardware")
+	} else if err := cleaner.EnsureHomeSnapshot(); err != nil {
+		// Not fatal: the agent still starts, and agent.cleanup fails closed
+		// with HOME_SNAPSHOT_MISSING on a reusable VM until this is fixed,
+		// which is safer than refusing to serve at all.
+		log.Warn("cleanup: could not take initial home snapshot", "error", err.Error())
 	}
 
 	return &Service{
