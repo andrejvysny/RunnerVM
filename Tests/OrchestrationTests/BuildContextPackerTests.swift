@@ -84,8 +84,7 @@ struct BuildContextPackerTests {
   }
 
   private func inspect(_ extractionRoot: URL) throws -> [ExtractedEntry] {
-    let canonicalRoot = extractionRoot.resolvingSymlinksInPath().standardizedFileURL
-      .path(percentEncoded: false)
+    let canonicalRoot = Self.realPath(Self.plainPath(extractionRoot))
     let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
     guard let walker = FileManager.default.enumerator(
       at: extractionRoot, includingPropertiesForKeys: Array(keys),
@@ -120,6 +119,15 @@ struct BuildContextPackerTests {
   /// Resolves everything except a symlink's own final component (following that would resolve
   /// through to wherever the link points, which is not the question here) and asserts it stayed
   /// under the canonical extraction root.
+  /// `realpath(3)` rather than `URL.resolvingSymlinksInPath()`: the latter resolves `/tmp` to
+  /// `/private/tmp` on macOS 26 but not on macOS 15 (CI), which made the containment check
+  /// compare a resolved root against unresolved entries.
+  private static func realPath(_ path: String) -> String {
+    guard let resolved = realpath(path, nil) else { return path }
+    defer { free(resolved) }
+    return String(cString: resolved)
+  }
+
   /// A symlink to a directory is enumerated with a trailing slash, and `readlink` on `link/`
   /// resolves through the link instead of reading it.
   private static func plainPath(_ url: URL) -> String {
@@ -132,7 +140,7 @@ struct BuildContextPackerTests {
     _ absolute: URL, relative: String, isSymlink: Bool, isDirectory: Bool, canonicalRoot: String
   ) {
     let ancestor = (isSymlink || !isDirectory) ? absolute.deletingLastPathComponent() : absolute
-    let resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false)
+    let resolved = Self.realPath(Self.plainPath(ancestor))
     #expect(
       resolved == canonicalRoot || resolved.hasPrefix(canonicalRoot + "/"),
       "escaped the extraction root: \(relative) resolved under \(resolved)")
