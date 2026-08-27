@@ -48,12 +48,41 @@ Do **not** force the Linux EFI builder to handle macOS.
    job into the installed system (via a scripted setup over the VZ console / a provisioning volume),
    so a cloned instance comes up, the agent connects over vsock, and JIT registration works exactly
    like Linux.
+
+   - **Required**: after the `runner` account exists, reset its git credential helper as that
+     user — `sudo -H -u runner git config --global credential.helper ""` (empty override, not
+     `--unset-all`; an empty value resets git's whole accumulated helper list, `--unset-all` only
+     removes one entry and leaves a lower-precedence default underneath). Must run as `runner`
+     with `HOME=/Users/runner`, not as root — the guest agent's admin exec path defaults to root
+     (`GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist`,
+     `GuestAgent/internal/agent/handlers_exec.go`), but the actual CI job always runs as the
+     dropped-privilege `runner` account with its own `HOME`
+     (`GuestAgent/cmd/guest-agent/main.go`, `GuestAgent/internal/runner/manager.go`); running this
+     as root would write `/var/root/.gitconfig` and leave `/Users/runner/.gitconfig` untouched.
+     `actions/checkout` never needs persisted credentials (token injected via `extraheader`), so
+     this alone fully prevents a Keychain-backed credential helper from ever being invoked — the
+     same class of hang a real incident hit on a different, manually-managed macOS runner (a
+     locked login keychain + a helper trying to write to it blocks forever with no timeout, no UI
+     to answer the prompt).
+   - **Explicitly open, not solved by the above**: making the guest's login keychain itself usable
+     on a headless boot, for any *other* keychain-touching tool a job might run (`codesign`,
+     `notarytool`, etc.). `security set-keychain-settings` does not solve this on its own — this
+     repo's own launchd docs (`packaging/launchd/README.md`) already record that a keychain
+     configured that way "will not survive a reboot without a login" for a headless account, the
+     same unsolved problem noted there for the *host* LaunchDaemon path. A cloned macOS guest that
+     never gets an interactive login has no obvious mechanism to produce an unlocked runner
+     keychain in the first place. If M8 ends up needing keychain-backed guest tooling, this needs
+     its own spike (does a usable runner keychain exist at all on a cold-booted clone with no GUI
+     login? how would it be created/unlocked?) with a cold-boot validation test — don't assume a
+     one-line `security` call solves it.
 4. **Validation gate** — extend `HostConstants.supportedGuestOS` to include `.macos` **only** once
    1–3 are real; keep `GUEST_OS_UNSUPPORTED` until then. Enforce the 2-guest cap
    (`HostConstants.macOSGuestLimit`, already validated) at admission.
 5. **Verify** — a `macos-15/26` profile boots, the agent connects, a JIT runner registers, an
    Xcode/`xcodebuild` workflow runs, the VM is destroyed after the job; cold-boot + daemon-restart
-   cases covered like Linux.
+   cases covered like Linux. Include a private-repo `actions/checkout` as the real `runner`
+   account and confirm it completes without ever invoking a credential helper or blocking on UI —
+   the concrete proof step 3's credential-helper fix actually closes the hang class.
 
 ## Host facts (this machine, 2026-08-26)
 

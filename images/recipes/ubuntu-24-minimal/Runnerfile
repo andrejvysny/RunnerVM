@@ -28,6 +28,12 @@ RUN $APT install git curl wget ca-certificates jq tar gzip xz-utils zstd unzip z
       openssh-server build-essential python3 python3-pip pipx dnsutils iproute2 \
       netcat-openbsd cloud-guest-utils
 
+# actions/checkout injects the job token via http.extraheader -- no credential helper is ever
+# needed. Empty (not --unset-all) so no future package can reintroduce a locking/interactive
+# helper (e.g. libsecret) underneath it; a helper that blocks on a prompt would hang an ephemeral
+# runner forever, exactly like a real incident on a different, manually-managed macOS runner did.
+RUN git config --system credential.helper ""
+
 # The bootstrap seed already creates these; the recipe repeats them idempotently so a derived
 # rebuild from a base that lacks them still works
 # (same shape the old build script relied on cloud-init for).
