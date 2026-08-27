@@ -75,9 +75,12 @@ extension RunnerSessionManager {
       // Ignored once a job has been seen: a JIT runner that finished its job reports `exited`,
       // and finishing early on a momentary `online` would cut the upload of the job's logs.
       guard session.state == .runnerStarting else { return (session, sawBusy) }
-      return ((try? await markOnline(session)) ?? session, sawBusy)
+      if let online = try? await markOnline(session) { return (online, sawBusy) }
+      return (await refreshed(session), sawBusy)
     case .busy:
-      guard let running = try? await markBusy(session) else { return (session, sawBusy) }
+      guard let running = try? await markBusy(session) else {
+        return (await refreshed(session), sawBusy)
+      }
       return (running, true)
     case .exited:
       // A JIT runner is single-use: GitHub removes the registration itself once the job ends, so
@@ -93,18 +96,26 @@ extension RunnerSessionManager {
     }
   }
 
+  /// Instance row first, session row second. The two tables are never written in one
+  /// transaction, so the order is the invariant: a session that reads `runnerOnline`/`jobRunning`
+  /// sits on an instance that already reads `runnerOnline`/`busy`. Readers of the instance row
+  /// (taint, orchestrator, operators) therefore never see a VM lagging behind its own session.
   private func markOnline(_ session: RunnerSessionRecord) async throws -> RunnerSessionRecord {
-    let online = try await move(session, to: .runnerOnline) { $0.runnerOnlineAt = .now }
     try await instances.advanceRunnerState(id: session.instanceId, to: .runnerOnline)
-    return online
+    return try await move(session, to: .runnerOnline) { $0.runnerOnlineAt = .now }
   }
 
   private func markBusy(_ session: RunnerSessionRecord) async throws -> RunnerSessionRecord {
     let online = session.state == .runnerStarting ? try await markOnline(session) : session
     guard online.state == .runnerOnline else { return online }
-    let running = try await move(online, to: .jobRunning) { $0.jobStartedAt = .now }
     try await instances.advanceRunnerState(id: session.instanceId, to: .busy)
-    return running
+    return try await move(online, to: .jobRunning) { $0.jobStartedAt = .now }
+  }
+
+  /// A failed compare-and-swap means the row moved under the observer; polling on with the
+  /// in-memory copy would make every later CAS fail too and the terminal write impossible.
+  private func refreshed(_ session: RunnerSessionRecord) async -> RunnerSessionRecord {
+    (try? await sessions.get(id: session.id)) ?? session
   }
 
   /// Returns true when a deadline fired and the session is now terminal.

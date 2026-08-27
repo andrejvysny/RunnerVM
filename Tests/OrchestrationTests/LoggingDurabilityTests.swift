@@ -80,11 +80,11 @@ import Testing
 
   @Test func aLiveInstanceTransitionReachesTheStream() async throws {
     try await withHarness { harness in
+      // The harness already attaches `LifecycleEventLog` at `paths.eventsLogFile` to every
+      // manager (its own waits are driven by it); the sink writes each line synchronously, so the
+      // file is complete the moment the instance is idle.
       let url = harness.paths.eventsLogFile
-      let log = try LifecycleEventLog(url: url, hostId: harness.hostId)
-      await harness.instances.attachEventLog(log)
       let (record, agent) = try await harness.idleInstance()
-      await log.close()
 
       let events = try Self.lines(url).filter {
         $0["instance_id"] as? String == record.id.rawValue

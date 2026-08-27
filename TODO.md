@@ -193,3 +193,18 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
   `build show` omits the `args` row the plan asked for rather than adding a wire field on the side.
 - [x] P7 live (2026-08-27, dev host): bootstrap `ubuntu-24-minimal` 3m43s cold / 2m04s warm, derived `ubuntu-24` 1m16s, `vm create` → idle in 5s, tart import of `ghcr.io/cirruslabs/ubuntu:latest` + `--format runnervm` refusal + `IMAGE_NO_GUEST_AGENT` guardrail — see `docs/verification.md`. Not run live: GitHub job on the built image (no credential on host), restart mid-build, `--push` to a real registry, LaunchDaemon builds.
 - [ ] M14/M15 follow-ups: `image list` NAME should prefer the alias (rebuilds show two rows named alike); `build show` lacks an `args` row (`BuildInfoDTO` omits `argsJson`); `config validate` only flags an agentless profile image once the *tag* has been resolved locally (canonical digest row only); RPC-level stream backpressure (Codex B9 follow-up); `scripts/install.sh` is 572 lines; base-image cache is unbounded; consider `swiftformat .` as a standalone commit before enabling lint.
+
+## Production hardening pass (2026-08-27) — plan `~/.claude/plans/runnervm-production-hardening-indexed-sun.md`
+- [ ] WP0 deterministic green CI: `interrupt` row-before-guest, instance-row-before-session-row in `markOnline`/`markBusy`, throwing `waitUntil`, event-driven `awaitSession`/`awaitInstance` over `LifecycleEventLog.subscribe()`; 100× flaky suites
+- [ ] WP1 runner-session recovery after restart (`RunnerSessionRecovery.swift`, `RunnerSessionReconciler`, startup call) + tests + live `restart-during-job-sigkill`
+- [ ] WP2 build recovery keeps capacity while worker death unproven (`OrphanVerdict`, `recovery_since` v3, hard bound, cancel path)
+- [ ] WP3 `BuildContextPacker` NUL-delimited `tar --null -T` + adversarial archive-content tests
+- [ ] WP4 reusable guard (`reuse.acknowledgeSharedHost`) + guest-agent HOME pristine snapshot/restore + sentinel tests
+- [ ] WP5 bounded base-image cache (`build.cache.{maxBytes,minimumHostFreeBytes,maxEntries}`, LRU, atomic commit, metrics)
+- [ ] WP6 ARG = non-secret docs/help/refusal; `docs/design/build-secrets.md`
+- [ ] WP11 clone timeout deprecation warning, cancellation-aware BuilderWorker loops, GitHub request metric, provenance audit
+- [ ] WP8 builder fault-injection harness (in-process freeze + live kill -9 script)
+- [ ] WP7 builder→GitHub→GHCR live E2E script + run
+- [ ] WP10 live GitHub lifecycle matrix (new scenarios, fake-based API fault tests) + run
+- [ ] WP9 doctor/qualify checks + LaunchDaemon qualification on dev Mac (reboots by user)
+- [ ] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md

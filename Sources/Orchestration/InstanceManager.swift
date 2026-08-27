@@ -300,7 +300,11 @@ public actor InstanceManager {
   ) async {
     guard let record = try? await require(id),
           Self.interruptibleStates.contains(record.state) else { return }
-    await releaseGuest(id)
+    // Row first, guest second. The actor is reentrant at every `await`, so a runner-session
+    // observer polling `agent.runnerStatus` in between would otherwise see a half-closed guest
+    // client under a row that still says `busy` and report the loss as an agent failure rather
+    // than as the VM going away (`VM_LOST`). Once the row reads `interrupted`, every later poll
+    // takes the instance-state path deterministically.
     _ = try? await transition(record, to: .interrupted) { record in
       record.stoppedAt = .now
       record.failureCode = code
@@ -310,6 +314,7 @@ public actor InstanceManager {
         record.taintReason = taint
       }
     }
+    await releaseGuest(id)
     logger.warning(
       "instance interrupted",
       metadata: .context(profile: record.profileId, instance: id, host: hostId)

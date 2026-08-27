@@ -162,12 +162,18 @@ struct BuildHarness {
   }
 
   /// Waits for the build to reach a terminal state, then returns the row.
+  ///
+  /// Builds have no lifecycle event stream to wait on, so this polls; the bound is a hang guard
+  /// sized well past the harness's injected `agentReadyTimeout` (5 s), which the old fixed
+  /// 400×10 ms budget was *shorter* than -- a never-ready guest could only pass by luck.
   @discardableResult
   func settle(_ id: String) async throws -> ImageBuildRecord {
-    try await waitUntil("build \(id) to finish") {
-      try await self.row(id).state.isTerminal
+    try await withHangGuard("build \(id) to finish") {
+      while try await !self.row(id).state.isTerminal {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      return try await self.row(id)
     }
-    return try await row(id)
   }
 
   /// Inserts a build row the way a previous daemon would have left it, with no owning task -- the

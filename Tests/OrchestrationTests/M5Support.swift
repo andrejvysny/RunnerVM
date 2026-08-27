@@ -71,9 +71,7 @@ extension M2Harness {
     try await importLinuxImage()
     let record = try await instances.create(profileName: "linux")
     let agent = try await startGuestAgent(for: record.id, script: script)
-    try await waitUntil("the instance to reach idle") {
-      try await self.record(record.id).state == .idle
-    }
+    try await awaitInstance(record.id, state: .idle)
     return (try await self.record(record.id), agent)
   }
 
@@ -92,10 +90,60 @@ extension M2Harness {
   /// Waits for the background observer to park the session in a terminal state.
   @discardableResult
   func awaitTerminal(_ id: RunnerSessionID) async throws -> RunnerSessionRecord {
-    try await waitUntil("session \(id.rawValue) to reach a terminal state") {
-      try await self.session(id).state.isTerminal
+    try await awaitSession(id, "session \(id.rawValue) to reach a terminal state") { $0.isTerminal }
+  }
+
+  /// Returns once the session has been recorded in `state` (or any later state).
+  @discardableResult
+  func awaitSession(_ id: RunnerSessionID, state: RunnerSessionState) async throws -> RunnerSessionRecord {
+    try await awaitSession(id, "session \(id.rawValue) to reach \(state.rawValue)") { $0 == state }
+  }
+
+  /// Event-driven: subscribes to the lifecycle stream, then checks the row (so a transition that
+  /// already happened is not missed), then consumes `session.transition` events until one lands
+  /// in a state the predicate accepts. Every transition is recorded *after* its row is written.
+  @discardableResult
+  func awaitSession(
+    _ id: RunnerSessionID, _ description: String,
+    _ accept: @escaping @Sendable (RunnerSessionState) -> Bool
+  ) async throws -> RunnerSessionRecord {
+    let stream = await events.subscribe()
+    let sessions = GRDBRunnerSessionRepository(db: database)
+    if let current = try await sessions.get(id: id), accept(current.state) { return current }
+    return try await withHangGuard(description) {
+      for await event in stream
+      where event.name == LifecycleEventLog.sessionTransition && event.fields.session == id {
+        guard let raw = event.fields.to, let state = RunnerSessionState(rawValue: raw),
+              accept(state) else { continue }
+        return try #require(try await sessions.get(id: id))
+      }
+      throw WaitTimeout(description: "event stream closed while waiting for \(description)")
     }
-    return try await session(id)
+  }
+
+  /// Instance-row counterpart of `awaitSession`.
+  @discardableResult
+  func awaitInstance(_ id: InstanceID, state: InstanceState) async throws -> InstanceRecord {
+    try await awaitInstance(id, "instance \(id.rawValue) to reach \(state.rawValue)") { $0 == state }
+  }
+
+  @discardableResult
+  func awaitInstance(
+    _ id: InstanceID, _ description: String,
+    _ accept: @escaping @Sendable (InstanceState) -> Bool
+  ) async throws -> InstanceRecord {
+    let stream = await events.subscribe()
+    if let current = try await instanceRows.get(id: id), accept(current.state) { return current }
+    let rows = instanceRows
+    return try await withHangGuard(description) {
+      for await event in stream
+      where event.name == LifecycleEventLog.instanceTransition && event.fields.instance == id {
+        guard let raw = event.fields.to, let state = InstanceState(rawValue: raw), accept(state)
+        else { continue }
+        return try #require(try await rows.get(id: id))
+      }
+      throw WaitTimeout(description: "event stream closed while waiting for \(description)")
+    }
   }
 
   /// Marks the scope healthy the way `config.apply` would, without a live probe.

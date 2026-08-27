@@ -35,6 +35,9 @@ struct M2Harness {
   let scopeHealth: ScopeHealthMonitor
   let runnerVersions: RunnerVersionMonitor
   let runners: RunnerSessionManager
+  /// The lifecycle event stream every manager records into. Tests wait on transitions through
+  /// `events.subscribe()` (see `awaitSession`/`awaitInstance`) instead of polling the database.
+  let events: LifecycleEventLog
   /// One registry shared by every manager the harness builds, so a test can assert on what the
   /// lifecycle actually observed.
   let metrics = MetricRegistry()
@@ -146,6 +149,10 @@ struct M2Harness {
       summaries: GRDBJobSummaryRepository(db: database),
       operations: GRDBOperationRepository(db: database), instances: instances, gateway: gateway,
       tuning: sessionTuning)
+    try FileManager.default.createDirectory(at: paths.logsDir, withIntermediateDirectories: true)
+    events = try LifecycleEventLog(url: paths.eventsLogFile, hostId: hostId)
+    await instances.attachEventLog(events)
+    await runners.attachEventLog(events)
   }
 
   func cleanup() async {
@@ -161,6 +168,7 @@ struct M2Harness {
     // servers, which each own a listening unix socket and a background accept thread. Stop those
     // explicitly, and before the temp tree goes away, so nothing is still touching it.
     await launcher.stopAll()
+    await events.close()
     tree.remove()
   }
 
@@ -321,8 +329,16 @@ func withHarness(
   await harness.cleanup()
 }
 
-/// Bounded poll for an observable condition. Preferred over a fixed sleep: the test fails with a
-/// clear message instead of flaking when the machine is slow.
+/// Thrown when a wait gives up. Throwing (rather than recording an issue and returning) stops the
+/// test at the wait itself instead of letting it continue with a stale record and pile up
+/// follow-on failures that hide the real one.
+struct WaitTimeout: Error, CustomStringConvertible {
+  let description: String
+}
+
+/// Bounded poll for an observable condition that has no lifecycle event to wait on (HTTP
+/// requests seen by a fake, call counts, files). Lifecycle *state* waits go through
+/// `M2Harness.awaitSession`/`awaitInstance`, which are event-driven.
 func waitUntil(
   _ description: String, attempts: Int = 400, interval: Duration = .milliseconds(10),
   _ condition: @Sendable () async throws -> Bool
@@ -331,5 +347,26 @@ func waitUntil(
     if try await condition() { return }
     try await Task.sleep(for: interval)
   }
-  Issue.record("timed out waiting for \(description)")
+  throw WaitTimeout(description: "timed out waiting for \(description)")
+}
+
+/// Hang guard around an event-driven wait. This is not a race margin: the wait itself completes
+/// the instant the transition is recorded, and the bound only exists so a lifecycle that never
+/// gets there fails the test instead of hanging the suite.
+func withHangGuard<T: Sendable>(
+  _ description: String, limit: Duration = .seconds(30),
+  _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+  try await withThrowingTaskGroup(of: T.self) { group in
+    group.addTask { try await body() }
+    group.addTask {
+      try await Task.sleep(for: limit)
+      throw WaitTimeout(description: "timed out waiting for \(description)")
+    }
+    guard let first = try await group.next() else {
+      throw WaitTimeout(description: "no result while waiting for \(description)")
+    }
+    group.cancelAll()
+    return first
+  }
 }

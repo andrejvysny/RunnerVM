@@ -237,9 +237,10 @@ import Testing
       script.runnerStatus = RunnerStatus(state: .busy, pid: 4_242)
       let (instance, agent) = try await harness.idleInstance(script: script)
       let session = try await harness.runners.startSession(instanceId: instance.id)
-      try await waitUntil("the job to start") {
-        try await harness.session(session.id).state == .jobRunning
-      }
+      // The precondition is the *VM* being under a job: the instance row is advanced to `busy`
+      // before the session row is marked `jobRunning`, and this waits on the former.
+      try await harness.awaitInstance(instance.id, state: .busy)
+      try await harness.awaitSession(session.id, state: .jobRunning)
 
       let tainted = try await harness.instances.taint(id: instance.id, reason: "OPERATOR")
 

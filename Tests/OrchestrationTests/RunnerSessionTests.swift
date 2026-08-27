@@ -182,9 +182,7 @@ import Testing
       let (instance, agent) = try await harness.idleInstance(script: script)
 
       let session = try await harness.runners.startSession(instanceId: instance.id)
-      try await waitUntil("the job to start") {
-        try await harness.session(session.id).state == .jobRunning
-      }
+      try await harness.awaitSession(session.id, state: .jobRunning)
 
       await harness.instances.handleWorkerDisconnect(id: instance.id)
 
@@ -212,8 +210,10 @@ import Testing
 
       let session = try await harness.runners.startSession(instanceId: instance.id)
       try await harness.awaitTerminal(session.id)
-      try await waitUntil("the removal attempt to be recorded") {
-        try await harness.operations().contains { $0.kind == "remove-runner" }
+      // The row is inserted before the DELETE goes out and closed after the reply lands, so wait
+      // for the attempt to have *failed*, not merely to exist.
+      try await waitUntil("the removal attempt to be recorded as failed") {
+        try await harness.operations().contains { $0.kind == "remove-runner" && $0.state == .failed }
       }
       let queued = try #require(
         try await harness.operations().first { $0.kind == "remove-runner" })

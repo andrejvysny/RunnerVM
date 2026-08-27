@@ -41,10 +41,17 @@ public actor LifecycleEventLog {
     }
   }
 
+  /// One recorded transition, as handed to in-process subscribers.
+  public struct Event: Sendable {
+    public let name: String
+    public let fields: Fields
+  }
+
   private let hostId: HostID
   private let sink: RotatingFileSink
   private let redactor: Redactor
   private let now: @Sendable () -> Date
+  private var subscribers: [UUID: AsyncStream<Event>.Continuation] = [:]
 
   /// Throws when the file cannot be opened, so wiring can fall back to "no event stream" and log
   /// why instead of silently producing nothing.
@@ -58,7 +65,27 @@ public actor LifecycleEventLog {
     self.now = now
   }
 
+  /// In-process fan-out of every recorded event, delivered after the transition it describes has
+  /// been persisted. Tests synchronise on lifecycle transitions through this instead of polling
+  /// the database on a timer; the daemon itself has no subscribers.
+  public func subscribe() -> AsyncStream<Event> {
+    let id = UUID()
+    let (stream, continuation) = AsyncStream<Event>.makeStream(bufferingPolicy: .unbounded)
+    continuation.onTermination = { [weak self] _ in
+      Task { await self?.unsubscribe(id) }
+    }
+    subscribers[id] = continuation
+    return stream
+  }
+
+  private func unsubscribe(_ id: UUID) {
+    subscribers[id] = nil
+  }
+
   public func record(_ event: String, _ fields: Fields = Fields()) {
+    for continuation in subscribers.values {
+      continuation.yield(Event(name: event, fields: fields))
+    }
     var payload: [String: Any] = [
       "ts": RFC3339.string(from: now()),
       "event": event,
@@ -82,7 +109,11 @@ public actor LifecycleEventLog {
 
   public func droppedLines() -> UInt64 { sink.droppedLines }
 
-  public func close() { sink.close() }
+  public func close() {
+    for continuation in subscribers.values { continuation.finish() }
+    subscribers.removeAll()
+    sink.close()
+  }
 }
 
 extension LifecycleEventLog {
