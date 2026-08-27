@@ -48,6 +48,7 @@ public actor GitHubHTTPClient {
   private let sleep: @Sendable (Duration) async throws -> Void
   private let random: @Sendable (ClosedRange<Double>) -> Double
   private let now: @Sendable () -> Date
+  private let observer: (any GitHubRequestObserver)?
   private let decoder = JSONDecoder()
 
   public init(
@@ -56,6 +57,7 @@ public actor GitHubHTTPClient {
     session: URLSession = .shared,
     options: Options = Options(),
     logger: Logger = Logger(component: .github),
+    observer: (any GitHubRequestObserver)? = nil,
     sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
     random: @escaping @Sendable (ClosedRange<Double>) -> Double = { Double.random(in: $0) },
     now: @escaping @Sendable () -> Date = { Date() }
@@ -65,6 +67,7 @@ public actor GitHubHTTPClient {
     self.session = session
     self.options = options
     self.logger = logger
+    self.observer = observer
     self.sleep = sleep
     self.random = random
     self.now = now
@@ -141,9 +144,11 @@ public actor GitHubHTTPClient {
     do {
       (data, response) = try await session.data(for: urlRequest)
     } catch {
+      await observer?.observe(request, outcome: .transport)
       throw Self.transportError(error)
     }
     guard let http = response as? HTTPURLResponse else {
+      await observer?.observe(request, outcome: .transport)
       throw GitHubControlError.invalidResponse(
         reason: "\(request.logDescription): response was not HTTP"
       )
@@ -151,14 +156,26 @@ public actor GitHubHTTPClient {
     let headers = GitHubHeaders(http.allHeaderFields)
     log(request, status: http.statusCode, headers: headers)
     guard (200 ..< 300).contains(http.statusCode) else {
-      throw GitHubErrorMapper.error(
+      let error = GitHubErrorMapper.error(
         status: http.statusCode, headers: headers, body: data, request: request, now: now()
       )
+      await observer?.observe(request, outcome: Self.outcome(status: http.statusCode, error: error))
+      throw error
     }
-    return try GitHubResponse(
-      value: decode(T.self, from: data, request: request), status: http.statusCode,
-      headers: headers
-    )
+    do {
+      let value = try decode(T.self, from: data, request: request)
+      await observer?.observe(request, outcome: .success)
+      return GitHubResponse(value: value, status: http.statusCode, headers: headers)
+    } catch {
+      await observer?.observe(request, outcome: .decode)
+      throw error
+    }
+  }
+
+  /// The mapper already distinguishes a rate limit from a plain 403/429; the class follows it.
+  private static func outcome(status: Int, error: any Error) -> GitHubRequestOutcome {
+    if case .rateLimited = error as? GitHubControlError { return .rateLimited }
+    return status >= 500 ? .serverError : .clientError
   }
 
   private func makeURLRequest(_ request: GitHubRequest) async throws -> URLRequest {

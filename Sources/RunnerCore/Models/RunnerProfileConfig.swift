@@ -107,6 +107,10 @@ extension ReusePolicy {
 /// Per-stage deadlines (spec §73). Expiry becomes a typed failure and triggers reconciliation.
 public struct TimeoutPolicy: Codable, Sendable, Hashable {
   public var imagePull: DurationValue
+  /// Accepted for configuration compatibility but **not enforced**: an instance disk is created
+  /// with `clonefile(2)`, a synchronous APFS metadata operation with no cancellation point, so
+  /// there is nothing a deadline could interrupt. Validation warns when it is set to anything
+  /// but the default (`PROFILE_TIMEOUT_CLONE_IGNORED`).
   public var clone: DurationValue
   public var vmBoot: DurationValue
   public var agentReady: DurationValue

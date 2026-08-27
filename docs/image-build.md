@@ -211,6 +211,25 @@ prints; `--no-wait` returns the build id immediately and `runnerctl build show <
 (`RECIPE_UNKNOWN_ARGUMENT` for anything it doesn't); `--push <ref>` publishes the sealed image to a
 registry as soon as it lands, same credential chain as `runnerctl image push`.
 
+### Build arguments are not secrets
+
+Every resolved `ARG` value is recorded in three places, none of them redacted:
+
+1. the build row (`image_builds.args_json`, shown by `runnerctl build show` under
+   `args (non-secret, recorded in provenance)`),
+2. the sealed image's provenance (`runnerctl image inspect`, `provenance.recipe.args`),
+3. the OCI config blob of anything `--push`ed or later `image push`ed — readable by everyone who
+   can pull the image.
+
+Treat `--arg` exactly like a Dockerfile `ARG`: a version pin, a feature flag, a mirror URL. Never
+pass a token, password or private key through it. Both `runnerctl` and `runnerd` refuse the
+credential shapes they can recognise outright (GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/
+`github_pat_` tokens, AWS `AKIA`/`ASIA` key ids, PEM `-----BEGIN` blocks) with
+`BUILD_ARG_LOOKS_LIKE_SECRET`; anything subtler is your responsibility. A recipe that needs a
+credential at build time (a private package mirror, a licensed toolchain) has no supported path
+today — [docs/design/build-secrets.md](design/build-secrets.md) records the `--secret` design
+that will provide one and the invariants it has to keep.
+
 ### Custom recipe with `COPY` and `.runnerignore`
 
 ```dockerfile

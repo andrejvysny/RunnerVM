@@ -79,6 +79,27 @@ struct GitHubHTTPClientTests {
 
   // MARK: - Retry (spec §52)
 
+  /// One observation per HTTP attempt, classified the way the error mapper classifies it, so
+  /// `runnervm_github_requests_total{class}` counts retries and rate limits as they happen.
+  @Test func reportsEveryAttemptToTheObserver() async throws {
+    let observer = RecordingRequestObserver()
+    try await withHarness(observer: observer) { harness in
+      harness.server.stub(.get, "/user", .error(500), .json("{\"login\":\"octocat\"}"))
+      _ = try await harness.api.whoAmI()
+      harness.server.stub(.get, "/user", .failure(.timedOut))
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+      harness.server.stub(.get, "/user", .json("{\"login\": "))
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+      harness.server.stub(.get, "/user", .error(404))
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+    }
+    let outcomes = observer.outcomes
+    #expect(outcomes.prefix(2) == [.serverError, .success])
+    #expect(outcomes.contains(.transport))
+    #expect(outcomes.contains(.decode))
+    #expect(outcomes.last == .clientError)
+  }
+
   @Test func retriesTransientServerErrorForIdempotentGET() async throws {
     try await withHarness { harness in
       harness.server.stub(.get, "/user", .error(500), .json("{\"login\":\"octocat\"}"))

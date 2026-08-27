@@ -110,7 +110,9 @@ public actor BuilderWorker {
           throw error
         }
       }
-      try? await Task.sleep(for: options.socketPollInterval)
+      // Cancellation propagates: a build that is being cancelled must not keep polling for a
+      // socket that will never matter.
+      try await Task.sleep(for: options.socketPollInterval)
     }
     throw ImageBuildError.agentUnreachable(
       reason: "vmworker published no socket at \(options.socket.lastPathComponent)")
@@ -173,13 +175,24 @@ public actor BuilderWorker {
     let payload = try? WorkerCoding.payload(LeaseRequest(ttlMs: options.leaseTTLMs))
     let deadline = options.callDeadline
     guard let client else { return Task {} }
+    let logger = logger
+    let buildId = options.buildId
     return Task {
       while !Task.isCancelled {
-        try? await Task.sleep(for: interval)
-        guard !Task.isCancelled else { return }
-        guard (try? await client.call(
-          method: WorkerMethod.lease.rawValue, payload: payload, deadline: deadline)) != nil
-        else { return }
+        // Cancellation is the normal way this loop ends (teardown cancels it); a lease RPC that
+        // fails is not, so it is logged: from here on the worker ages out on its own lease TTL.
+        do { try await Task.sleep(for: interval) } catch { return }
+        do {
+          _ = try await client.call(
+            method: WorkerMethod.lease.rawValue, payload: payload, deadline: deadline)
+        } catch {
+          logger.warning(
+            "build worker lease renewal failed; the worker will expire on its own",
+            metadata: [
+              "build_id": .string(buildId.rawValue), "error": .string(String(describing: error)),
+            ])
+          return
+        }
       }
     }
   }
@@ -194,7 +207,9 @@ public actor BuilderWorker {
   ) async -> Bool {
     for _ in 0..<attempts {
       if (try? WorkerLock.holderPID(at: lock)) ?? nil == nil { return true }
-      try? await Task.sleep(for: interval)
+      // A cancelled waiter has no proof of death: answer `false`, which every caller treats as
+      // "leave the directory alone".
+      do { try await Task.sleep(for: interval) } catch { return false }
     }
     return ((try? WorkerLock.holderPID(at: lock)) ?? nil) == nil
   }

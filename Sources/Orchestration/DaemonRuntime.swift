@@ -340,8 +340,12 @@ public actor DaemonRuntime {
     let diskPressure = DiskPressureMonitor(freeSpace: { APFSClone.freeSpace(at: stateDir) })
     // Built before the instance manager: admission grades the image's runner version through it
     // (spec §53), so the manager needs it at construction.
-    let gateway = GitHubGateway(
-      options: options.github ?? GitHubGateway.Options(paths: options.paths))
+    var gatewayOptions = options.github ?? GitHubGateway.Options(paths: options.paths)
+    // Every GitHub HTTP attempt lands in `runnervm_github_requests_total{class}` unless a test
+    // injected its own observer.
+    gatewayOptions.requestObserver =
+      gatewayOptions.requestObserver ?? MetricsGitHubRequestObserver(metrics: metrics)
+    let gateway = GitHubGateway(options: gatewayOptions)
     let runnerVersions = RunnerVersionMonitor(gateway: gateway)
     let instances = InstanceManager(
       paths: options.paths, hostId: hostId, instances: instanceRows,

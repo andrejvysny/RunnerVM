@@ -119,6 +119,10 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
   /// unverifiable; `nil` when the build is not pending. While set, the build still holds its host
   /// capacity, its base-image pin and its directory. Absent on daemons predating schema v3.
   public var recoverySince: String?
+  /// The resolved `ARG` values the build ran with. Not secrets: the same map is in the image's
+  /// provenance and in any pushed OCI config, so showing it here adds no exposure. Absent from
+  /// daemons that predate the field.
+  public var args: [String: String]?
   public var updatedAt: String
 
   public init(
@@ -131,7 +135,7 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     currentStep: Int = 0, currentInstruction: String? = nil, imageDigest: String? = nil,
     failureCode: String? = nil, failureMessage: String? = nil, createdAt: String,
     startedAt: String? = nil, finishedAt: String? = nil, recoverySince: String? = nil,
-    updatedAt: String
+    args: [String: String]? = nil, updatedAt: String
   ) {
     self.buildId = buildId
     self.name = name
@@ -165,6 +169,7 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     self.startedAt = startedAt
     self.finishedAt = finishedAt
     self.recoverySince = recoverySince
+    self.args = args
     self.updatedAt = updatedAt
   }
 }

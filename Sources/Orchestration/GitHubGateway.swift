@@ -20,6 +20,8 @@ public actor GitHubGateway {
     /// uses `ActionsScaleSetClient`; tests inject a fake so no component test reaches the preview
     /// Actions service.
     public var scaleSetPlane: (@Sendable (GitHubHTTPClient) -> any ScaleSetControlPlane)?
+    /// Receives one outcome per HTTP attempt; the daemon wires `MetricsGitHubRequestObserver`.
+    public var requestObserver: (any GitHubRequestObserver)?
 
     public init(
       paths: RunnerPaths,
@@ -27,7 +29,8 @@ public actor GitHubGateway {
       session: URLSession = .shared,
       keychain: any KeychainItemStore = SecurityKeychainStore(),
       http: GitHubHTTPClient.Options = GitHubHTTPClient.Options(),
-      scaleSetPlane: (@Sendable (GitHubHTTPClient) -> any ScaleSetControlPlane)? = nil
+      scaleSetPlane: (@Sendable (GitHubHTTPClient) -> any ScaleSetControlPlane)? = nil,
+      requestObserver: (any GitHubRequestObserver)? = nil
     ) {
       self.paths = paths
       self.baseURL = baseURL
@@ -35,6 +38,7 @@ public actor GitHubGateway {
       self.keychain = keychain
       self.http = http
       self.scaleSetPlane = scaleSetPlane
+      self.requestObserver = requestObserver
     }
   }
 
@@ -76,7 +80,7 @@ public actor GitHubGateway {
       resolved = resolution
       let client = GitHubHTTPClient(
         baseURL: options.baseURL, credentials: resolution.provider, session: options.session,
-        options: options.http, logger: logger)
+        options: options.http, logger: logger, observer: options.requestObserver)
       plane = RESTControlPlane(client: client)
       scaleSets = makeScaleSetPlane(client)
       cached = Self.unknown(auth: config.github.auth, location: resolution.location)

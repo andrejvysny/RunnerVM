@@ -31,7 +31,13 @@ extension Image {
     @Option(name: .long, help: "Local name to alias the image under once the build succeeds.")
     var name: String?
 
-    @Option(name: .customLong("arg"), help: "KEY=VALUE build argument; may be given more than once.")
+    @Option(
+      name: .customLong("arg"),
+      help: ArgumentHelp(
+        "KEY=VALUE build argument; may be given more than once.",
+        discussion: "Build arguments are NOT secrets: every value is stored in the build record, "
+          + "written into the image's provenance metadata and pushed inside the OCI config of "
+          + "`--push`. Never pass tokens, passwords or keys here."))
     var args: [String] = []
 
     @Option(name: .long, help: "Build context directory. Default: the recipe's own directory.")
@@ -63,6 +69,15 @@ extension Image {
     func validate() throws {
       for pair in args where !pair.contains("=") {
         throw ValidationError("--arg must be KEY=VALUE (got '\(pair)')")
+      }
+      // The daemon refuses these too (`BUILD_ARG_LOOKS_LIKE_SECRET`); failing here saves the
+      // round trip and keeps the value out of the daemon's request log.
+      if let key = BuildArgumentPolicy.firstSecretLookingArgument(in: Self.parseArgs(args)) {
+        throw ValidationError(
+          "BUILD_ARG_LOOKS_LIKE_SECRET: --arg \(key) looks like a credential. Build arguments "
+            + "are recorded in the build row, the image provenance and any pushed OCI config; "
+            + "they are not secrets. Remove it (see docs/image-build.md, \"Build arguments are "
+            + "not secrets\").")
       }
     }
 

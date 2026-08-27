@@ -141,6 +141,12 @@ extension BuildCommand {
     if let since = build.recoverySince {
       rows.append(("Recovery pending since", since))
     }
+    // Labelled as non-secret on purpose: the same values sit in the image provenance and in any
+    // pushed OCI config, and an operator reading this table should know that.
+    if let args = build.args, !args.isEmpty {
+      let rendered = args.keys.sorted().map { "\($0)=\(args[$0] ?? "")" }.joined(separator: " ")
+      rows.append(("args (non-secret, recorded in provenance)", rendered))
+    }
     return rows
   }
 

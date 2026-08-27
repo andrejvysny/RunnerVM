@@ -26,6 +26,30 @@ struct ImageBuilderAdmissionTests {
 
   // MARK: - Concurrency and capacity
 
+  /// Build arguments are persisted, written into provenance and pushed with the image; a value
+  /// shaped like a credential is refused before any of that can happen.
+  @Test func aSecretLookingBuildArgumentIsRefusedBeforeAnythingIsPersisted() async throws {
+    try await withBuildHarness { harness in
+      try await harness.base.importLinuxImage()
+      let recipe = try harness.writeRecipe("""
+        ARG TOKEN=
+        FROM test-linux
+        RUN /bin/echo "$TOKEN"
+
+        """)
+      let request = ImageBuildRequest(
+        recipePath: recipe.path(percentEncoded: false), name: "leaky",
+        args: ["TOKEN": "ghp_0123456789abcdefghijklmnopqrstuvwxyz"])
+
+      let error = await #expect(throws: ImageBuildError.self) {
+        _ = try await harness.builder.start(request)
+      }
+      #expect(error?.code == "BUILD_ARG_LOOKS_LIKE_SECRET")
+      #expect(try await harness.buildRows.list(states: nil).isEmpty)
+      #expect(try await harness.base.imageRows.pins(ownerType: .build).isEmpty)
+    }
+  }
+
   @Test func aSecondBuildIsRefusedWhileOneIsRunning() async throws {
     try await withBuildHarness { harness in
       try await harness.base.importLinuxImage()

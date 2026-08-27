@@ -29,6 +29,9 @@ public enum ImageBuildError: RunnerError {
   /// A `build cancel` on a row this daemon does not own, whose builder worker could not be proven
   /// dead. Releasing anything here would race a VM that is still writing (B8).
   case buildWorkerUnverifiable(buildId: String, reason: String)
+  /// A build argument whose value has the shape of a credential. Arguments are persisted,
+  /// written into provenance and pushed with the image; they are never secrets.
+  case argumentLooksLikeSecret(key: String)
   case notFound(id: String)
   case nameRequired
   case atMaxConcurrent(limit: Int)
@@ -66,6 +69,7 @@ public enum ImageBuildError: RunnerError {
     case .interrupted: "BUILD_INTERRUPTED"
     case .recoveryAbandoned: "BUILD_RECOVERY_ABANDONED"
     case .buildWorkerUnverifiable: "BUILD_WORKER_UNVERIFIABLE"
+    case .argumentLooksLikeSecret: "BUILD_ARG_LOOKS_LIKE_SECRET"
     case .notFound: "BUILD_NOT_FOUND"
     case .nameRequired: "BUILD_NAME_REQUIRED"
     case .atMaxConcurrent: "BUILD_AT_MAX_CONCURRENT"
@@ -113,6 +117,9 @@ public enum ImageBuildError: RunnerError {
     case let .buildWorkerUnverifiable(buildId, reason):
       "build \(buildId) still has a builder worker that cannot be proven dead (\(reason)); "
         + "nothing was released -- check `runnerd`'s log and the build's vmworker before retrying"
+    case let .argumentLooksLikeSecret(key):
+      "build argument \(key) looks like a credential; build arguments are recorded in the build "
+        + "row, the image provenance and any pushed OCI config and are never secrets"
     case let .notFound(id): "build \(id) not found"
     case .nameRequired: "a build name is required to push or alias the result"
     case let .atMaxConcurrent(limit): "at most \(limit) build(s) may run concurrently"
@@ -139,7 +146,7 @@ public enum ImageBuildError: RunnerError {
          .baseNoGuestAgent, .guestAgentMissing, .stepFailed, .stepOutputTooLarge, .imageNotReady,
          .sealFailed, .cancelled, .notFound, .nameRequired, .toolMissing, .tooManySteps,
          .runnerVersionUnresolved, .runnerDigestUnavailable, .runnerDigestMismatch,
-         .notCancellable, .unavailable:
+         .notCancellable, .unavailable, .argumentLooksLikeSecret:
       false
     }
   }

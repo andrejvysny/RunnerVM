@@ -186,6 +186,20 @@ import Testing
     #expect(!Self.issues { $0.lifecycle = .ephemeral }.contains(code: "PROFILE_REUSABLE_SINGLE_TENANT"))
   }
 
+  /// `timeouts.clone` is parsed for compatibility but has nothing to enforce: `clonefile(2)` is
+  /// synchronous. Setting it is a configuration smell, not an error.
+  @Test func warnsWhenTheUnenforcedCloneTimeoutIsSet() throws {
+    let issues = Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.clone = .minutes(1)
+      $0.timeouts = timeouts
+    }
+    #expect(try #require(issues.first(code: "PROFILE_TIMEOUT_CLONE_IGNORED")).severity == .warning)
+    #expect(!issues.hasErrors)
+    #expect(!Self.issues { $0.timeouts = TimeoutPolicy.default }
+      .contains(code: "PROFILE_TIMEOUT_CLONE_IGNORED"))
+  }
+
   @Test func rejectsDegenerateReuseBounds() {
     #expect(Self.issues {
       $0.lifecycle = .reusable

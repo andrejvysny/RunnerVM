@@ -42,7 +42,17 @@ enum BuildMapping {
       startedAt: record.startedAt.map { RFC3339.string(from: $0.date) },
       finishedAt: record.finishedAt.map { RFC3339.string(from: $0.date) },
       recoverySince: record.recoverySince.map { RFC3339.string(from: $0.date) },
+      args: args(record.argsJson),
       updatedAt: RFC3339.string(from: record.updatedAt.date))
+  }
+
+  /// `args_json` is written by `argsJSON` below; anything else in the column is treated as
+  /// "no arguments" rather than failing the whole `build show`.
+  static func args(_ json: String) -> [String: String]? {
+    guard let data = json.data(using: .utf8),
+          let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+    else { return nil }
+    return decoded
   }
 
   /// The `from_kind`/`from_reference` pair a `FROM` line persists as. `cloudImage` keeps the

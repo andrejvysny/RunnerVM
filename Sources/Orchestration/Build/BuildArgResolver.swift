@@ -41,6 +41,11 @@ public struct BuildArgResolver: Sendable {
   public func resolve(
     recipe: Recipe, requested: [String: String]
   ) async throws -> ResolvedBuildArgs {
+    // Fail closed before anything is persisted: the resolved map lands in `args_json`, in the
+    // image provenance and in the pushed OCI config, none of which is redacted.
+    if let key = BuildArgumentPolicy.firstSecretLookingArgument(in: requested) {
+      throw ImageBuildError.argumentLooksLikeSecret(key: key)
+    }
     var args = requested
     let declared = Set(recipe.declaredArgs)
     guard declared.contains(Self.versionArg) || declared.contains(Self.digestArg) else {

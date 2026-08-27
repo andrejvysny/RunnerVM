@@ -162,8 +162,18 @@ extension RunnerProfileConfig {
 
   func validateTimeouts(path: String) -> [ConfigurationIssue] {
     guard let timeouts else { return [] }
-    return timeouts.all.filter { !$0.value.isPositive }.map {
-      .error("PROFILE_TIMEOUT_NOT_POSITIVE", "\(path).timeouts.\($0.name)", "must be positive")
+    var issues = timeouts.all.filter { !$0.value.isPositive }.map {
+      ConfigurationIssue.error(
+        "PROFILE_TIMEOUT_NOT_POSITIVE", "\(path).timeouts.\($0.name)", "must be positive")
     }
+    // `clone` is parsed but never applied: `clonefile(2)` is synchronous and uninterruptible, and
+    // faking a deadline around it would only ever report a timeout after the work was done.
+    if timeouts.clone != TimeoutPolicy.default.clone {
+      issues.append(.warning(
+        "PROFILE_TIMEOUT_CLONE_IGNORED", "\(path).timeouts.clone",
+        "not enforced: instance disks are created with clonefile(2), which has no cancellation "
+          + "point; remove the setting"))
+    }
+    return issues
   }
 }

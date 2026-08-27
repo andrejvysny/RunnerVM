@@ -48,6 +48,7 @@ func withHarness(
   policy: RetryPolicy = Fixture.policy,
   maxRetryAfter: Duration = .seconds(120),
   now: Date = Fixture.now,
+  observer: (any GitHubRequestObserver)? = nil,
   _ body: (Harness) async throws -> Void
 ) async throws {
   let server = FakeGitHubServer()
@@ -58,6 +59,7 @@ func withHarness(
     credentials: StaticCredentialProvider(token: token),
     session: server.makeSession(),
     options: GitHubHTTPClient.Options(retryPolicy: policy, maxRetryAfter: maxRetryAfter),
+    observer: observer,
     sleep: { sleeps.record($0) },
     // Pin jitter to its midpoint so the expected schedule is exact.
     random: { _ in 1.0 },
@@ -66,6 +68,17 @@ func withHarness(
   try await body(
     Harness(server: server, client: client, api: GitHubRunnersAPI(client: client), sleeps: sleeps)
   )
+}
+
+/// Collects `GitHubRequestObserver` outcomes in call order.
+final class RecordingRequestObserver: GitHubRequestObserver, Sendable {
+  private let recorded = Mutex<[GitHubRequestOutcome]>([])
+
+  var outcomes: [GitHubRequestOutcome] { recorded.withLock { $0 } }
+
+  func observe(_ request: GitHubRequest, outcome: GitHubRequestOutcome) async {
+    recorded.withLock { $0.append(outcome) }
+  }
 }
 
 func errorClass(of error: any Error) -> GitHubErrorClass? {

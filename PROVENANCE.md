@@ -65,6 +65,20 @@ Statuses: `new` (RunnerVM original), `derived` (adapted from Tart, header requir
 | Sources/OCIRegistry/Reference/OCIReference.swift | new | — (wraps `RunnerCore.ImageReference`; tart's ANTLR grammar deliberately not carried) |
 | Sources/OCIRegistry/{OCIRegistry,Client/RegistryError,Client/RegistryRequest,Layerizer/NVRAMLayer,Layerizer/TransferProgress,Auth/RegistryCredential}.swift | new | — |
 | Sources/OCIRegistry/Testing/FakeRegistry*.swift | new | test double; behaviour mirrors the OCI Distribution v2 spec and GHCR's 4 MB upload-chunk cap |
+| Sources/ImageStore/{BuildStore,QCOW2Header,QCOW2Reader,VMDirectoryStaging}.swift | new | qcow2 reader written from the qcow2 on-disk format specification; no code from lima-vm/go-qcow2reader (which `scripts/build-ubuntu-image.sh` invokes as a tool, unmodified) |
+| Sources/ImageBuild/**, Sources/Orchestration/**, Sources/Scheduler/**, Sources/Persistence/**, Sources/DaemonAPI/**, Sources/RPC/**, Sources/WorkerProtocol/**, Sources/GuestControl/**, Sources/ConfigLoader/**, Sources/Metrics/**, Sources/RunnerLogging/** | new | — |
+| Tests/** | new | — |
+| scripts/*.sh, packaging/** | new | — |
 
-Before public distribution: audit this table, confirm each `derived` file's FSL change date, and
-re-evaluate relicensing. Not legal advice.
+## Audit record
+
+- **2026-08-27** — every `derived` row above was checked mechanically: each listed file exists
+  and carries the required `Derived from openai/tart@16d186c … FSL-1.1-ALv2` header (19/19);
+  every `Sources/GitHubControl/ScaleSet/*.swift` file carries the `actions/scaleset@v0.4.0 (MIT)`
+  port header (7/7). Modules added since the table was first written (image builder, persistence,
+  scheduler, RPC, guest control, metrics, logging) were reviewed and recorded as `new`. FSL-1.1-ALv2
+  converts to Apache-2.0 two years after each Tart release's change date (v2.36.0 was tagged
+  2025-05; converted 2027-05) — until then the derived files remain under FSL terms.
+  **Open before public binary distribution:** an attribution `NOTICE` entry per third-party SwiftPM
+  and Go dependency (GRDB, swift-nio, swift-argument-parser, swift-log, Yams, lima-vm tooling),
+  and a legal review of the FSL "competing use" clause for RunnerVM's use case. Not legal advice.
