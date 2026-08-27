@@ -139,15 +139,23 @@ struct ActionsRetry: Sendable {
   func runTokenExchange<T: Sendable>(
     _ body: @escaping @Sendable () async throws -> T
   ) async throws -> T {
-    try await policy.run(
+    let logger = logger
+    return try await policy.run(
       sleep: sleep, random: random,
       retryAfter: { ($0 as? GitHubControlError)?.retryAfter },
       shouldRetry: { error in
         guard let error = error as? GitHubControlError else { return false }
+        let retry: Bool
         switch error.errorClass {
-        case .authentication, .authorization: return true
-        default: return error.errorClass.retryable
+        case .authentication, .authorization: retry = true
+        default: retry = error.errorClass.retryable
         }
+        if retry {
+          logger.warning(
+            "Actions token exchange failed; retrying",
+            metadata: ["error": .string(String(describing: error))])
+        }
+        return retry
       },
       body
     )
