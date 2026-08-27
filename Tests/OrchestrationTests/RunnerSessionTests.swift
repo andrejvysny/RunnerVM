@@ -40,15 +40,15 @@ import Testing
       #expect(terminal.jobStartedAt != nil)
       #expect(terminal.jobFinishedAt != nil)
 
+      // Spec §48 step 22: an ephemeral instance is stopped and its directory removed. The
+      // terminal transition is recorded before `finish` writes the summary and tears the VM down,
+      // so the deletion is the sync point for everything `finish` does after the row.
+      try await harness.awaitInstance(instance.id, state: .deleted)
+
       // Spec §48 step 21: one job summary row, timed from the instance and session timestamps.
       let summaries = try await harness.jobSummaries()
       #expect(summaries.count == 1)
       #expect(summaries.first?.runnerSessionId == session.id)
-
-      // Spec §48 step 22: an ephemeral instance is stopped and its directory removed.
-      try await waitUntil("the ephemeral instance to be deleted") {
-        try await harness.record(instance.id).state == .deleted
-      }
       // A JIT runner is single-use and GitHub drops the registration itself, so the happy path
       // must not issue a DELETE.
       #expect(harness.github.requests(.delete, M2Harness.runnerPath).isEmpty)

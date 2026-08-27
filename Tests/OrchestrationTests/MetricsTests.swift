@@ -77,6 +77,9 @@ import Testing
         script: Self.script([.online, .busy, .exited]))
       let session = try await harness.runners.startSession(instanceId: instance.id)
       try await harness.awaitTerminal(session.id)
+      // The counter is incremented after the terminal row is written and before the ephemeral VM
+      // is torn down, so the deletion is the sync point.
+      try await harness.awaitInstance(instance.id, state: .deleted)
 
       let response = try await harness.service().metricsSnapshot(
         MetricsSnapshotRequest(format: .prometheus))
