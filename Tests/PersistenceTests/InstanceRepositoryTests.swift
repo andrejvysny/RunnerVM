@@ -161,3 +161,43 @@ import Testing
     #expect(Set(all.map(\.id)) == Set([a.id, b.id]))
   }
 }
+
+/// `image.delete` purges the deleted instances' tombstones; those tombstones are referenced by
+/// their runner sessions and job summaries (seen live: `DB_FOREIGN_KEY` on the first delete of an
+/// image that had run a job).
+@Suite struct InstancePurgeTests {
+  @Test func purgingADeletedInstanceTakesItsTerminalSessionsAndSummariesAlong() async throws {
+    let db = try RunnerDatabase.inMemory()
+    let (hostId, _, profileId, digest) = try await Fixtures.seedProfileChain(db: db)
+    let instances = GRDBInstanceRepository(db: db)
+    let sessions = GRDBRunnerSessionRepository(db: db)
+    let summaries = GRDBJobSummaryRepository(db: db)
+
+    var gone = Fixtures.instance(profileId: profileId, imageDigest: digest, hostId: hostId)
+    gone.state = .deleted
+    try await instances.insert(gone)
+    var finished = Fixtures.runnerSession(instanceId: gone.id, profileId: profileId)
+    finished.state = .completed
+    try await sessions.insert(finished)
+    try await summaries.insert(
+      JobSummaryRecord(
+        id: UUID().uuidString, runnerSessionId: finished.id, cloneDurationMs: 1, bootDurationMs: 2,
+        agentReadyDurationMs: 3, jobDurationMs: 4, createdAt: .now))
+
+    // A deleted instance that still carries a non-terminal session is a bug to surface, not
+    // history to discard: it stays, and so does the image.
+    var suspicious = Fixtures.instance(profileId: profileId, imageDigest: digest, hostId: hostId)
+    suspicious.state = .deleted
+    try await instances.insert(suspicious)
+    var live = Fixtures.runnerSession(instanceId: suspicious.id, profileId: profileId)
+    live.state = .jobRunning
+    try await sessions.insert(live)
+
+    #expect(try await instances.purgeDeleted(imageDigest: digest) == 1)
+    #expect(try await instances.get(id: gone.id) == nil)
+    #expect(try await sessions.get(id: finished.id) == nil)
+    #expect(try await summaries.list(session: finished.id).isEmpty)
+    #expect(try await instances.get(id: suspicious.id) != nil)
+    #expect(try await sessions.get(id: live.id) != nil)
+  }
+}

@@ -149,13 +149,38 @@ public final class GRDBInstanceRepository: InstanceRepository, Sendable {
     }
   }
 
+  /// A deleted instance's tombstone is what blocks `image.delete` (`instances.image_digest` is a
+  /// foreign key), and the tombstone is itself referenced by its `runner_sessions` rows and their
+  /// `job_summaries` (seen live: deleting an image that had run one job failed with
+  /// `DB_FOREIGN_KEY`). Purging takes the whole chain in one transaction, but only for instances
+  /// whose sessions are all terminal -- a live session on a deleted instance is a bug to surface,
+  /// not history to discard.
   public func purgeDeleted(imageDigest: ImageDigest) async throws -> Int {
-    try await db.write { db in
+    let terminal = RunnerSessionState.allCases.filter(\.isTerminal).map(\.rawValue)
+    return try await db.write { db in
       try DatabaseErrorMapper.run(entity: "instances") {
-        try InstanceRecord
-          .filter(Column("image_digest") == imageDigest.rawValue)
-          .filter(Column("state") == InstanceState.deleted.rawValue)
-          .deleteAll(db)
+        let placeholders = terminal.map { _ in "?" }.joined(separator: ", ")
+        let ids = try String.fetchAll(
+          db,
+          sql: """
+            SELECT id FROM instances
+            WHERE image_digest = ? AND state = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM runner_sessions s
+                WHERE s.instance_id = instances.id AND s.state NOT IN (\(placeholders)))
+            """,
+          arguments: StatementArguments([imageDigest.rawValue, InstanceState.deleted.rawValue] + terminal))
+        for id in ids {
+          try db.execute(
+            sql: """
+              DELETE FROM job_summaries WHERE runner_session_id IN
+                (SELECT id FROM runner_sessions WHERE instance_id = ?)
+              """,
+            arguments: [id])
+          try db.execute(sql: "DELETE FROM runner_sessions WHERE instance_id = ?", arguments: [id])
+          try db.execute(sql: "DELETE FROM instances WHERE id = ?", arguments: [id])
+        }
+        return ids.count
       }
     }
   }

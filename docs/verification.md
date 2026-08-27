@@ -169,7 +169,28 @@ restart left an `interrupted` instance whose vmworker kept running (capacity hel
 retention window); the test workflow's `long` job ignored the runner's cancellation for up to
 5 min because bash defers SIGINT while a foreground `sleep` runs. All three fixed (`04f992c`).
 
-Run 2 results: _(filled from `e2e-report-run2.json` below)_.
+Runs 2–5 (after the fixes; `runnerd --foreground` on this host, scale set `runnervm-ubuntu-24`,
+image `ubuntu-24` `sha256:6bd52891…` built with the new guest agent):
+
+| Scenario | Result | Notes |
+| --- | --- | --- |
+| `success` | pass (35 s) | |
+| `cancel-before-assignment` | pass (35 s) | drain/resume round trip |
+| `cancel-during-job` | pass (90 s) | runner cancels within seconds once the job's `sleep` is signal-friendly |
+| `restart-while-booting` | pass (44 s) | |
+| `restart-while-runner-starts` | pass (44 s) | job completed once after the restart |
+| `restart-during-job` | pass (317 s) | daemon log: `runner session recovered … from jobRunning outcome reattached` |
+| `restart-during-job-sigkill` | pass (726 s) | `kill -9 runnerd`, vmworker untouched; one run attempt, one job; session terminal; registration gone; VM gone; capacity baseline |
+| `redelivery` | pass (29 s) | one runner session, one instance (before `45192b3` the first pass after a restart reaped the VM on unconfirmed demand and booted a second one) |
+| `scaleset-reconnect` | pass (34 s) | `debug.scaleSetReconnect` → new session generation, job completed once |
+| `concurrent` | pass (85 s) | 4 jobs, peak VMs ≤ 3 |
+| `queue-overflow` | pass (108 s) | 6 jobs, GitHub never assigned more than the advertised 3 |
+| `long-job` | **not run** | skipped on the operator's instruction (the long-running path is covered by the 65-min run on 2026-08-26 and by `restart-during-job`) |
+| GitHub API timeout / 429 / 5xx; JIT issued but guest startup fails | integration (fakes) | `GitHubFaultTests`, `RunnerSessionTests` — cannot be induced on GitHub.com |
+
+Run 1 also found three script defects (org-runner lookup on a user login, `jq fromdateiso8601` on
+fractional timestamps, skipped workflow jobs counted as executions) and the 65-minute `long` job
+being dispatched by scenarios with a 30-minute budget; all fixed in the driver.
 
 ## Not yet verified (needs hardware time / dedicated org)
 

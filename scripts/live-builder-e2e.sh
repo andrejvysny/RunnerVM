@@ -63,6 +63,7 @@ REPORT_TMP=""
 # depending on state the earlier ones captured -- the same shape run_steps/record_result already
 # assumes for pass/fail bookkeeping (FAIL_COUNT) below.
 IMAGE_NAME=""
+IMAGE_NAME_OVERRIDE=""
 IMAGE_DIGEST=""
 
 RUNNERCTL_BIN="$(find_runnerctl)"
@@ -88,6 +89,8 @@ Required options:
 Options:
   --registry <ref>        OCI repository for the push/pull leg, e.g. ghcr.io/<owner>/runnervm-e2e.
                            Required unless --skip-oci.
+  --name <alias>          Local image alias to build under (default: e2e-<timestamp>), so a
+                           --config document can already point the profile at it.
   --config <path>         Configuration YAML to `runnerctl config apply` before checking the
                            profile's image: (optional -- the script never edits configuration
                            itself, only applies a document you supply).
@@ -129,6 +132,7 @@ parse_args() {
     --recipe) RECIPE="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --registry) REGISTRY="$2"; shift 2 ;;
+    --name) IMAGE_NAME_OVERRIDE="$2"; shift 2 ;;
     --config) CONFIG_PATH="$2"; shift 2 ;;
     --skip-oci) SKIP_OCI=1; shift ;;
     --state-dir) STATE_DIR="$2"; shift 2 ;;
@@ -376,7 +380,8 @@ main() {
   validate_args
   require_tools
   require_env
-  IMAGE_NAME="e2e-$(date -u +%Y%m%dT%H%M%SZ)"
+  # A fixed --name lets the profile configuration handed to --config name the alias up front.
+  IMAGE_NAME="${IMAGE_NAME_OVERRIDE:-e2e-$(date -u +%Y%m%dT%H%M%SZ)}"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "dry-run: no live checks, no live calls; profile=$PROFILE owner=$OWNER repo=$REPO"
     print_plan

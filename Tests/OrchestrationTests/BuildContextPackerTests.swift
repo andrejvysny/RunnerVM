@@ -96,16 +96,23 @@ struct BuildContextPackerTests {
     for case let url as URL in walker {
       let relative = url.relativePath
       guard !relative.isEmpty else { continue }
+      // `.producesRelativePathURLs` URLs answer `path`/`deletingLastPathComponent` differently
+      // across Foundation versions (macOS 15 gives the relative part, macOS 26 the absolute
+      // path); every filesystem call below goes through the absolute form so the CI toolchain
+      // and the dev host see the same file.
+      let absolute = url.absoluteURL.standardizedFileURL
       let values = try url.resourceValues(forKeys: keys)
       let isSymlink = values.isSymbolicLink == true
       let isDirectory = values.isDirectory == true
-      assertContained(url, isSymlink: isSymlink, isDirectory: isDirectory, canonicalRoot: canonicalRoot)
+      assertContained(
+        absolute, relative: relative, isSymlink: isSymlink, isDirectory: isDirectory,
+        canonicalRoot: canonicalRoot)
       entries.append(ExtractedEntry(
         relativePath: relative, isDirectory: isDirectory, isSymlink: isSymlink,
         linkTarget: isSymlink
-          ? try? FileManager.default.destinationOfSymbolicLink(atPath: url.path(percentEncoded: false))
+          ? try? FileManager.default.destinationOfSymbolicLink(atPath: Self.plainPath(absolute))
           : nil,
-        contents: (!isDirectory && !isSymlink) ? try? Data(contentsOf: url) : nil))
+        contents: (!isDirectory && !isSymlink) ? try? Data(contentsOf: absolute) : nil))
     }
     return entries
   }
@@ -113,12 +120,22 @@ struct BuildContextPackerTests {
   /// Resolves everything except a symlink's own final component (following that would resolve
   /// through to wherever the link points, which is not the question here) and asserts it stayed
   /// under the canonical extraction root.
-  private func assertContained(_ url: URL, isSymlink: Bool, isDirectory: Bool, canonicalRoot: String) {
-    let ancestor = (isSymlink || !isDirectory) ? url.deletingLastPathComponent() : url
+  /// A symlink to a directory is enumerated with a trailing slash, and `readlink` on `link/`
+  /// resolves through the link instead of reading it.
+  private static func plainPath(_ url: URL) -> String {
+    var path = url.path(percentEncoded: false)
+    while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+    return path
+  }
+
+  private func assertContained(
+    _ absolute: URL, relative: String, isSymlink: Bool, isDirectory: Bool, canonicalRoot: String
+  ) {
+    let ancestor = (isSymlink || !isDirectory) ? absolute.deletingLastPathComponent() : absolute
     let resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false)
     #expect(
       resolved == canonicalRoot || resolved.hasPrefix(canonicalRoot + "/"),
-      "escaped the extraction root: \(url.relativePath) resolved under \(resolved)")
+      "escaped the extraction root: \(relative) resolved under \(resolved)")
   }
 
   private func listMembers(_ tar: URL) async throws -> ProcessResult {
