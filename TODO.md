@@ -195,15 +195,15 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
 - [ ] M14/M15 follow-ups: `image list` NAME should prefer the alias (rebuilds show two rows named alike); `build show` lacks an `args` row (`BuildInfoDTO` omits `argsJson`); `config validate` only flags an agentless profile image once the *tag* has been resolved locally (canonical digest row only); RPC-level stream backpressure (Codex B9 follow-up); `scripts/install.sh` is 572 lines; consider `swiftformat .` as a standalone commit before enabling lint.
 
 ## Production hardening pass (2026-08-27) — plan `~/.claude/plans/runnervm-production-hardening-indexed-sun.md`
-- [ ] WP0 deterministic green CI: `interrupt` row-before-guest, instance-row-before-session-row in `markOnline`/`markBusy`, throwing `waitUntil`, event-driven `awaitSession`/`awaitInstance` over `LifecycleEventLog.subscribe()`; 100× flaky suites
-- [ ] WP1 runner-session recovery after restart (`RunnerSessionRecovery.swift`, `RunnerSessionReconciler`, startup call) + tests + live `restart-during-job-sigkill`
-- [ ] WP2 build recovery keeps capacity while worker death unproven (`OrphanVerdict`, `recovery_since` v3, hard bound, cancel path)
-- [ ] WP3 `BuildContextPacker` NUL-delimited `tar --null -T` + adversarial archive-content tests
-- [ ] WP4 reusable guard (`reuse.acknowledgeSharedHost`) + guest-agent HOME pristine snapshot/restore + sentinel tests
-- [ ] WP5 bounded base-image cache (`build.cache.{maxBytes,minimumHostFreeBytes,maxEntries}`, LRU, atomic commit, metrics)
-- [ ] WP6 ARG = non-secret docs/help/refusal; `docs/design/build-secrets.md`
-- [ ] WP11 clone timeout deprecation warning, cancellation-aware BuilderWorker loops, GitHub request metric, provenance audit
-- [ ] WP8 builder fault-injection harness (in-process freeze + live kill -9 script)
+- [x] WP0 deterministic green CI (100× flaky suites clean; CI green): `interrupt` row-before-guest, instance-row-before-session-row in `markOnline`/`markBusy`, throwing `waitUntil`, event-driven `awaitSession`/`awaitInstance` over `LifecycleEventLog.subscribe()`; 100× flaky suites
+- [x] WP1 (integration; live restart scenarios in run 2) runner-session recovery after restart (`RunnerSessionRecovery.swift`, `RunnerSessionReconciler`, startup call) + tests + live `restart-during-job-sigkill`
+- [x] WP2 (integration) build recovery keeps capacity while worker death unproven (`OrphanVerdict`, `recovery_since` v3, hard bound, cancel path)
+- [x] WP3 `BuildContextPacker` NUL-delimited `tar --null -T` + adversarial archive-content tests
+- [x] WP4 (unit; not on a real VM) reusable guard (`reuse.acknowledgeSharedHost`) + guest-agent HOME pristine snapshot/restore + sentinel tests
+- [x] WP5 bounded base-image cache (`build.cache.{maxBytes,minimumHostFreeBytes,maxEntries}`, LRU, atomic commit, metrics)
+- [x] WP6 ARG = non-secret docs/help/refusal; `docs/design/build-secrets.md`
+- [x] WP11 clone timeout deprecation warning, cancellation-aware BuilderWorker loops, GitHub request metric, provenance audit
+- [x] WP8 (in-process; live kill -9 script pending) builder fault-injection harness (in-process freeze + live kill -9 script)
 - [ ] WP7 builder→GitHub→GHCR live E2E script + run — scripting done (`scripts/live-builder-e2e.sh`,
   factored `scripts/lib/live-common.sh` shared with `live-github-e2e.sh`); live run still pending
 - [ ] WP10 live GitHub lifecycle matrix (new scenarios, fake-based API fault tests) + run —
@@ -213,5 +213,5 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
   `Tests/OrchestrationTests/GitHubFaultTests.swift` fault-injection tests (getMessage
   timeout/rate-limit, scale-set JIT 5xx, guest-startup failure). Live run against a real org/repo
   and hardware SIGKILL still pending.
-- [ ] WP9 doctor/qualify checks + LaunchDaemon qualification on dev Mac (reboots by user)
+- [ ] WP9 doctor/qualify checks DONE (hardware-verified on the dev layout); LaunchDaemon reboot qualification NOT run
 - [ ] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md

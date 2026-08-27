@@ -27,6 +27,7 @@ STATE_DIR="$HOME/Library/Application Support/RunnerVM"
 SOCKET=""
 CONCURRENCY=4
 LONG_MINUTES=65
+SHORT_LONG_MINUTES="${RUNNERVM_E2E_SHORT_LONG_MINUTES:-5}"
 JSON_REPORT=""
 DRY_RUN=0
 RESTART_CMD=""
@@ -233,11 +234,14 @@ check_preconditions() {
 # --------------------------------------------------------------------------
 # Workflow dispatch (find_dispatched_run / wait_for_run_conclusion are shared)
 # --------------------------------------------------------------------------
+# $3 = minutes for the `long` job. Restart/cancel scenarios only need a job that is still running
+# when they act, so they dispatch a short one (SHORT_LONG_MINUTES); only `long-job` asks for the
+# full LONG_MINUTES -- a 65-minute job can never finish inside RUN_TIMEOUT (seen live).
 dispatch_workflow() {
-  local job="$1" count="${2:-1}"
-  log "dispatching: job=$job count=$count profile=$PROFILE"
+  local job="$1" count="${2:-1}" minutes="${3:-$LONG_MINUTES}"
+  log "dispatching: job=$job count=$count profile=$PROFILE minutes=$minutes"
   gh workflow run "$WORKFLOW_FILE" -R "$REPO" \
-    -f "job=$job" -f "count=$count" -f "profile=$PROFILE"
+    -f "job=$job" -f "count=$count" -f "profile=$PROFILE" -f "minutes=$minutes"
 }
 
 gh_cancel_run() { gh run cancel "$1" -R "$REPO"; }
@@ -607,7 +611,7 @@ scenario_cancel-during-job() {
   local before run_id baseline
   baseline=$(capture_capacity_baseline "$PROFILE")
   before=$(date +%s)
-  dispatch_workflow long 1
+  dispatch_workflow long 1 "$SHORT_LONG_MINUTES"
   run_id=$(find_dispatched_run "$before") || { warn "could not locate the dispatched run"; return 1; }
   wait_for_session_instance "$PROFILE" "$JOB_START_TIMEOUT" >/dev/null \
     || { warn "no session reached jobRunning within ${JOB_START_TIMEOUT}s"; return 1; }
@@ -657,7 +661,7 @@ scenario_restart-while-runner-starts() {
   # with a non-null githubRunnerId created after this scenario's own dispatch time.
   sessions=$(rc runner list 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
     '[.sessions[] | select(.profile==$p and .githubRunnerId!=null
-       and ((.createdAt|fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+       and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query runner list to check for a duplicate runner"; return 1; }
   [ "$sessions" -le 1 ] || { warn "found $sessions runner session(s) for one job; expected at most 1"; return 1; }
   assert_no_leftovers "$PROFILE" "$LEFTOVER_TIMEOUT" "$baseline" || return 1
@@ -668,7 +672,7 @@ scenario_restart-during-job() {
   local before run_id conclusion sessions baseline
   baseline=$(capture_capacity_baseline "$PROFILE")
   before=$(date +%s)
-  dispatch_workflow long 1
+  dispatch_workflow long 1 "$SHORT_LONG_MINUTES"
   run_id=$(find_dispatched_run "$before") || { warn "could not locate the dispatched run"; return 1; }
   wait_for_session_instance "$PROFILE" "$JOB_START_TIMEOUT" >/dev/null \
     || { warn "no session reached jobRunning within ${JOB_START_TIMEOUT}s"; return 1; }
@@ -679,7 +683,7 @@ scenario_restart-during-job() {
   [ "$conclusion" = "success" ] || { warn "run concluded '$conclusion' after mid-job restart"; return 1; }
   sessions=$(rc runner list 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
     '[.sessions[] | select(.profile==$p and .githubRunnerId!=null
-       and ((.createdAt|fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+       and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query runner list to check for a duplicate runner"; return 1; }
   [ "$sessions" -le 1 ] || { warn "found $sessions runner session(s) for one job; expected at most 1"; return 1; }
   assert_no_leftovers "$PROFILE" "$LEFTOVER_TIMEOUT" "$baseline" || return 1
@@ -698,7 +702,7 @@ scenario_restart-during-job-sigkill() {
   local worker_before worker_after run_attempt job_count
   baseline=$(capture_capacity_baseline "$PROFILE")
   before=$(date +%s)
-  dispatch_workflow long 1
+  dispatch_workflow long 1 "$SHORT_LONG_MINUTES"
   run_id=$(find_dispatched_run "$before") || { warn "could not locate the dispatched run"; return 1; }
   instance_id=$(wait_for_session_instance "$PROFILE" "$JOB_START_TIMEOUT") \
     || { warn "no session reached jobRunning within ${JOB_START_TIMEOUT}s"; return 1; }
@@ -728,7 +732,7 @@ scenario_restart-during-job-sigkill() {
     || { warn "run $run_id has $job_count job(s); expected exactly 1"; return 1; }
   sessions=$(rc runner list 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
     '[.sessions[] | select(.profile==$p and .githubRunnerId!=null
-       and ((.createdAt|fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+       and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query runner list to check for a duplicate runner"; return 1; }
   [ "$sessions" -le 1 ] || { warn "found $sessions runner session(s) for one job; expected at most 1"; return 1; }
   # runnerctl-side terminal state is covered by assert_no_leftovers's active-session check below;
@@ -754,7 +758,7 @@ scenario_redelivery() {
   conclusion=$(wait_for_run_conclusion "$run_id" "$RUN_TIMEOUT") || { warn "run did not complete"; return 1; }
   [ "$conclusion" = "success" ] || { warn "run concluded '$conclusion'"; return 1; }
   vms=$(rc vm list --all 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
-    '[.instances[] | select(.profile==$p and ((.createdAt|fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+    '[.instances[] | select(.profile==$p and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query vm list to check for a duplicate instance"; return 1; }
   [ "$vms" -le 1 ] || { warn "saw $vms instance(s) for one job; possible duplicate from redelivery"; return 1; }
   assert_no_leftovers "$PROFILE" "$LEFTOVER_TIMEOUT" "$baseline" || return 1
@@ -794,7 +798,7 @@ scenario_scaleset-reconnect() {
     || { warn "run did not complete after the forced scale-set reconnect"; return 1; }
   [ "$conclusion" = "success" ] || { warn "run concluded '$conclusion' after forced scale-set reconnect"; return 1; }
   vms=$(rc vm list --all 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
-    '[.instances[] | select(.profile==$p and ((.createdAt|fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+    '[.instances[] | select(.profile==$p and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query vm list to check for a duplicate instance"; return 1; }
   [ "$vms" -le 1 ] || { warn "saw $vms instance(s) for one job after a forced reconnect; possible duplicate"; return 1; }
   assert_no_leftovers "$PROFILE" "$LEFTOVER_TIMEOUT" "$baseline" || return 1

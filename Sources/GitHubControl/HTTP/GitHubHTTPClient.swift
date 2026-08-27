@@ -83,11 +83,20 @@ public actor GitHubHTTPClient {
       try await self.attempt(request, as: T.self)
     }
     let retryAfter: @Sendable (any Error) -> Duration? = { ($0 as? GitHubControlError)?.retryAfter }
-    let shouldRetry: @Sendable (any Error) -> Bool = { [options] error in
+    let shouldRetry: @Sendable (any Error) -> Bool = { [options, logger] error in
       guard let error = error as? GitHubControlError, error.errorClass.retryable, request.idempotent
       else { return false }
       // A wait longer than the ceiling belongs to the scheduler, not to a blocked request.
       if let wait = error.retryAfter, wait > options.maxRetryAfter { return false }
+      // Visible, not debug: a startup that stalls for minutes inside a retried call has to say so
+      // in the log (seen live: six silent minutes before `runnerd ready`).
+      logger.warning(
+        "GitHub request failed; retrying",
+        metadata: [
+          "request": .string(request.logDescription),
+          "class": .string(String(describing: error.errorClass)),
+          "error": .string(String(describing: error)),
+        ])
       return true
     }
     return try await options.retryPolicy.run(

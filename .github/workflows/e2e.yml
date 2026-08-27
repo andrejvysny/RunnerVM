@@ -26,12 +26,16 @@ on:
         description: "RunnerVM profile name (the runs-on label)"
         required: true
         default: ubuntu-24
+      minutes:
+        description: "Minutes the long job sleeps (long job only; the driver passes 5 for restart/cancel scenarios, 65 for long-job)"
+        required: false
+        default: "65"
 
 permissions:
   contents: read
 
 env:
-  LONG_MINUTES: 65
+  LONG_MINUTES: ${{ github.event.inputs.minutes || '65' }}
 
 jobs:
   quick:

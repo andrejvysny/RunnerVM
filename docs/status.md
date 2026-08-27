@@ -18,8 +18,11 @@ the host, pulled from an OCI registry, or imported from tart.
 | --- | --- | --- |
 | Ephemeral Linux/arm64 runners from scale-set demand (JIT, one job per VM) | done | live on GitHub.com, 2026-08-26 (`docs/verification.md`) |
 | Autoscaling / parallel jobs honouring advertised capacity | done | live, `fanout=5` on a 3-VM host |
-| Reusable VMs (`lifecycle: reusable`, cleanup, taint, retire) | done | unit/integration tests against fakes only |
-| Host mode control (drain / resume / offline / shutdown), metrics, Prometheus endpoint | done | tests; manual round trip |
+| Reusable VMs (`lifecycle: reusable`, cleanup, taint, retire) | done, opt-in | requires `reuse.acknowledgeSharedHost: true`; HOME reset from a pristine snapshot; unit/integration tests only — single-tenant by design |
+| Host mode control (drain / resume / offline / shutdown), metrics, Prometheus endpoint | done | tests; live (`system drain --wait` on an idle host fixed 2026-08-27) |
+| Runner-session recovery after `runnerd` restart (re-observe or close out, at-most-once) | done | integration (15 cases) + live restart scenarios 2026-08-27 |
+| Image-build recovery keeps capacity until the worker is proven dead; fault injection at every phase | done | integration (real `fcntl` locks, frozen-daemon harness); live kill -9 script not yet run |
+| Bounded base-image cache | done | unit + hardware (cache hit on rebuild) |
 | Image store (content-addressed, clonefile, pins, prune, provenance) | done | tests + live |
 | OCI push/pull of RunnerVM images (GHCR-compatible transport, resumable, LZ4 chunks) | done | tests against `FakeRegistry`; live pull of a tart image on 2026-08-27 exercises the same transport |
 | **Tart image import** (`image pull ghcr.io/cirruslabs/…`, read-only, spec §58) | done | live: `ghcr.io/cirruslabs/ubuntu:latest` imported; refusal paths verified |
@@ -30,9 +33,9 @@ the host, pulled from an OCI registry, or imported from tart.
 | macOS guests | not implemented | `os: macos` rejected (`GUEST_OS_UNSUPPORTED`); plan in `docs/macos-guests.md` |
 | SSH provisioning of agent-less (tart) images as build bases | not implemented | tart imports are inspect/re-publish only |
 | GitHub App authentication | done | tests against fakes |
-| CI (Swift 6.1.2 on macOS 15 + Go + shellcheck) | green | run 33063743404 on `0c15077`; two timing-sensitive suites still flake under load occasionally |
+| CI (Swift 6.1.2 on macOS 15 + Go + shellcheck) | green | flakes fixed at the root (`74ecb12`); every hardening push green after `4f214e2` |
 
-Test suite: 1206 Swift tests / 155 suites (`swift test`), 70 Go tests, install-script tests 21/21.
+Test suite: 1312 Swift tests / 166 suites (`swift test`), Go guest-agent tests (`go test -race`), install-script tests 21/21, qualify-host tests 53/53.
 
 ## What the last milestone added (M14 tart import + M15 image builder)
 
@@ -61,7 +64,16 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 - No step-level build cache; the chain of images *is* the cache.
 - `runnerd` must be able to read the recipe and context (`_runnervm` cannot read `$HOME`); use
   `<rootDir>/share/recipes` or `<rootDir>/recipes`.
-- `hdiutil makehybrid` under a LaunchDaemon is gated by `doctor build_tools`, not yet qualified.
+- `hdiutil makehybrid` under a LaunchDaemon is gated by `doctor build_tools` /
+  `build_tools_service_context`, not yet qualified on a LaunchDaemon.
+- A failed session kept for diagnosis holds its instance's cpu/memory/disk reservation until
+  `diagnostics.failedInstanceRetention` (2 h default) even though its VM is now shut down; lower the
+  retention on small hosts. Sessions closed only by a daemon restart destroy their VM immediately.
+- `ARG` values are not secrets (build row, provenance, pushed OCI config); there is no build-time
+  secret mechanism yet (`docs/design/build-secrets.md`).
+- A `runnerd` restart while a scale-set message session is still open on GitHub's side was once
+  observed to take ~6 minutes before `runnerd ready`, silently; retried GitHub/Actions calls are now
+  logged so the next occurrence explains itself.
 - `image list` shows the manifest name, so two rows can share a name after a rebuild; `image inspect
   <name>` follows the alias to the newest.
 - Base-image cache (`cache/base-images`) is bounded by `build.cache` (LRU, pins live builds, honours
@@ -70,12 +82,13 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 
 ## Open verification / next steps
 
-1. Run a real GitHub job on a `runnerctl image build`-produced image (needs a PAT/App on the host).
-2. Qualify the production LaunchDaemon path on a dedicated Mac mini (`docs/qualification.md`),
-   including `image build` as `_runnervm`.
-3. `--push` of a built image to GHCR with a real token (transport proven only against fakes + tart pull).
-4. De-flake `RunnerSessionTests` / `ReusableLifecycleTests` under CI load.
-5. macOS guests (M8) — tart macOS import already parses; needs the platform builder + SSH provisioning.
+1. LaunchDaemon (`_runnervm`) qualification: `sudo scripts/install.sh --launchd daemon`, then the
+   10-reboot / cold-power-cycle loop in `docs/qualification.md` — not run in the hardening pass.
+2. `scripts/live-builder-faults.sh` (kill -9 `runnerd` at every build phase) against a real build.
+3. GHCR push → pull-by-digest → boot round trip (`scripts/live-builder-e2e.sh --registry …`).
+4. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
+5. Build-time secrets (`docs/design/build-secrets.md`).
+6. macOS guests (M8) — tart macOS import already parses; needs the platform builder + SSH provisioning.
 
 ## Developer quick start
 

@@ -89,6 +89,88 @@ The first hardening pushes were blocked by a **GitHub Actions major outage** on 
 recovered, the Swift job surfaced the 6.1.2 issues in the table above; they are fixed. Latest
 commit's CI is the authoritative check for full green.
 
+## Production hardening pass (2026-08-27, dev host, live GitHub)
+
+Evidence tiers used below: **unit** (fakes, `swift test`), **integration** (real actors over GRDB +
+in-process fake worker/guest/GitHub), **hardware** (real VMs on this Apple Silicon host),
+**live GitHub** (real scale set on `andrejvysny/github-managed-runners`), **production-qualified**
+(LaunchDaemon, reboot loop). Anything not listed under a tier was not verified.
+
+### Determinism (WP0) — unit/integration
+
+Root causes of the master CI flakes (`RunnerSessionTests`, `ReusableLifecycleTests`), all fixed at
+the source rather than by widening timeouts:
+
+| Test | Root cause |
+| --- | --- |
+| `aWorkerDisconnectDuringAJobInterruptsTheSession` | `InstanceManager.interrupt` dropped the guest client *before* writing the `interrupted` row; the actor is reentrant at that `await`, so the session observer could poll a half-closed client under a row still reading `busy` and end the session as `RUNNER_STATUS_UNAVAILABLE` (or stall on the dead call). Row first, guest second now. |
+| `taintingABusyVMRetiresItWhenTheJobEnds` | `markBusy` wrote the session row (`jobRunning`) before the instance row (`busy`); a reader that saw `jobRunning` could still read `runnerOnline`. Instance row first now; a failed CAS re-reads instead of polling on with a stale copy. |
+| `aFailedRemovalIsQueuedAndRetriedLater` | Test waited for the `remove-runner` operation row to *exist*, not to have `failed`. |
+| `happyPath…`, `metricsSnapshot…` | `awaitTerminal` returns on the terminal transition; the job summary / metrics are written after it. The VM's deletion is the sync point. |
+| `aGuestThatNeverBecomesReadyIsNotSealed` | `BuildHarness.settle` had a 400×10 ms poll budget against a 5 s injected `agentReadyTimeout`. |
+
+`waitUntil` now throws on timeout; lifecycle waits are event-driven (`LifecycleEventLog.subscribe()`,
+`awaitSession`/`awaitInstance`) behind a 30 s hang guard that is not a race margin. Loops:
+`RunnerSessionTests|ReusableLifecycleTests` **100/100** clean, full suite ×10 clean under concurrent
+load; after WP1 the recovery/session suites **20/20 ×3** clean.
+
+### Restart recovery (WP1) — integration + live GitHub
+
+`RunnerSessionRecovery` (every reconcile tick + once at startup before the demand provider
+starts): `planned`/`jitRequested` → `jitFailed`, `jitIssued` → `runnerStartFailed` (runner
+removed), `jitDelivered`… `jobRunning` → re-observed with `sawBusy` seeded from the row; the VM of a
+session closed only because of the restart is destroyed, not kept for diagnosis. 15 integration
+cases (every state, guest missing, worker missing, guest silent, ladder alignment, degraded scope,
+idempotence, capacity released). Live: see the scenario table below.
+
+### Build recovery capacity (WP2) — integration + hardware
+
+`probeOrphan` verdicts; a build whose worker cannot be proven dead keeps its capacity, pin and
+directory (`recovery_since`, schema v3, applied in place on the dev database: `schema_migrations`
+1/2/3), abandoned after 15 min with `BUILD_RECOVERY_ABANDONED`. 12 integration cases with a real
+`fcntl` lock held by a child process. Fault injection (WP8): every `BuildPhase` frozen mid-flight
+converges (pending while the worker lives, terminal once it is gone), replay registers exactly one
+image, `pushing` produces exactly one push operation.
+
+### Build context (WP3) — integration (real `tar`/`hdiutil`)
+
+`tar --null -T`; newline / CR / tab / leading-dash / literal `-C` / 200-deep names archived
+verbatim, escaping symlinks, hard links, FIFOs, sockets refused, archive contents inspected
+byte-for-byte after a real extraction. Device nodes: recorded as a known issue when `mknod` is
+not permitted (unprivileged CI). Finding: Foundation normalises relative paths to NFD, so an
+NFC-named context file lands in the archive under its NFD form (pre-existing, unrelated to `--null`).
+
+### Reusable lifecycle (WP4) — unit (Go + Swift)
+
+`lifecycle: reusable` refused without `reuse.acknowledgeSharedHost: true`; the guest agent
+restores HOME from a pristine snapshot on every cleanup (fails closed with `HOME_SNAPSHOT_MISSING`);
+sentinel credentials in `.gitconfig/.netrc/.npmrc/.cargo/.docker/.ssh/.aws/gh/.pypirc/.m2` do not
+survive. Not exercised on a real VM in this pass.
+
+### Base-image cache (WP5) — unit + hardware
+
+Bounded LRU with pins from live build rows, atomic `.part` commits, reserve floor, metrics. The
+rebuild of `ubuntu-24-minimal` on this host hit the cache (`base-4a281a92….raw`) under the new
+index.
+
+### Doctor / qualification tooling (WP9) — hardware
+
+`runnerctl doctor --deep --state-dir ~/runnervm-dev --config …`: 26 checks, `image_store_integrity`
+re-hashed 5 images (all consistent), `service_user_ownership` correctly **failed** the dev layout
+(0755 root, 0644 config), `free_memory` warned at 5.1 GiB free. LaunchDaemon reboot loop: not run
+(see "Not yet verified").
+
+### Live GitHub matrix (WP10) — live GitHub
+
+Run 1 (before the fixes below) surfaced three real defects: `HostModeControl.drain()` reported
+`drained:false` on an idle host so `system drain --wait` exited 1 and the scenario left the host
+draining (advertised capacity 0 → every later job queued forever); a session terminalized by a
+restart left an `interrupted` instance whose vmworker kept running (capacity held for the 2 h
+retention window); the test workflow's `long` job ignored the runner's cancellation for up to
+5 min because bash defers SIGINT while a foreground `sleep` runs. All three fixed (`04f992c`).
+
+Run 2 results: _(filled from `e2e-report-run2.json` below)_.
+
 ## Not yet verified (needs hardware time / dedicated org)
 
 - `scripts/qualify-host.sh` cold-boot / power-cut qualification (needs the Mac mini itself).

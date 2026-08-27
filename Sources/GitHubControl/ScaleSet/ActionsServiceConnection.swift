@@ -110,14 +110,26 @@ struct ActionsRetry: Sendable {
   var policy: RetryPolicy
   var sleep: @Sendable (Duration) async throws -> Void
   var random: @Sendable (ClosedRange<Double>) -> Double
+  var logger = Logger(component: .github)
 
   func run<T: Sendable>(
     idempotent: Bool, _ body: @escaping @Sendable () async throws -> T
   ) async throws -> T {
-    try await policy.run(
+    let logger = logger
+    return try await policy.run(
       sleep: sleep, random: random,
       retryAfter: { ($0 as? GitHubControlError)?.retryAfter },
-      shouldRetry: { idempotent && (($0 as? GitHubControlError)?.retryable ?? false) },
+      shouldRetry: { error in
+        guard idempotent, let error = error as? GitHubControlError, error.retryable else {
+          return false
+        }
+        // Retries against the Actions service are otherwise silent; a registration that stalls
+        // for minutes at daemon start has to be visible in the log.
+        logger.warning(
+          "Actions service request failed; retrying",
+          metadata: ["error": .string(String(describing: error))])
+        return true
+      },
       body
     )
   }

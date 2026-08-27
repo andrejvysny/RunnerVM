@@ -193,7 +193,7 @@ find_dispatched_run() {
         --json databaseId,createdAt,event -L 15 2>/dev/null \
       | jq -r --argjson before "$before" '
           [ .[] | select(.event=="workflow_dispatch")
-                 | select((.createdAt | fromdateiso8601) >= $before) ]
+                 | select((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before) ]
           | sort_by(.createdAt) | .[0].databaseId // empty' 2>/dev/null) || id=""
     if [ -n "$id" ]; then printf '%s\n' "$id"; return 0; fi
     sleep 2

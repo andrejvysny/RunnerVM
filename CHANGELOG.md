@@ -2,6 +2,34 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-27 — Production hardening pass (`74ecb12` … see `docs/verification.md`)
+
+- Deterministic teardown ordering (`interrupt` writes the row before dropping the guest;
+  instance row before session row); event-driven test waits; the master CI flakes are gone.
+- Runner sessions survive a `runnerd` restart: persisted non-terminal sessions are re-observed or
+  closed out (`RunnerSessionRecovery`, `DAEMON_RESTART`), never re-issued a JIT config;
+  `runnervm_sessions_recovered_total`.
+- Image-build recovery keeps capacity, pin and directory until the builder worker is proven dead
+  (`OrphanVerdict`, schema v3 `recovery_since`, `BUILD_RECOVERY_ABANDONED`,
+  `runnervm_image_builds_recovery_pending`); `build cancel` refuses to release a live worker.
+- Build contexts are packed with a NUL-delimited `tar --null -T` list; adversarial tests inspect
+  the archive.
+- `lifecycle: reusable` requires `reuse.acknowledgeSharedHost: true`; the guest agent restores
+  HOME from a pristine snapshot between jobs (`HOME_SNAPSHOT_MISSING` fails closed).
+- Bounded base-image cache (`build.cache.{maxBytes,minimumHostFreeBytes,maxEntries}`, LRU, pins,
+  atomic commit, `runnervm_image_cache_*`).
+- `ARG` documented as non-secret; credential-shaped values refused (`BUILD_ARG_LOOKS_LIKE_SECRET`);
+  `build show` prints args; `docs/design/build-secrets.md`.
+- `runnervm_github_requests_total{class}` wired; retried GitHub/Actions calls are logged;
+  `PROFILE_TIMEOUT_CLONE_IGNORED`; cancellation-aware `BuilderWorker` loops; provenance audit.
+- Builder fault-injection harness (`BuildHooks`, `ImageBuildFaultInjectionTests`,
+  `scripts/live-builder-faults.sh`); live scripts `live-builder-e2e.sh`, new e2e scenarios,
+  `debug.scaleSetReconnect`, `GitHubFaultTests`.
+- Doctor: `service_user_ownership`, `runtime_dir_perms`, `free_memory`, `image_store_integrity`
+  (`--deep`), `guest_agent_image`, `build_tools_service_context`; `qualify-host.sh` coverage.
+- Found live: `system drain --wait` exited 1 on an idle host (fixed); restart-terminalized
+  sessions kept their VM running (fixed); e2e long job ignored cancellation (fixed).
+
 ## 2026-08-27 — M14 tart import, M15 in-daemon image builder (`9d66361`, `0c15077`)
 
 - Read-only import of tart OCI images (`runnerctl image pull ghcr.io/cirruslabs/…`); `--format`
