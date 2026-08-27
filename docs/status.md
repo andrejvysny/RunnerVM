@@ -21,12 +21,12 @@ the host, pulled from an OCI registry, or imported from tart.
 | Reusable VMs (`lifecycle: reusable`, cleanup, taint, retire) | done, opt-in | requires `reuse.acknowledgeSharedHost: true`; HOME reset from a pristine snapshot; unit/integration tests only — single-tenant by design |
 | Host mode control (drain / resume / offline / shutdown), metrics, Prometheus endpoint | done | tests; live (`system drain --wait` on an idle host fixed 2026-08-27) |
 | Runner-session recovery after `runnerd` restart (re-observe or close out, at-most-once) | done | integration (15 cases) + live restart scenarios 2026-08-27 |
-| Image-build recovery keeps capacity until the worker is proven dead; fault injection at every phase | done | integration (real `fcntl` locks, frozen-daemon harness); live kill -9 script not yet run |
+| Image-build recovery keeps capacity until the worker is proven dead; fault injection at every phase | done | integration (real `fcntl` locks, frozen-daemon harness); live kill -9 run in flight at hand-off |
 | Bounded base-image cache | done | unit + hardware (cache hit on rebuild) |
 | Image store (content-addressed, clonefile, pins, prune, provenance) | done | tests + live |
-| OCI push/pull of RunnerVM images (GHCR-compatible transport, resumable, LZ4 chunks) | done | tests against `FakeRegistry`; live pull of a tart image on 2026-08-27 exercises the same transport |
+| OCI push/pull of RunnerVM images (GHCR-compatible transport, resumable, LZ4 chunks) | done | live 2026-08-27: built image pushed to GHCR, deleted, pulled back by manifest digest, booted, ran a job |
 | **Tart image import** (`image pull ghcr.io/cirruslabs/…`, read-only, spec §58) | done | live: `ghcr.io/cirruslabs/ubuntu:latest` imported; refusal paths verified |
-| **In-daemon image builder** (`runnerctl image build`, Runnerfile recipes) | done | live: `ubuntu-24-minimal` 3m43s cold, `ubuntu-24` 1m16s, VM boots to `idle` in 5 s |
+| **In-daemon image builder** (`runnerctl image build`, Runnerfile recipes) | done | live 2026-08-27: built image ran a real GitHub job (`scripts/live-builder-e2e.sh` 5/5) |
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |
 | Legacy host-script builder (`scripts/build-ubuntu-image.sh`) | kept, legacy | live 2026-08-26 |
 | Production install (`install.sh`, launchd, `_runnervm` service account) | done | `scripts/tests/install-test.sh`; not yet run on a dedicated Mac mini |
@@ -83,9 +83,9 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 ## Open verification / next steps
 
 1. LaunchDaemon (`_runnervm`) qualification: `sudo scripts/install.sh --launchd daemon`, then the
-   10-reboot / cold-power-cycle loop in `docs/qualification.md` — not run in the hardening pass.
-2. `scripts/live-builder-faults.sh` (kill -9 `runnerd` at every build phase) against a real build.
-3. GHCR push → pull-by-digest → boot round trip (`scripts/live-builder-e2e.sh --registry …`).
+   10-reboot / cold-power-cycle loop in `docs/qualification.md` — **not run** (skipped on the
+   operator's decision; the doctor/qualify tooling for it is in place and hardware-verified).
+2. `scripts/live-builder-faults.sh`: finish the kill -9 run at `staging`/`booting`/`provisioning`/`sealing` (in flight at hand-off; `queued`/`resolving` are unobservable on a warm build).
 4. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
 5. Build-time secrets (`docs/design/build-secrets.md`).
 6. macOS guests (M8) — tart macOS import already parses; needs the platform builder + SSH provisioning.

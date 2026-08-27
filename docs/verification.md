@@ -192,6 +192,41 @@ Run 1 also found three script defects (org-runner lookup on a user login, `jq fr
 fractional timestamps, skipped workflow jobs counted as executions) and the 65-minute `long` job
 being dispatched by scenarios with a 30-minute budget; all fixed in the driver.
 
+### Builder → GitHub → GHCR (WP7) — live GitHub + GHCR
+
+`scripts/live-builder-e2e.sh --recipe images/recipes/ubuntu-24 --name e2e-hardening --registry
+ghcr.io/andrejvysny/runnervm-e2e`, run 4 (`builder-e2e-report4.json`): **5/5** — `image build`
+(39–45 s warm) → `image inspect` (guestAgent true, recipe sha recorded on the build row) →
+profile applied → `runnervm-selftest.yml` job **success** on the built image (66–106 s) → `image
+push` → local delete → `image pull` by the immutable manifest reference
+(`…runnervm-e2e@sha256:f0a24bc9…`) → pulled content digest identical (`sha256:1b0264c0…`),
+guestAgent true → second selftest job **success**. Digest identity held through the round trip.
+
+Defects the first three runs found, all fixed on master: `image delete` of any image that had run a
+job failed with `DB_FOREIGN_KEY` (deleted-instance tombstones referenced by their sessions and
+summaries; `fbe52b2`); the push's immutable reference was computed and thrown away, so nothing
+could pin what the registry assigned (`03272b7`, now `OperationInfo.result.pushedReference`); one
+GHCR chunk upload timed out (transient; the rerun succeeded).
+
+### Builder fault injection (WP8) — integration + live (partial)
+
+Integration: `ImageBuildFaultInjectionTests` freezes a builder at each of the 11 `BuildPhase`s and
+recovers with a second `ImageBuilder` over the same state (20× loop clean). Live
+(`scripts/live-builder-faults.sh --phase all` against a real `runnerd`, warm `ubuntu-24` build):
+`queued` and `resolving` are not observable on a warm local-base build (both pass in <200 ms, the
+script reports them as "never observed" — a driver limitation, not a daemon fault); the
+`staging`/`booting`/`provisioning`/`sealing` kills were still running when this pass was handed
+off — see `TODO.md` for the follow-up.
+
+### Startup stall — observed, not root-caused
+
+Twice (15:16 and 18:54 UTC) a `runnerd` started right after a SIGTERM'd predecessor logged
+"demand provider" and nothing else for minutes (6 min the first time; the second was killed by a
+60 s budget). A third restart under the same conditions came up in seconds. Every retried
+GitHub/Actions call — including the token exchange — is now logged at warning level so the next
+occurrence names the call; `scripts/live-builder-faults.sh` takes
+`RUNNERVM_FAULTS_DAEMON_UP_TIMEOUT` for the same reason.
+
 ## Not yet verified (needs hardware time / dedicated org)
 
 - `scripts/qualify-host.sh` cold-boot / power-cut qualification (needs the Mac mini itself).

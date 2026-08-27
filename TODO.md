@@ -203,15 +203,15 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
 - [x] WP5 bounded base-image cache (`build.cache.{maxBytes,minimumHostFreeBytes,maxEntries}`, LRU, atomic commit, metrics)
 - [x] WP6 ARG = non-secret docs/help/refusal; `docs/design/build-secrets.md`
 - [x] WP11 clone timeout deprecation warning, cancellation-aware BuilderWorker loops, GitHub request metric, provenance audit
-- [x] WP8 (in-process; live kill -9 script pending) builder fault-injection harness (in-process freeze + live kill -9 script)
-- [ ] WP7 builder→GitHub→GHCR live E2E script + run — scripting done (`scripts/live-builder-e2e.sh`,
+- [x] WP8 builder fault-injection harness (in-process 20× clean; live kill -9 run: staging/booting/provisioning/sealing in flight at hand-off — rerun `scripts/live-builder-faults.sh --phase staging --phase booting --phase provisioning --phase sealing`) (in-process freeze + live kill -9 script)
+- [x] WP7 builder→GitHub→GHCR live E2E (`live-builder-e2e.sh` 5/5 on 2026-08-27) — scripting done (`scripts/live-builder-e2e.sh`,
   factored `scripts/lib/live-common.sh` shared with `live-github-e2e.sh`); live run still pending
-- [ ] WP10 live GitHub lifecycle matrix (new scenarios, fake-based API fault tests) + run —
+- [x] WP10 live GitHub lifecycle matrix: 11/11 scenarios pass live (long-job skipped on operator instruction); API faults integration-tested —
   scripting/tests done: `live-github-e2e.sh` scenarios `restart-while-runner-starts`,
   `restart-during-job-sigkill` (`--kill-cmd`), `scaleset-reconnect` (new `debug.scaleSetReconnect`
   RPC); `assert_no_leftovers` now also converges on `runnerctl status` capacity; 4 new
   `Tests/OrchestrationTests/GitHubFaultTests.swift` fault-injection tests (getMessage
   timeout/rate-limit, scale-set JIT 5xx, guest-startup failure). Live run against a real org/repo
   and hardware SIGKILL still pending.
-- [ ] WP9 doctor/qualify checks DONE (hardware-verified on the dev layout); LaunchDaemon reboot qualification NOT run
-- [ ] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md
+- [ ] WP9 doctor/qualify checks DONE (hardware-verified on the dev layout); LaunchDaemon reboot qualification SKIPPED (operator decision 2026-08-27) — still open
+- [x] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md
