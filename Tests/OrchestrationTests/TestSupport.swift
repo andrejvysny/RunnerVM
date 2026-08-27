@@ -117,6 +117,18 @@ func exampleWithSecondProfile() throws -> RunnerConfiguration {
 /// `start` returns `nil` when the host has no `/usr/bin/python3`, which lets a test skip instead of
 /// failing on a machine without it.
 final class LockHolder: @unchecked Sendable {
+  /// Marks one end of a `Pipe` close-on-exec.
+  ///
+  /// Without this, *any* other process this test bundle spawns while a holder is alive inherits
+  /// this pipe's write end, and the holder's `sys.stdin.read()` then never sees EOF -- so
+  /// `release()` blocks in `waitUntilExit()`, on the main actor, forever. Two suites that both
+  /// hold locks run concurrently under `swift test --parallel` (`.serialized` only orders a suite
+  /// against itself), which is exactly when that happens. `posix_spawn`'s `dup2` file actions
+  /// clear the flag on the descriptors the intended child actually gets, so it still works.
+  private static func closeOnExec(_ handle: FileHandle) {
+    _ = fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC)
+  }
+
   private let process: Process
   private let stdin: FileHandle
 
@@ -145,6 +157,12 @@ final class LockHolder: @unchecked Sendable {
     process.arguments = ["-c", script, url.path(percentEncoded: false)]
     let output = Pipe()
     let input = Pipe()
+    for handle in [
+      output.fileHandleForReading, output.fileHandleForWriting,
+      input.fileHandleForReading, input.fileHandleForWriting,
+    ] {
+      closeOnExec(handle)
+    }
     process.standardOutput = output
     process.standardInput = input
     try process.run()
@@ -159,10 +177,27 @@ final class LockHolder: @unchecked Sendable {
 
   var isRunning: Bool { process.isRunning }
 
-  /// Closing stdin ends the child's `stdin.read()`, which drops the lock as the process exits.
+  /// Closing stdin ends the child's `stdin.read()`, which drops the lock as the process exits;
+  /// `terminate()` follows as a backstop, in case a descriptor this pipe leaked elsewhere is
+  /// holding the write end open.
+  ///
+  /// Deliberately **not** `Process.waitUntilExit()`. That call runs the run loop of whichever
+  /// thread reaches it and waits for a notification posted to the run loop of the thread that
+  /// called `run()` -- under Swift concurrency an `await` between the two moves the caller to a
+  /// different cooperative thread, and the wait then blocks forever even though the child is long
+  /// gone. `isRunning` is driven by Foundation's `DISPATCH_SOURCE_TYPE_PROC` reaper instead, which
+  /// is thread-independent, so polling it is both correct and bounded.
   func release() {
     guard process.isRunning else { return }
     stdin.closeFile()
-    process.waitUntilExit()
+    process.terminate()
+    var attempts = 0
+    while process.isRunning, attempts < Self.exitPollAttempts {
+      usleep(Self.exitPollMicroseconds)
+      attempts += 1
+    }
   }
+
+  private static let exitPollAttempts = 500
+  private static let exitPollMicroseconds: UInt32 = 10_000
 }

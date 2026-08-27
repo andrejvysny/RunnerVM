@@ -55,6 +55,22 @@ import Testing
     #expect(timedOut.decision == .orphanIdle)
   }
 
+  /// The shape a killed runnerd actually leaves behind: the worker was spawned but its daemon died
+  /// before ever calling `worker.lease`, so there is no lease to expire -- only the orphan clock.
+  @Test func anAbsentLeaseGoesOrphanAfterTheIdleInterval() {
+    let first = WorkerPolicy.decide(
+      now: Self.epoch, hardDeadline: nil, leaseExpiresAt: nil, activeConnections: 0,
+      orphanIdleSince: nil, orphanIdle: 600)
+    #expect(first.decision == .none)
+    #expect(first.orphanIdleSince == Self.epoch)
+
+    let timedOut = WorkerPolicy.decide(
+      now: Self.epoch.addingTimeInterval(600), hardDeadline: nil, leaseExpiresAt: nil,
+      activeConnections: 0, orphanIdleSince: first.orphanIdleSince, orphanIdle: 600)
+    #expect(timedOut.decision == .orphanIdle)
+    #expect(timedOut.orphanIdleSince == Self.epoch)
+  }
+
   @Test func anActiveConnectionResetsTheOrphanClock() {
     let result = WorkerPolicy.decide(
       now: Self.epoch, hardDeadline: nil, leaseExpiresAt: Self.epoch.addingTimeInterval(-10),

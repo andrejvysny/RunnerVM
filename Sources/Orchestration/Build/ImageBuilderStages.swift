@@ -34,18 +34,22 @@ extension ImageBuilder {
     run.log = try? BuildLogWriter(
       url: paths.buildLogFile(run.id), maxBytes: buildConfig.maxLogBytes)
     await run.log?.line("=== build \(run.id.rawValue) (\(run.input.name ?? "-"))")
+    await hook(.queued, run.id)
     try await transition(run, to: .resolving) { $0.startedAt = .now }
+    await hook(.resolvingBase, run.id)
     let base = try await resolveBase(run)
     try await transition(run, to: .staging) { record in
       record.baseDigest = base.imageDigest
       record.baseSHA256 = base.sha256
     }
+    await hook(.staging, run.id)
     try await stage(run, base: base)
     try await transition(run, to: .booting)
     try await boot(run)
     try await transition(run, to: .provisioning)
     try await provision(run)
     try await transition(run, to: .sealing)
+    await hook(.sealing, run.id)
     return try await sealAndRegister(run, base: base)
   }
 
@@ -149,12 +153,15 @@ extension ImageBuilder {
         socketPollAttempts: tuning.worker.socketPollAttempts),
       logger: logger)
     run.worker = worker
+    await hook(.launchingWorker, run.id)
     let pid = try await worker.launch(launcher: launcher)
     try await builds.setWorker(id: run.id, pid: pid, nonce: await worker.nonce)
+    await hook(.bootingGuest, run.id)
     _ = try await worker.startVM()
 
     let agent = GuestAgentClient(socketPath: paths.buildAgentSocket(run.id))
     run.agent = agent
+    await hook(.guestBootstrap, run.id)
     do {
       // Hello only: `agent.health` stays degraded until the recipe installs the runner, so a
       // readiness gate here would deadlock every bootstrap build (B1).
@@ -182,6 +189,7 @@ extension ImageBuilder {
       guard ContinuousClock.now < run.deadline else { throw ImageBuildError.timeout }
       if !step.isSynthetic { progress += 1 }
       let index = progress
+      await hook(Self.phase(of: step), run.id)
       try await builds.recordProgress(
         id: run.id, step: index, total: plan.totalSteps, instruction: step.display)
       await run.log?.line("--- [\(index)/\(plan.totalSteps)] \(step.display)")
@@ -259,6 +267,7 @@ extension ImageBuilder {
       throw ImageBuildError.sealFailed(reason: "vmworker still holds \(layout.workerLock.lastPathComponent)")
     }
     await run.log?.line("--- sealing image")
+    await hook(.storeCommit, run.id)
     let managed = try await images.sealBuild(
       directory: layout.directory, metadata: metadata(run, base: base, probe: report),
       name: run.input.name)
@@ -274,6 +283,15 @@ extension ImageBuilder {
   private static func stepTimeout(_ step: BuildStep, fallback: Duration) -> Duration {
     guard let seconds = step.timeoutSeconds else { return fallback }
     return .seconds(seconds)
+  }
+
+  /// Which fault-injection phase one provisioning step belongs to. A `WORKDIR`'s synthetic `mkdir`
+  /// is a `RUN` like any other as far as a crash is concerned.
+  private static func phase(of step: BuildStep) -> BuildPhase {
+    switch step.action {
+    case .run: .provisioningRun
+    case .copy: .provisioningCopy
+    }
   }
 
   /// The instruction keyword, so `runnervm_image_build_step_seconds` groups by RUN/COPY rather than

@@ -123,7 +123,14 @@ enum LockHolder {
     try process.run()
     defer {
       if process.isRunning { process.terminate() }
-      process.waitUntilExit()
+      // Not `waitUntilExit()`: it waits on the run loop of the thread that called `run()`, which
+      // an intervening `await` may well have moved off. `isRunning` is driven by Foundation's
+      // process reaper and is thread-independent.
+      var attempts = 0
+      while process.isRunning, attempts < 500 {
+        usleep(10_000)
+        attempts += 1
+      }
     }
 
     var seen = Data()

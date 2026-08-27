@@ -183,6 +183,40 @@ releases nothing rather than pretending the VM is gone.
 Either way, `system.drain`/`system.shutdown` treat a running build exactly like a running instance
 (`HostModeControl.activeWork()`): a drain waits for it to finish before advertising a clean stop.
 
+### What the fault-injection tests prove
+
+`Tests/OrchestrationTests/ImageBuildFaultInjectionTests.swift` freezes a builder at every phase of
+the ladder in turn (`BuildHooks.beforePhase`, a seam production never sets), stands a second
+`ImageBuilder` up over the same database, paths, store and admission queue, and asserts that this
+restarted daemon converges. Per phase — `queued`, `resolvingBase`, `staging`, `launchingWorker`,
+`bootingGuest`, `guestBootstrap`, `provisioningRun`, `provisioningCopy`, `sealing`, `storeCommit`,
+`pushing` — it proves:
+
+* **no duplicate continuation.** The frozen builder is then released and runs to completion. Every
+  write it attempts loses: `transition` is a compare-and-swap on the state it last saw, and
+  `terminate` refuses a row that is already terminal. The row, the store and the alias table are
+  byte-for-byte what the restarted daemon left.
+* **no capacity leak.** Once the build is terminal, `activeBuildReservations()` is empty; while its
+  worker is still unproven, the reservation is *kept* and a second `image.build` is refused with
+  `BUILD_AT_MAX_CONCURRENT` — capacity is never exceeded in either direction.
+* **no image-pin leak.** `image_pins` for owner `build` is empty afterwards, and held throughout
+  while the build is pending.
+* **no VM or worker leak.** The build's `worker.lock` (a real `fcntl` lock held by a real child
+  process, since `F_GETLK` is the only liveness signal recovery trusts) has no holder, and no
+  worker is left serving.
+* **no corrupt or partial image.** A crash before `images.sealBuild` registers nothing at all: the
+  disk it was about to hash is gone, so the only honest outcome is no image and no alias.
+* **sealed-image replay is idempotent.** A crash after `image_digest` was written replays the
+  registration exactly once; further recovery ticks register nothing more.
+* **the DB state is terminal or legitimately pending.** A third `recover()` is always a no-op
+  `(0, 0)`.
+* **the content-addressed store is still valid.** Every manifest re-hashes against its blobs
+  (`ImageStore.verify`), no blob is unreferenced, every alias resolves to content that exists, and
+  the base-image cache holds no `.part` leftovers.
+
+`scripts/live-builder-faults.sh` is the same matrix against a real `runnerd --foreground` that is
+actually `kill -9`ed, once per observable build state; see `docs/live-integration.md`.
+
 ## Walkthrough
 
 The shipped recipes under `images/recipes/` form one family, each built on the last — this is

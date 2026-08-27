@@ -50,6 +50,8 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     /// `nil` uses `GitHubRunnerReleaseLookup` over the daemon's gateway.
     public var releases: (any RunnerReleaseLookup)?
     public var now: @Sendable () -> Date = { Date() }
+    /// Fault-injection seams. Never set outside tests; see `BuildHooks`.
+    public var hooks = BuildHooks()
 
     public init() {}
   }
@@ -282,6 +284,12 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
   }
 
   // MARK: - Helpers
+
+  /// Fires a `BuildHooks` seam. A no-op in production, where `beforePhase` is `nil`.
+  func hook(_ phase: BuildPhase, _ id: ImageBuildID) async {
+    guard let beforePhase = tuning.hooks.beforePhase else { return }
+    await beforePhase(phase, id)
+  }
 
   func require(_ id: ImageBuildID) async throws -> ImageBuildRecord {
     guard let record = try await builds.get(id: id) else {

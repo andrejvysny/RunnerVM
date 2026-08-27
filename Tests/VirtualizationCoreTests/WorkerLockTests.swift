@@ -25,6 +25,15 @@ import Testing
     process.arguments = ["-c", Self.holderScript, url.path]
     let output = Pipe()
     let input = Pipe()
+    // Close-on-exec, or any process another suite spawns while this holder is alive inherits the
+    // pipe's write end and the holder's `stdin.read()` never sees EOF, so closing stdin below
+    // would not end it. `posix_spawn`'s `dup2` clears the flag for the intended child.
+    for handle in [
+      output.fileHandleForReading, output.fileHandleForWriting,
+      input.fileHandleForReading, input.fileHandleForWriting,
+    ] {
+      _ = fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC)
+    }
     process.standardOutput = output
     process.standardInput = input
     try process.run()
@@ -50,7 +59,15 @@ import Testing
     }
 
     holder.stdin.closeFile()
-    holder.process.waitUntilExit()
+    holder.process.terminate()
+    // Not `waitUntilExit()`: it waits on the run loop of the thread that called `run()`, which is
+    // not necessarily this one. `isRunning` is driven by Foundation's process reaper instead.
+    var attempts = 0
+    while holder.process.isRunning, attempts < 500 {
+      usleep(10_000)
+      attempts += 1
+    }
+    #expect(!holder.process.isRunning)
 
     let lock = try WorkerLock.acquire(instanceDirectory: directory)
     #expect(lock.descriptor >= 0)

@@ -168,6 +168,55 @@ the report itself only records pass/fail and timing, so keep the console log (or
 `e2e-logs-*` artifact from the driver workflow, which bundles `<state-dir>/logs`) alongside the
 report when filing a follow-up.
 
+## Builder fault injection (`scripts/live-builder-faults.sh`)
+
+A second, independent live script. Where `live-github-e2e.sh` drives GitHub, this one drives the
+in-daemon image builder and answers one question: **if `runnerd` is SIGKILLed in the middle of a
+build, does the daemon that comes back converge?** It is the live twin of
+`Tests/OrchestrationTests/ImageBuildFaultInjectionTests.swift`, which proves the same invariants
+in-process against fakes; this proves them against a real vmworker and a real VM.
+
+It starts `runnerd --foreground` itself (so it owns the pid it kills — pass `--runnerd-cmd` to
+supply your own launch line, which is `exec`'d so its pid is still runnerd's), starts
+`runnerctl image build --no-wait`, polls `runnerctl build show --output json` every 200 ms until
+the row reaches the target state, `kill -9`s the daemon, restarts it, and then waits for the row
+to become terminal and for the orphaned vmworker to exit on its own.
+
+```bash
+scripts/live-builder-faults.sh --recipe images/recipes/ubuntu-24-base --phase all
+scripts/live-builder-faults.sh --recipe ./Runnerfile --phase sealing --name my-image
+scripts/live-builder-faults.sh --dry-run --phase all     # prints the plan, touches nothing
+```
+
+| `--phase` | Kills the daemon while the row is | What the restart has to prove |
+| --- | --- | --- |
+| `queued` | admitted, nothing resolved | the row fails, its slot is freed, no directory is left |
+| `resolving` | fetching/pinning the `FROM` base | the base-image pin is released |
+| `staging` | cloning the base into `builds/<id>/vm` | the half-staged directory is removed |
+| `booting` | spawning vmworker and starting the VM | the orphaned vmworker exits and the VM is gone |
+| `provisioning` | running `RUN`/`COPY` steps in the guest | same, mid-step |
+| `sealing` | probing, sealing, hashing into the store | either a replayed registration (`succeeded`) or a clean `BUILD_INTERRUPTED` — never a partial image |
+| `pushing` | already `succeeded`, push operation attached | the build stays `succeeded` and the push is not duplicated (needs `--push`) |
+
+After each phase it asserts, purely through `runnerctl` JSON: the row is terminal (`succeeded`, or
+`failed` with `BUILD_INTERRUPTED` — `BUILD_RECOVERY_ABANDONED` is reported as a failure, because it
+means the worker was never proven dead); at most one image answers to `--name`, and exactly one that
+`image inspect` can read when the build succeeded; `runnerctl status` reports `builds.running 0`
+and `builds.queued 0`; no `vmworker` process still matches the build id; no `state/builds/<id>`
+directory survives; and `status.capacity`'s reserved cpu/memory/disk are back at the baseline
+captured before the first build.
+
+The report (`--json-report`, default `<state-dir>/logs/builder-faults-<timestamp>.json`) has the
+same shape as the e2e one, with `phase` in place of `name` and a `detail` string recording the
+build id, the final state, and whether recovery ever had to hold the build **pending**
+(`recoveryPending=yes`). Pending is not a failure: it is the daemon correctly refusing to release
+capacity for a vmworker it could not yet prove dead, and it clears once that worker's own
+lease + orphan-idle backstop (~630 s) fires. That is why `RUNNERVM_FAULTS_SETTLE_TIMEOUT` defaults
+to 900 s — anything shorter would report a working safety mechanism as a bug.
+
+The daemon's own stdout/stderr goes to `<state-dir>/logs/builder-faults-runnerd.log`; keep it
+alongside the report, since the warnings (`[faults] warning: ...`) are what explain a failure.
+
 ## Known non-determinism and limitations
 
 - **`redelivery` is not forceable.** RunnerVM's scale-set poll loop

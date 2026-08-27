@@ -22,6 +22,8 @@ struct BuildHarness {
   let baseImages: FakeBaseImageFetcher
   let releases: FakeRunnerReleaseLookup
   let admissionQueue: AdmissionQueue
+  /// Kept so `restartedBuilder` can hand the same configuration to the daemon that comes back up.
+  let configuration: RunnerConfiguration
 
   var paths: RunnerPaths { base.paths }
   var tree: TempTree { base.tree }
@@ -42,12 +44,11 @@ struct BuildHarness {
     return configuration
   }
 
-  /// `customize` gets the last word on `Tuning`, so a test can shorten a bounded wait or freeze
-  /// the clock without every other harness knob having to be restated.
   init(
     configuration: RunnerConfiguration = BuildHarness.configuration(),
     customize: ((inout ImageBuilder.Tuning) -> Void)? = nil
   ) async throws {
+    self.configuration = configuration
     base = try await M2Harness(configuration: configuration)
     buildRows = GRDBImageBuildRepository(db: base.database)
     operations = GRDBOperationRepository(db: base.database)
@@ -55,7 +56,36 @@ struct BuildHarness {
     baseImages = try FakeBaseImageFetcher(directory: base.tree.root)
     releases = FakeRunnerReleaseLookup()
     admissionQueue = AdmissionQueue()
+    builder = Self.makeBuilder(
+      base: base, buildRows: buildRows, operations: operations, admissionQueue: admissionQueue,
+      tuning: Self.tuning(
+        processes: processes, baseImages: baseImages, releases: releases, customize: customize))
+    await builder.updateConfiguration(configuration)
+    await base.instances.attachImageBuilds(builder)
+  }
 
+  /// A second `ImageBuilder` over the same database, paths, image store, worker launcher and
+  /// admission queue: exactly what the next `runnerd` builds when it comes back up after a crash.
+  ///
+  /// Nothing carries over in memory -- `tasks`, `runs` and the memoized base-image cache all start
+  /// empty -- which is what forces `recover()` to rediscover every commitment from the rows.
+  func restartedBuilder(
+    customize: ((inout ImageBuilder.Tuning) -> Void)? = nil
+  ) async -> ImageBuilder {
+    let restarted = Self.makeBuilder(
+      base: base, buildRows: buildRows, operations: operations, admissionQueue: admissionQueue,
+      tuning: Self.tuning(
+        processes: processes, baseImages: baseImages, releases: releases, customize: customize))
+    await restarted.updateConfiguration(configuration)
+    return restarted
+  }
+
+  /// `customize` gets the last word, so a test can shorten a bounded wait or freeze the clock
+  /// without every other harness knob having to be restated.
+  private static func tuning(
+    processes: RecordingProcessRunner, baseImages: FakeBaseImageFetcher,
+    releases: FakeRunnerReleaseLookup, customize: ((inout ImageBuilder.Tuning) -> Void)?
+  ) -> ImageBuilder.Tuning {
     var tuning = ImageBuilder.Tuning()
     tuning.agentReachableTimeout = .seconds(20)
     tuning.agentReadyTimeout = .seconds(5)
@@ -75,8 +105,14 @@ struct BuildHarness {
     tuning.releases = releases
     tuning.recoveryExitWait = (.milliseconds(20), 100)
     customize?(&tuning)
+    return tuning
+  }
 
-    builder = ImageBuilder(
+  private static func makeBuilder(
+    base: M2Harness, buildRows: any ImageBuildRepository, operations: any OperationRepository,
+    admissionQueue: AdmissionQueue, tuning: ImageBuilder.Tuning
+  ) -> ImageBuilder {
+    ImageBuilder(
       paths: base.paths, hostId: base.hostId, builds: buildRows, imageRows: base.imageRows,
       operations: operations, images: base.images, imageStore: base.imageStore,
       buildStore: BuildStore(paths: base.paths, images: base.imageStore, allowFullCopy: true),
@@ -85,8 +121,6 @@ struct BuildHarness {
       hosts: GRDBHostRepository(db: base.database), admissionQueue: admissionQueue,
       metrics: base.metrics, allowFullCopy: true, tuning: tuning,
       logger: Logger(label: "build-test"))
-    await builder.updateConfiguration(configuration)
-    await base.instances.attachImageBuilds(builder)
   }
 
   func cleanup() async {

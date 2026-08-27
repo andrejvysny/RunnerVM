@@ -24,7 +24,10 @@ extension ImageBuilder {
         metadata: ["build_id": .string(run.id.rawValue), "error": .string("\(error)")])
     }
     await record(metrics: state, run: run)
-    if state == .succeeded { await startPush(run) }
+    if state == .succeeded {
+      await hook(.pushing, id)
+      await startPush(run)
+    }
     runs[run.id] = nil
     tasks[run.id] = nil
   }
