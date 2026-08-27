@@ -13,6 +13,22 @@ public actor FakeGuestAgent {
     case stdout(String)
     case stderr(String)
     case exit(Int32)
+    /// Emits nothing for this long, so a host-side idle timeout or a cancellation can be exercised
+    /// without the fake having to know either exists.
+    case stall(Duration)
+  }
+
+  /// An `agent.exec` answer chosen by what the caller asked to run. An image build issues several
+  /// different execs against one agent (mount, each recipe step, probe, seal), so a single script
+  /// cannot describe it; the first route whose `match` appears in the joined argv wins.
+  public struct ExecRoute: Sendable, Equatable {
+    public var match: String
+    public var steps: [ExecStep]
+
+    public init(match: String, steps: [ExecStep]) {
+      self.match = match
+      self.steps = steps
+    }
   }
 
   /// Everything the fake answers. Mutable after construction through the `set…` methods so a test
@@ -25,6 +41,8 @@ public actor FakeGuestAgent {
     public var metrics: GuestMetrics
     public var resizeDisk: ResizeDiskResponse
     public var exec: [ExecStep]
+    /// Consulted before `exec`; see `ExecRoute`.
+    public var execRoutes: [ExecRoute]
     public var runnerStatus: RunnerStatus
     /// Walked one entry per `agent.runnerStatus` call, sticking on the last — the way a real
     /// runner moves `starting -> online -> busy -> exited` without the test racing a timer.
@@ -45,6 +63,7 @@ public actor FakeGuestAgent {
       metrics: GuestMetrics = Script.defaultMetrics,
       resizeDisk: ResizeDiskResponse = ResizeDiskResponse(grown: true, rootBytes: 42 << 30),
       exec: [ExecStep] = [.stdout("ok\n"), .exit(0)],
+      execRoutes: [ExecRoute] = [],
       runnerStatus: RunnerStatus = RunnerStatus(state: .online, pid: 4_242),
       runnerStatusSequence: [RunnerStatus]? = nil,
       startRunnerFailsAfterStart: RPCErrorPayload? = nil,
@@ -58,6 +77,7 @@ public actor FakeGuestAgent {
       self.metrics = metrics
       self.resizeDisk = resizeDisk
       self.exec = exec
+      self.execRoutes = execRoutes
       self.runnerStatus = runnerStatus
       self.runnerStatusSequence = runnerStatusSequence
       self.startRunnerFailsAfterStart = startRunnerFailsAfterStart
@@ -94,6 +114,8 @@ public actor FakeGuestAgent {
   private var appliedEpochs: Set<Int64> = []
   private var counters: [GuestMethod: Int] = [:]
   private var lastExecRequest: ExecRequest?
+  private var execRequests: [ExecRequest] = []
+  private var cancelledExecs = 0
   private var lastStartRunnerSessionId: String?
   private var started = false
 
@@ -131,6 +153,8 @@ public actor FakeGuestAgent {
 
   public func setExec(_ steps: [ExecStep]) { script.exec = steps }
 
+  public func setExecRoutes(_ routes: [ExecRoute]) { script.execRoutes = routes }
+
   public func setMetrics(_ metrics: GuestMetrics) { script.metrics = metrics }
 
   public func setInfo(_ info: GuestInfo) { script.info = info }
@@ -154,6 +178,13 @@ public actor FakeGuestAgent {
   public func callCount(_ method: GuestMethod) -> Int { counters[method] ?? 0 }
 
   public func lastExec() -> ExecRequest? { lastExecRequest }
+
+  /// Every `agent.exec` this fake has been asked to run, in order.
+  public func execHistory() -> [ExecRequest] { execRequests }
+
+  /// How many `agent.exec` streams were torn down before their last step ran -- the fake's view of
+  /// a host that cancelled mid-command.
+  public func cancelledExecCount() -> Int { cancelledExecs }
 
   /// The `sessionId` of the last `agent.startRunner`. The `jitConfig` it carried is deliberately
   /// not retained: nothing outside the agent process ever needs to see it again.
@@ -270,19 +301,35 @@ public actor FakeGuestAgent {
 
   private func runExec(_ envelope: Envelope, sink: StreamSink) async throws {
     try reject(.exec)
-    lastExecRequest = try? GuestCoding.decode(ExecRequest.self, from: envelope.payload)
-    for step in script.exec {
-      switch step {
-      case .stdout(let text):
-        try await sink.send(
-          GuestCoding.payload(ExecChunk(stream: .stdout, data: Data(text.utf8))))
-      case .stderr(let text):
-        try await sink.send(
-          GuestCoding.payload(ExecChunk(stream: .stderr, data: Data(text.utf8))))
-      case .exit(let code):
-        try await sink.send(GuestCoding.payload(ExecResult(exitCode: Int64(code))))
+    let request = try? GuestCoding.decode(ExecRequest.self, from: envelope.payload)
+    lastExecRequest = request
+    if let request { execRequests.append(request) }
+    let steps = plan(for: request)
+    do {
+      for step in steps {
+        switch step {
+        case .stdout(let text):
+          try await sink.send(
+            GuestCoding.payload(ExecChunk(stream: .stdout, data: Data(text.utf8))))
+        case .stderr(let text):
+          try await sink.send(
+            GuestCoding.payload(ExecChunk(stream: .stderr, data: Data(text.utf8))))
+        case .exit(let code):
+          try await sink.send(GuestCoding.payload(ExecResult(exitCode: Int64(code))))
+        case .stall(let duration):
+          try await Task.sleep(for: duration)
+        }
       }
+    } catch {
+      cancelledExecs += 1
+      throw error
     }
+  }
+
+  private func plan(for request: ExecRequest?) -> [ExecStep] {
+    guard let argv = request?.argv else { return script.exec }
+    let text = argv.joined(separator: " ")
+    return script.execRoutes.first { text.contains($0.match) }?.steps ?? script.exec
   }
 }
 

@@ -32,11 +32,22 @@ wrong (see "Dedicated service account and auto-login" below); builds release bin
 `runnerd`/`runnerctl`/`vmworker`; signs `vmworker` with `Resources/vmworker.entitlements` (ad-hoc by
 default; set `CODESIGN_IDENTITY` for a Developer ID build); installs `runnerd`+`vmworker` to
 `<prefix>/libexec/runnervm/` and `runnerctl` to `<prefix>/bin/`; creates `<state-dir>` (mode 0750)
-with `images/`, `instances/`, `logs/` subdirectories (`logs/` and `logs/instances/` explicitly
-0750) and `<runtime-dir>` (mode 0700), both owned by the service user and group; copies `--config`
-to `<state-dir>/config.yaml` (mode 0640); verifies every socket path stays under the 104-byte
-`sun_path` limit before writing anything; and, if `--launchd` is not `none`, installs the chosen
-plist. It never runs `launchctl` — load the job yourself (the script prints the exact command).
+with `images/`, `instances/`, `logs/`, `state/`, `cache/` subdirectories (`logs/` and
+`logs/instances/` explicitly 0750) and `<runtime-dir>` (mode 0700), both owned by the service user
+and group; copies `--config` to `<state-dir>/config.yaml` (mode 0640); verifies every socket path
+stays under the 104-byte `sun_path` limit before writing anything; and, if `--launchd` is not
+`none`, installs the chosen plist. It never runs `launchctl` — load the job yourself (the script
+prints the exact command).
+
+It also installs the in-daemon image builder's assets (`runnerctl image build`,
+[docs/image-build.md](image-build.md)): the Linux guest agent its boot seed installs (built with
+`make -C GuestAgent build-linux` when `GuestAgent/bin/linux-arm64/runnervm-guest-agent` is not
+already there and Go is available — fails otherwise unless `--skip-guest-agent`) at
+`<state-dir>/guest-agent/linux-arm64/`; the shipped `images/recipes/` at
+`<state-dir>/share/recipes/` (owned `root:<group>`, not the service user — the daemon reads these
+but must not be able to rewrite them); and `state/builds/`, `cache/base-images/`, `logs/builds/`,
+the directories the builder itself expects (`runnerd` also creates these lazily on first run if
+`install.sh` is skipped entirely).
 
 `--group` defaults to the dedicated `_runnervm` group, never `staff`: every local macOS user
 account is a member of `staff`, so a `staff`-owned state directory and log/config files would be
@@ -136,9 +147,12 @@ and signed with the virtualization entitlement, `vmworker probe` succeeds and re
 `virtualizationSupported`, state directory writable + APFS clone support, socket path lengths,
 configuration validates (when `--config` is given), free disk vs. `host.reserve.disk`, a GitHub
 credential is present for the configured `github.auth.source` (presence only — this never makes a
-network call; use `runnerctl github test` to actually verify it), host sleep is disabled (spec plan:
-v1 does not tolerate the host sleeping out from under a running VM), and whether a
-`com.runnervm.runnerd` launchd job is loaded. When `runnerd.sock` is reachable it also folds in a
+network call; use `runnerctl github test` to actually verify it), the in-daemon image builder's
+`hdiutil` (a real `makehybrid` smoke test), guest agent binary (same search order as
+`BuildSeed.resolveAgent` — see [docs/image-build.md](image-build.md#guest-agent-resolution)) and
+shipped recipe root, host sleep is disabled (spec plan: v1 does not tolerate the host sleeping out
+from under a running VM), and whether a `com.runnervm.runnerd` launchd job is loaded. When
+`runnerd.sock` is reachable it also folds in a
 `system.status` summary. Exits 1 if any check fails; `--output json` for automation.
 
 ## Log locations
@@ -172,6 +186,14 @@ pipelines.
 4. `runnerctl doctor` to confirm the new binary is signed and `vmworker probe` still succeeds.
 5. Reload the job (`launchctl bootstrap ...`, printed by `install.sh`), then `runnerctl system
    resume` to advertise capacity again.
+
+**The SQLite schema migration is one-way.** `runnerd` migrates `<state-dir>/state/runnerd.sqlite3`
+forward on startup (`Sources/Persistence/Migrations/Migrator.swift`) and never downgrades it: a
+database already migrated to schema v2 (the in-daemon image builder's `image_builds`/`image_aliases`
+tables, first shipped alongside `runnerctl image build`) refuses to open under an older runnerd
+binary whose own `currentSchemaVersion` is still 1 (`DB_SCHEMA_VERSION_UNSUPPORTED`). Once step 3
+above has run with a v2-or-later `runnerd`, rolling back to a pre-image-builder binary on the same
+`<state-dir>` is not supported — restore a database backup taken before the upgrade instead.
 
 ## Security notes (spec §129)
 

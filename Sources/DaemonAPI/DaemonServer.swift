@@ -49,6 +49,7 @@ public actor DaemonServer {
     await unary(.scopeList) { try await service.scopeList() }
     await unary(.operationList) { try await service.operationList() }
     await unary(.imageList) { try await service.imageList() }
+    await unary(.buildList) { try await service.buildList() }
     await unary(.instanceList) { try await service.instanceList() }
     await unary(.runnerList) { try await service.runnerList() }
     await unary(.scaleSetList) { try await service.scaleSetList() }
@@ -73,6 +74,10 @@ public actor DaemonServer {
     await request(.registryLogout) { try await service.registryLogout($0) }
     await request(.imageDelete) { try await service.imageDelete($0) }
     await request(.imagePrune) { try await service.imagePrune($0) }
+    await request(.imageBuild) { try await service.imageBuild($0) }
+    await request(.buildGet) { try await service.buildGet($0) }
+    await request(.buildLog) { try await service.buildLog($0) }
+    await request(.buildCancel) { try await service.buildCancel($0) }
     await request(.instanceGet) { try await service.instanceGet($0) }
     await request(.instanceCreate) { try await service.instanceCreate($0) }
     await request(.instanceStop) { try await service.instanceStop($0) }

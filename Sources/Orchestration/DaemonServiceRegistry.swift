@@ -24,7 +24,8 @@ extension DaemonServiceImpl {
       throw OrchestrationError.diskPressureCritical(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes)
     }
-    let start = try await images.startPull(reference: request.reference)
+    let start = try await images.startPull(
+      reference: request.reference, format: try Self.artifactFormat(request.format))
     return ImagePullResponse(
       reference: start.reference,
       manifestDigest: start.manifestDigest.rawValue,
@@ -38,6 +39,19 @@ extension DaemonServiceImpl {
     return ImagePushResponse(
       reference: start.reference, digest: start.digest.rawValue,
       operationId: start.operationId?.rawValue)
+  }
+
+  /// `nil` auto-detects. A value the daemon does not know is the caller's mistake, and saying so
+  /// here is better than silently falling back to auto-detection.
+  static func artifactFormat(_ raw: String?) throws -> ImageArtifactFormat? {
+    guard let raw else { return nil }
+    guard let format = ImageArtifactFormat(rawValue: raw) else {
+      throw ImageError.metadataInvalid(
+        reason: "unknown image format '\(raw)'; expected one of "
+          + ImageArtifactFormat.allCases.map(\.rawValue).joined(separator: ", ")
+      )
+    }
+    return format
   }
 
   // MARK: - registry.*

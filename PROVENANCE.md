@@ -55,9 +55,13 @@ Statuses: `new` (RunnerVM original), `derived` (adapted from Tart, header requir
 | Sources/OCIRegistry/Auth/KeychainRegistryCredentials.swift | derived | tart `Credentials/KeychainCredentialsProvider.swift`; read-only, store injectable |
 | Sources/OCIRegistry/Layerizer/ContentDigest.swift | derived | tart `OCI/Digest.swift` (4 MiB streaming SHA-256, ranged hash) |
 | Sources/OCIRegistry/Layerizer/DiskLayerizer.swift | derived | tart `OCI/Layerizer/DiskV2.swift:25-92` (chunked push) and `:94-262` (pre-truncate, per-chunk resume) |
+| Sources/OCIRegistry/Layerizer/PlacedChunk.swift | derived | tart `OCI/Layerizer/DiskV2.swift:111-125,141-157` (chunk-annotations-to-offsets layout) |
 | Sources/OCIRegistry/Layerizer/SparseDiskWriter.swift | derived | tart `OCI/Layerizer/DiskV2.swift:263-299` (`zeroSkippingWrite`, `F_PUNCHHOLE`) |
 | Sources/OCIRegistry/Layerizer/LZ4Codec.swift | derived | tart `OCI/Layerizer/DiskV2.swift` (Apple `Compression` LZ4 stream idiom); compression streamed to a staging file instead of mmap |
 | Sources/OCIRegistry/Artifact/{OCIManifest,RunnerVMArtifact,RunnerVMImageTransfer}.swift | rewritten | concept: tart `OCI/Manifest.swift` (descriptor + per-chunk annotation pattern). Media types, annotation keys and config schema are RunnerVM's own (spec §55) |
+| Sources/OCIRegistry/Artifact/TartArtifact.swift | derived | tart `OCI/Manifest.swift:114-207` (`tartDiskRepresentation`, media types, annotation keys) and `VMDirectory+OCI.swift:15-113` (pull layout, legacy `disk.v1` refusal) |
+| Sources/OCIRegistry/Artifact/TartVMConfig.swift | derived | tart `VMConfig.swift:106-143` (`init(from:)` defaults) and `Platform/Darwin.swift:20-51` (`ecid`/`hardwareModel` base64); Virtualization types replaced by plain values, unknown `diskFormat` refused instead of coerced to raw |
+| Sources/OCIRegistry/Testing/TartImagePublisher.swift | derived | tart `VMDirectory+OCI.swift:156-205` (`pushToRegistry` layer layout: config, disk chunks, NVRAM, stub OCI config); test double only |
 | Sources/OCIRegistry/Reference/OCIReference.swift | new | — (wraps `RunnerCore.ImageReference`; tart's ANTLR grammar deliberately not carried) |
 | Sources/OCIRegistry/{OCIRegistry,Client/RegistryError,Client/RegistryRequest,Layerizer/NVRAMLayer,Layerizer/TransferProgress,Auth/RegistryCredential}.swift | new | — |
 | Sources/OCIRegistry/Testing/FakeRegistry*.swift | new | test double; behaviour mirrors the OCI Distribution v2 spec and GHCR's 4 MB upload-chunk cap |

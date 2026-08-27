@@ -156,18 +156,31 @@ public struct OCIIndex: Codable, Sendable, Hashable {
 
   /// Picks the entry this host can actually run: arm64, a guest OS RunnerVM supports, and — when
   /// any entry declares one — RunnerVM's own artifact type.
-  public func select(architecture: String = "arm64") throws -> OCIDescriptor {
+  ///
+  /// `format` forces the choice for a mirror that fronts both schemas behind one tag. Only
+  /// RunnerVM's own entries can be recognised positively (tart writes no `artifactType` at all),
+  /// so asking for `.tart` means "anything that is not RunnerVM's"; the manifest itself is still
+  /// validated afterwards, and a wrong guess fails there rather than here.
+  public func select(
+    architecture: String = "arm64", preferring format: ImageArtifactFormat? = nil
+  ) throws -> OCIDescriptor {
     var candidates = manifests.filter { entry in
       guard let platform = entry.platform else { return true }
       return platform.architecture == architecture
         && ["darwin", "linux"].contains(platform.os)
     }
-    if candidates.contains(where: { $0.artifactType == RunnerVMMediaType.artifact }) {
-      candidates = candidates.filter { $0.artifactType == RunnerVMMediaType.artifact }
+    let runnerVM = candidates.filter { $0.artifactType == RunnerVMMediaType.artifact }
+    switch format {
+    case .runnervm:
+      candidates = runnerVM
+    case .tart:
+      candidates = candidates.filter { $0.artifactType != RunnerVMMediaType.artifact }
+    case nil:
+      if !runnerVM.isEmpty { candidates = runnerVM }
     }
     guard let selected = candidates.first else {
       throw RegistryError.unsupportedManifest(
-        reason: "index has no \(architecture) RunnerVM manifest"
+        reason: "index has no \(architecture) \(format?.rawValue ?? "RunnerVM") manifest"
       )
     }
     return selected

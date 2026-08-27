@@ -1,0 +1,12 @@
+# ubuntu-24-jvm: adds a headless JDK plus Maven and Gradle (all apt) on top of ubuntu-24.
+FROM ubuntu-24
+
+ARG JDK_VERSION=21
+
+LABEL dev.runnervm.image.name="ubuntu-24-jvm"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+ENV APT="apt-get -y -o DPkg::Lock::Timeout=900 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+RUN $APT update && \
+    $APT install openjdk-${JDK_VERSION}-jdk-headless maven gradle

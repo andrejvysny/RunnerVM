@@ -1,0 +1,56 @@
+# ubuntu-24-minimal: bootstrap image for the ubuntu-24 family.
+#
+# Base: Ubuntu 24.04 LTS (noble) arm64 cloud image, official dated release. Resolved 2026-08-26
+# from https://cloud-images.ubuntu.com/releases/noble/ -- newest release directory at the time was
+# release-20260814; the sha256 below is copied from that directory's own SHA256SUMS.
+FROM cloud-image:https://cloud-images.ubuntu.com/releases/noble/release-20260814/ubuntu-24.04-server-cloudimg-arm64.img \
+  --sha256=4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa \
+  --disk=16GiB
+
+ARG RUNNER_VERSION=latest
+ARG RUNNER_SHA256
+ARG PACKAGE_UPGRADE=yes
+ARG RUNNER_SUDO=yes
+
+LABEL dev.runnervm.image.name="ubuntu-24-minimal"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+ENV APT="apt-get -y -o DPkg::Lock::Timeout=900 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+# Rebuilt from scratch every time, never patched in place: background apt timers only fight this
+# build for the dpkg lock.
+RUN systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true && \
+    systemctl disable unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
+
+RUN $APT update && [ "${PACKAGE_UPGRADE}" != "yes" ] || $APT upgrade
+
+RUN $APT install git curl wget ca-certificates jq tar gzip xz-utils zstd unzip zip rsync \
+      openssh-server build-essential python3 python3-pip pipx dnsutils iproute2 \
+      netcat-openbsd cloud-guest-utils
+
+# The bootstrap seed already creates these; the recipe repeats them idempotently so a derived
+# rebuild from a base that lacks them still works
+# (same shape the old build script relied on cloud-init for).
+RUN groupadd -f docker && \
+    id -u runner >/dev/null 2>&1 || useradd --uid 1001 --create-home --shell /bin/bash --groups docker runner
+
+# The host resolved RUNNER_VERSION/RUNNER_SHA256 before this build started; a mismatch here means
+# the tarball bytes changed between the two downloads, so the build fails rather than baking in
+# something nobody verified.
+RUN install -d -o runner -g runner -m 0755 /opt/actions-runner && \
+    curl -fsSL --retry 5 --retry-delay 3 \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-arm64-${RUNNER_VERSION}.tar.gz" \
+      -o /tmp/actions-runner.tar.gz && \
+    echo "${RUNNER_SHA256}  /tmp/actions-runner.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/actions-runner.tar.gz -C /opt/actions-runner && \
+    rm -f /tmp/actions-runner.tar.gz && \
+    chown -R runner:runner /opt/actions-runner && \
+    chmod +x /opt/actions-runner/run.sh /opt/actions-runner/config.sh && \
+    /opt/actions-runner/bin/installdependencies.sh
+
+RUN if [ "${RUNNER_SUDO}" = "yes" ]; then \
+      echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-runner && \
+      chmod 0440 /etc/sudoers.d/90-runner; \
+    fi
+
+COPY etc/runnervm-image.json /etc/runnervm-image.json

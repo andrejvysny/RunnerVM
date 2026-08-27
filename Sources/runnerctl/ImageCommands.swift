@@ -8,7 +8,7 @@ struct Image: ParsableCommand {
     commandName: "image",
     abstract: "Import and inspect local VM images.",
     subcommands: [
-      Import.self, Pull.self, Push.self, List.self, Inspect.self, Delete.self, Prune.self,
+      Import.self, Pull.self, Push.self, Build.self, List.self, Inspect.self, Delete.self, Prune.self,
     ])
 
   @OptionGroup var options: GlobalOptions
@@ -43,6 +43,11 @@ extension Image {
       help: "Sealed metadata.json to adopt (runner version, capabilities, provenance). Defaults to a metadata.json next to the disk; an explicit path that cannot be used is an error.")
     var metadata: String?
 
+    @Flag(
+      name: .long,
+      help: "Record that this disk carries no RunnerVM guest agent; such an image cannot run jobs and is only useful as a build/inspection artifact.")
+    var noGuestAgent = false
+
     func validate() throws {
       guard ["linux", "macos"].contains(os) else {
         throw ValidationError("--os must be linux or macos")
@@ -52,7 +57,7 @@ extension Image {
     func run() async throws {
       let request = ImageImportRequest(
         path: Image.absolute(disk), nvramPath: nvram.map(Image.absolute), os: os, name: name,
-        metadataPath: metadata.map(Image.absolute))
+        metadataPath: metadata.map(Image.absolute), guestAgent: noGuestAgent ? false : nil)
       let image = try await options.withDaemon { try await $0.imageImport(request) }
       switch options.output {
       case .json: try JSONOut.print(image)
@@ -151,6 +156,10 @@ extension Image {
     return summary + "\n\n" + detail
   }
 
+  /// Kept as strings rather than importing `OCIRegistry`: runnerctl talks to the daemon over the
+  /// socket and does not link the registry module.
+  static let artifactFormats = ["runnervm", "tart"]
+
   static func absolute(_ path: String) -> String {
     URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
       .path(percentEncoded: false)
@@ -191,11 +200,32 @@ extension Image {
       ("on disk", Format.bytes(image.allocatedSizeBytes)),
       ("runner", runner(image)),
       ("runner health", image.runnerVersionHealth.rawValue),
+      ("source", source(image)),
+      ("guest agent", guestAgent(image)),
       ("pins", "\(image.pinCount)"),
       ("path", image.localPath),
       ("created", image.createdAt),
       ("pulled", Format.optional(image.pulledAt)),
     ] + provenanceFields(image.provenance)
+  }
+
+  /// `tart (imported)` is worth calling out: such an image is read-only provenance, never a thing
+  /// that can run a job. A daemon that predates the field reports nothing, so say so rather than
+  /// guessing `runnervm`.
+  static func source(_ image: ImageInfoDTO) -> String {
+    switch image.sourceFormat {
+    case "tart": "tart (imported)"
+    case let value?: value
+    case nil: "-"
+    }
+  }
+
+  static func guestAgent(_ image: ImageInfoDTO) -> String {
+    switch image.guestAgent {
+    case true?: "present"
+    case false?: "absent"
+    case nil: "-"
+    }
   }
 
   /// Provenance is only as complete as the build that sealed it, so every row is dropped when its

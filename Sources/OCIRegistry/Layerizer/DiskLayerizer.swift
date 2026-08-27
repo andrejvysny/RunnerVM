@@ -60,10 +60,26 @@ public enum DiskLayerizer {
     )
   }
 
-  /// Reassembles `chunks` into `diskURL`, resuming an interrupted attempt and keeping the file
-  /// sparse.
+  /// Resolves `chunks` against `virtualSize` and reassembles them into `diskURL` (resuming an
+  /// interrupted attempt and keeping the file sparse). A thin wrapper over
+  /// `pull(placed:to:virtualSize:contentDigest:repository:registry:concurrency:progress:)` for
+  /// callers that have not already computed placement themselves.
   public static func pull(
     chunks: [OCIDescriptor], to diskURL: URL, virtualSize: UInt64, contentDigest: String?,
+    repository: String, registry: RegistryClient, concurrency: Int = DiskLayerizer.defaultConcurrency,
+    progress: TransferProgress? = nil
+  ) async throws {
+    let placed = try PlacedChunk.layout(of: chunks, virtualSize: virtualSize)
+    try await pull(
+      placed: placed, to: diskURL, virtualSize: virtualSize, contentDigest: contentDigest,
+      repository: repository, registry: registry, concurrency: concurrency, progress: progress
+    )
+  }
+
+  /// Reassembles already-placed chunks into `diskURL`, resuming an interrupted attempt and keeping
+  /// the file sparse.
+  public static func pull(
+    placed: [PlacedChunk], to diskURL: URL, virtualSize: UInt64, contentDigest: String?,
     repository: String, registry: RegistryClient, concurrency: Int = DiskLayerizer.defaultConcurrency,
     progress: TransferProgress? = nil
   ) async throws {
@@ -75,16 +91,15 @@ public enum DiskLayerizer {
       }
     }
     try truncate(diskURL, to: virtualSize)
-    let layout = try layout(of: chunks, virtualSize: virtualSize)
 
     try await withThrowingTaskGroup(of: Void.self) { group in
-      for (index, placed) in layout.enumerated() {
+      for (index, chunk) in placed.enumerated() {
         if index >= concurrency { try await group.next() }
         group.addTask {
           try await pullChunk(
-            placed: placed, to: diskURL, repository: repository, registry: registry, resumed: resumed
+            placed: chunk, to: diskURL, repository: repository, registry: registry, resumed: resumed
           )
-          progress?.advance(by: UInt64(placed.descriptor.size))
+          progress?.advance(by: UInt64(chunk.descriptor.size))
         }
       }
       try await group.waitForAll()
@@ -102,13 +117,6 @@ public enum DiskLayerizer {
   struct ChunkSpan {
     let offset: UInt64
     let length: Int
-  }
-
-  struct PlacedChunk {
-    let descriptor: OCIDescriptor
-    let offset: UInt64
-    let uncompressedSize: UInt64
-    let uncompressedDigest: String
   }
 
   private static func pushChunk(
@@ -150,7 +158,9 @@ public enum DiskLayerizer {
       return
     }
     let writer = try SparseDiskWriter(url: diskURL, startingAt: placed.offset, punchHoles: resumed)
-    let decompressor = try LZ4Codec.Decompressor { data in try writer.write(data) }
+    let decompressor = try LZ4Codec.Decompressor(
+      sink: { data in try writer.write(data) }, limit: Int(clamping: placed.uncompressedSize)
+    )
     try await registry.pullBlob(
       placed.descriptor.digest, repository: repository, expectedSize: placed.descriptor.size
     ) { data in
@@ -177,25 +187,6 @@ public enum DiskLayerizer {
       offset += UInt64(length)
     }
     return spans
-  }
-
-  static func layout(of chunks: [OCIDescriptor], virtualSize: UInt64) throws -> [PlacedChunk] {
-    var offset: UInt64 = 0
-    var placed: [PlacedChunk] = []
-    for chunk in chunks {
-      let size = try chunk.requiredUInt64Annotation(RunnerVMAnnotation.chunkUncompressedSize)
-      let digest = try chunk.requiredAnnotation(RunnerVMAnnotation.chunkUncompressedDigest)
-      placed.append(
-        PlacedChunk(descriptor: chunk, offset: offset, uncompressedSize: size, uncompressedDigest: digest)
-      )
-      offset += size
-    }
-    guard offset == virtualSize else {
-      throw RegistryError.unsupportedManifest(
-        reason: "chunks describe \(offset) bytes but the disk is \(virtualSize)"
-      )
-    }
-    return placed
   }
 
   static func fileSize(of url: URL) throws -> UInt64 {

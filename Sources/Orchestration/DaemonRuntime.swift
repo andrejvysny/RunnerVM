@@ -85,9 +85,9 @@ public actor DaemonRuntime {
 
   public typealias ConfigParser = @Sendable (String) throws -> RunnerConfiguration
 
-  private let options: Options
-  private let parseConfig: ConfigParser
-  private let logger: Logger
+  let options: Options
+  let parseConfig: ConfigParser
+  let logger: Logger
   private let reconciler: Reconciler
 
   private var lock: DaemonLock?
@@ -98,6 +98,9 @@ public actor DaemonRuntime {
   private var instances: InstanceManager?
   private var runners: RunnerSessionManager?
   private var orchestrator: Orchestrator?
+  private var builder: ImageBuilder?
+  /// `system shutdown --force` cancels running image builds; a plain shutdown waits them out.
+  private var shutdownForce = false
   private var reconcileTask: Task<Void, Never>?
   private var maintenanceTask: Task<Void, Never>?
   private var metricsEndpoint: MetricsEndpoint?
@@ -108,7 +111,12 @@ public actor DaemonRuntime {
 
   /// One registry for the whole daemon (spec §43): every manager writes into it, `metrics.snapshot`
   /// and `GET /metrics` read from it.
-  private let metrics = MetricRegistry()
+  let metrics = MetricRegistry()
+
+  /// One admission lock for the whole daemon: instance creation and (from Phase 5) image builds
+  /// spend the same host budget, so they have to serialize against each other and not merely
+  /// against their own kind (spec §121).
+  let admissionQueue = AdmissionQueue()
 
   public init(
     options: Options,
@@ -203,6 +211,10 @@ public actor DaemonRuntime {
     maintenanceTask = nil
     await server?.stop()
     server = nil
+    // Before the orchestrator: a build owns a VM, a worker and an image pin, and its teardown has
+    // to complete while the managers it releases them through are still wired up (B4).
+    await builder?.stop(cancel: shutdownForce)
+    builder = nil
     // Closes the GitHub message sessions and lets in-flight creations finish (spec §108).
     await orchestrator?.stop()
     orchestrator = nil
@@ -232,6 +244,12 @@ public actor DaemonRuntime {
     await reconciler.state()
   }
 
+  /// The daemon-wide capacity lock, exposed so Phase 5's image builder takes the *same* one the
+  /// instance manager already holds during admission.
+  public func hostAdmissionQueue() -> AdmissionQueue {
+    admissionQueue
+  }
+
   /// The bound Prometheus port, or `nil` when the endpoint is disabled.
   public func metricsPort() async -> UInt16? {
     await metricsEndpoint?.port()
@@ -249,6 +267,7 @@ public actor DaemonRuntime {
   /// to release the socket, the lock and the database.
   private func beginShutdown(force: Bool) {
     guard shutdownTask == nil else { return }
+    shutdownForce = force
     let delay = options.shutdownDelay
     let shouldExit = options.exitOnShutdown
     logger.notice("shutdown requested", metadata: ["force": .stringConvertible(force)])
@@ -328,7 +347,7 @@ public actor DaemonRuntime {
       paths: options.paths, hostId: hostId, instances: instanceRows,
       profiles: GRDBProfileRepository(db: database), imageRows: imageRows, images: images,
       imageStore: imageStore, instanceStore: instanceStore, supervisor: supervisor, probe: probe,
-      runnerVersions: runnerVersions)
+      admissionQueue: admissionQueue, runnerVersions: runnerVersions)
     await instances.attachEventLog(eventLog)
     self.instances = instances
     let runners = RunnerSessionManager(
@@ -346,12 +365,22 @@ public actor DaemonRuntime {
       gateway: gateway, instanceRows: instanceRows, demandMode: demandMode)
     await orchestrator.attachEventLog(eventLog)
     self.orchestrator = orchestrator
+    let builder = makeBuilder(
+      database: database, hostId: hostId, probe: probe, images: images, imageStore: imageStore,
+      instanceRows: instanceRows, executable: executable, gateway: gateway,
+      runnerVersions: runnerVersions)
+    self.builder = builder
+    // Both admission paths and the scheduler must charge for a running build, so the builder is
+    // registered with them the moment it exists (spec §121).
+    await instances.attachImageBuilds(builder)
+    await orchestrator.attachImageBuilds(builder)
     await reconciler.attach(
       CompositeReconcileStep([
         InstanceReconciler(
           instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
           retention: { await instances.failedInstanceRetention() }, images: images),
         OrchestratorReconcileStep(orchestrator: orchestrator),
+        BuildReconciler(builder: builder),
       ]))
     return DaemonServiceImpl(
       paths: options.paths,
@@ -376,63 +405,9 @@ public actor DaemonRuntime {
       metrics: metrics,
       registryCredentials: registryCredentials,
       eventLog: eventLog,
+      builder: builder,
       logger: logger)
   }
-
-  /// Spec §13: the rest of the daemon only ever sees `any DemandProvider`.
-  private func makeOrchestrator(
-    database: RunnerDatabase, hostId: HostID, probe: HostProbeResult, instances: InstanceManager,
-    runners: RunnerSessionManager, gateway: GitHubGateway, instanceRows: any InstanceRepository,
-    demandMode: DemandMode
-  ) -> Orchestrator {
-    let scaleSets = GRDBScaleSetRepository(db: database)
-    let demand: any DemandProvider = switch demandMode {
-    case .manual:
-      ManualDemandProvider()
-    case .scaleSet:
-      ScaleSetDemandProvider(
-        owner: hostId.rawValue, profiles: GRDBProfileRepository(db: database),
-        scopes: GRDBScopeRepository(db: database), scaleSets: scaleSets,
-        plane: { await gateway.scaleSetControlPlane() })
-    }
-    logger.info("demand provider", metadata: ["mode": .string(demandMode.rawValue)])
-    return Orchestrator(
-      hostId: hostId, paths: options.paths, probe: probe,
-      hosts: GRDBHostRepository(db: database), profiles: GRDBProfileRepository(db: database),
-      instanceRows: instanceRows, sessionRows: GRDBRunnerSessionRepository(db: database),
-      scaleSets: scaleSets, instances: instances, runners: runners, demand: demand,
-      metrics: metrics)
-  }
-
-  /// The demand provider and the log files are wired once, before `service.bootstrap` has parsed
-  /// and applied a configuration (spec §69 step 4 runs after the API surface is up), so this peeks
-  /// at whatever `bootstrap` is about to apply -- `--config` if given, else the last persisted
-  /// document. A parse failure here is silently ignored and every caller falls back to its
-  /// default; `bootstrap` re-parses for real right after and surfaces the error properly.
-  private func pendingConfiguration(applier: ConfigApplier) -> RunnerConfiguration? {
-    let yaml: String? = if let configPath = options.configPath {
-      try? String(contentsOf: configPath, encoding: .utf8)
-    } else {
-      applier.loadApplied()?.yaml
-    }
-    guard let yaml else { return nil }
-    return try? parseConfig(yaml)
-  }
-
-  private func createDirectories() throws {
-    let manager = FileManager.default
-    for directory in [options.paths.stateDir, options.paths.imagesDir, options.paths.instancesDir,
-                      options.paths.daemonLogsDir, options.paths.instanceLogsDir] {
-      try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-    }
-    // 0700: the socket directory is the daemon's control surface, not a shared temp dir.
-    try manager.createDirectory(
-      at: options.paths.socketDir, withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
-    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: socketDirPath)
-  }
-
-  private var socketDirPath: String { options.paths.socketDir.path(percentEncoded: false) }
 
   private func startReconcileLoop() -> Task<Void, Never> {
     let reconciler = self.reconciler

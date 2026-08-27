@@ -57,9 +57,12 @@ struct PublishedImage {
   static let diskBytes: UInt64 = 32 << 20
   static let chunkBytes = 8 << 20
 
+  /// - Parameter guestAgent: what the published metadata declares. The default `true` matches a
+  ///   real RunnerVM image; `false` publishes the kind of inspection-only artifact `vm create`
+  ///   must refuse (spec §58).
   static func publish(
     into fake: FakeRegistry, at directory: URL, repository: String = "acme/runners/ubuntu-24",
-    tag: String = "stable", withNVRAM: Bool = false, seed: UInt8 = 1
+    tag: String = "stable", withNVRAM: Bool = false, seed: UInt8 = 1, guestAgent: Bool = true
   ) async throws -> PublishedImage {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let disk = try makeDisk(at: directory.appending(path: "disk.img"), seed: seed)
@@ -71,8 +74,10 @@ struct PublishedImage {
     }
     let metadata = ImageMetadata(
       os: .linux, architecture: "arm64", virtualDiskSizeBytes: diskBytes,
+      guestAgentVersion: guestAgent ? "0.1.0" : nil,
       createdAt: Date(timeIntervalSince1970: 1_756_000_000 + Double(seed)),
-      boot: ImageMetadata.Boot(type: .efi))
+      boot: ImageMetadata.Boot(type: .efi),
+      capabilities: ImageMetadata.Capabilities(guestAgent: guestAgent))
     let reference = try fake.reference(repository, tag: tag)
     let staging = directory.appending(path: "push", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)

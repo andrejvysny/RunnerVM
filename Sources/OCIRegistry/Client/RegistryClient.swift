@@ -109,7 +109,13 @@ public final class RegistryClient: Sendable {
   }
 
   /// Tag (or digest) → immutable manifest, following an index when the registry serves one.
-  public func resolve(_ reference: OCIReference) async throws -> ResolvedManifest {
+  ///
+  /// `format` is passed straight to `OCIIndex.select`, so a caller that has already been told
+  /// which artifact schema it wants gets the matching index entry rather than RunnerVM's default
+  /// preference for its own.
+  public func resolve(
+    _ reference: OCIReference, preferring format: ImageArtifactFormat? = nil
+  ) async throws -> ResolvedManifest {
     guard reference.registry == registry else {
       throw RegistryError.invalidResponse(
         operation: "resolve \(reference)", reason: "client is bound to \(registry)"
@@ -118,7 +124,7 @@ public final class RegistryClient: Sendable {
     let repository = reference.repositoryPath
     var fetched = try await fetchManifest(repository: repository, reference: reference.manifestReference)
     if fetched.mediaType == RunnerVMMediaType.ociIndex {
-      let selected = try OCIIndex.decode(fetched.data).select()
+      let selected = try OCIIndex.decode(fetched.data).select(preferring: format)
       fetched = try await fetchManifest(repository: repository, reference: selected.digest)
     }
     guard fetched.mediaType == RunnerVMMediaType.ociManifest else {

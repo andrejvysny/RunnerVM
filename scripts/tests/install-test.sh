@@ -83,5 +83,47 @@ else
     no "--group staff --allow-staff-group exits 0" "$out"
 fi
 
+# --------------------------------------------------------------------------
+# 5. Default plan installs the image-builder assets (spec P6): guest agent binary + unit, the
+#    shipped recipes (root:_runnervm, not the service user), and the builder's own directories.
+#    Independent of whether GuestAgent/bin/linux-arm64/runnervm-guest-agent happens to exist on
+#    this machine: either branch (found prebuilt vs. would build it) still queues the same
+#    install/chown lines below it.
+# --------------------------------------------------------------------------
+out="$(dry_run assets)"
+expect_contains "$out" "guest-agent/linux-arm64/runnervm-guest-agent" \
+    "default plan installs the guest agent binary"
+expect_contains "$out" "runnervm-guest-agent.service" \
+    "default plan installs the guest agent systemd unit"
+expect_contains "$out" "share/recipes" \
+    "default plan installs the shipped recipes"
+expect_contains "$out" "Runnerfile" \
+    "default plan installs at least one Runnerfile"
+expect_contains "$out" "chown root:_runnervm" \
+    "recipes are chowned to root:_runnervm, not the service user"
+expect_contains "$out" "state/builds" \
+    "default plan creates the image-build state directory"
+expect_contains "$out" "cache/base-images" \
+    "default plan creates the base-image cache directory"
+expect_contains "$out" "logs/builds" \
+    "default plan creates the build logs directory"
+
+# --------------------------------------------------------------------------
+# 6. --skip-guest-agent warns instead of installing a guest agent, and touches nothing under
+#    guest-agent/ -- recipes and the new directories are still installed either way.
+# --------------------------------------------------------------------------
+out="$(dry_run skip-agent --skip-guest-agent)"
+expect_contains "$out" "skip-guest-agent" \
+    "--skip-guest-agent warns that it is not installing a guest agent"
+expect_contains "$out" "share/recipes" \
+    "--skip-guest-agent still installs the shipped recipes"
+# The warning text above names where the binary *would* go, so a plain substring check on the
+# whole output would false-positive on it -- anchor to the actual `mkdir -p` action line instead.
+if printf '%s\n' "$out" | grep -q '^+ mkdir -p .*guest-agent/linux-arm64$'; then
+    no "--skip-guest-agent installs nothing under guest-agent/" "found a mkdir line: $out"
+else
+    ok "--skip-guest-agent installs nothing under guest-agent/"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

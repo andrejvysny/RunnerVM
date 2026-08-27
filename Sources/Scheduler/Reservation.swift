@@ -58,6 +58,49 @@ public struct Reservation: Sendable, Hashable, Identifiable {
   }
 }
 
+public extension RunnerProfileID {
+  /// Sentinel profile an in-flight image build reserves capacity under. `@` cannot appear in a
+  /// configured profile name, so every per-profile filter (`profileCapacity`'s instance count,
+  /// `InstanceAdmission`'s `maxInstances` check, `DesiredCapacity`'s reservation slice) skips it
+  /// while the host-wide totals in `CapacityCalculator.fits` still charge for it.
+  static let imageBuild = RunnerProfileID(rawValue: "@image-build")
+}
+
+public extension Reservation {
+  /// The cpu/memory/disk a running image build holds against the host budget. A build owns a VM
+  /// that is producing an artifact, so it is `bound` and in a running state: neither
+  /// `isCancellablePreBoot` nor `isCancellableIdle` can ever select it, and the scheduler has no
+  /// way to reclaim it (spec §121).
+  ///
+  /// `guestOS` defaults to `.linux`; a builder producing a macOS image passes `.macos` so the
+  /// build also counts against `HostConstants.macOSGuestLimit`.
+  static func imageBuild(
+    id: String,
+    cpuCount: Int,
+    memoryBytes: UInt64,
+    diskBytes: UInt64,
+    createdAt: Date,
+    guestOS: GuestOS = .linux
+  ) -> Reservation {
+    Reservation(
+      instanceId: InstanceID(rawValue: id),
+      profileId: .imageBuild,
+      guestOS: guestOS,
+      cpuCount: cpuCount,
+      memoryBytes: memoryBytes,
+      diskReservationBytes: diskBytes,
+      state: .busy,
+      bound: true,
+      createdAt: createdAt
+    )
+  }
+
+  /// True for a reservation that belongs to an image build rather than to a runner instance.
+  var isImageBuild: Bool {
+    profileId == .imageBuild
+  }
+}
+
 /// The resource ask of one prospective instance.
 public struct ResourceRequest: Sendable, Hashable {
   public var guestOS: GuestOS

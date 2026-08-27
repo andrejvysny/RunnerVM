@@ -11,6 +11,10 @@ public struct VMInstanceLayout: Sendable, Equatable {
   public static let workerLogName = "worker.log"
   public static let workerLockName = "worker.lock"
   public static let failureName = "failure.json"
+  /// Cloud-init NoCloud seed a build-time boot may need. Runner instances never have one.
+  public static let seedName = "seed.img"
+  /// The build context (tarred recipe directory), attached read-only for `COPY`-style steps.
+  public static let contextName = "context.img"
 
   public let instanceId: InstanceID
   public let directory: URL
@@ -59,6 +63,39 @@ public struct VMInstanceLayout: Sendable, Equatable {
 public struct MaterializedInstance: Sendable, Equatable {
   public let layout: VMInstanceLayout
   public let cloneMethod: CloneMethod
+}
+
+/// Every file one in-daemon image build's VM directory owns (Phase 4/5 image builder). Lives at
+/// `paths.buildVMDir(id)`; deliberately mirrors `VMInstanceLayout`'s naming so `VMDirectoryStaging`
+/// can stage either one identically.
+public struct VMBuildLayout: Sendable, Equatable {
+  public let buildId: ImageBuildID
+  public let directory: URL
+  public let disk: URL
+  /// Absent when the base has no EFI store yet — vmworker creates one for a Linux base, the same
+  /// way it does for an instance.
+  public let nvram: URL?
+  public let spec: URL
+  public let serialLog: URL
+  public let workerLog: URL
+  public let workerLock: URL
+  /// Cloud-init NoCloud seed the base image's `FROM` stage may need to boot unattended.
+  public let seed: URL
+  /// The build context, attached read-only so `COPY`-style steps can pull files out of it.
+  public let context: URL
+
+  public init(buildId: ImageBuildID, directory: URL, hasNVRAM: Bool) {
+    self.buildId = buildId
+    self.directory = directory
+    disk = VMInstanceLayout.diskPath(in: directory)
+    nvram = hasNVRAM ? VMInstanceLayout.nvramPath(in: directory) : nil
+    spec = directory.appending(path: VMInstanceLayout.specName)
+    serialLog = directory.appending(path: VMInstanceLayout.serialLogName)
+    workerLog = directory.appending(path: VMInstanceLayout.workerLogName)
+    workerLock = VMInstanceLayout.workerLockPath(in: directory)
+    seed = directory.appending(path: VMInstanceLayout.seedName)
+    context = directory.appending(path: VMInstanceLayout.contextName)
+  }
 }
 
 /// `failure.json`: why a VM never came up, kept for the diagnostics retention window (spec §74).

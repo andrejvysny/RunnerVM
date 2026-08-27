@@ -34,8 +34,32 @@ extension DaemonServiceImpl {
       disk: URL(fileURLWithPath: request.path),
       nvram: request.nvramPath.map { URL(fileURLWithPath: $0) },
       os: os, name: request.name,
-      metadataPath: request.metadataPath.map { URL(fileURLWithPath: $0) })
+      metadataPath: request.metadataPath.map { URL(fileURLWithPath: $0) },
+      guestAgent: request.guestAgent ?? true)
     return await describe(imported)
+  }
+
+  /// Spec §58. A profile that names an image this host already has, and that image declares no
+  /// RunnerVM guest agent, is a configuration that can never start a VM -- so `config validate`
+  /// reports it and `config apply` refuses, rather than letting the first `vm create` discover it.
+  ///
+  /// Only images actually in the store are graded. "Not pulled yet" is not a configuration error:
+  /// resolving a remote reference here would turn `config validate` into a network call, and the
+  /// pull path already refuses an agentless image before it transfers anything.
+  func imageIssues(_ config: RunnerConfiguration) async -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    for (index, profile) in config.profiles.enumerated() {
+      guard let managed = try? await images.get(reference: profile.image),
+            let metadata = managed.metadata, !metadata.hasGuestAgent
+      else { continue }
+      issues.append(
+        .error(
+          "PROFILE_IMAGE_NO_GUEST_AGENT", "profiles[\(index)].image",
+          "image '\(profile.image)' declares no RunnerVM guest agent, so this profile can never "
+            + "run a job; build one with `runnerctl image build` or point the profile at an image "
+            + "that carries the agent"))
+    }
+    return issues
   }
 
   /// Spec §53. Republished as a whole label set on every maintenance pass, like the other gauges,

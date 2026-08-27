@@ -110,7 +110,11 @@ enum Mapping {
       runnerVersionHealth: runnerVersionHealth,
       runnerFirstMissedVersion: firstMissed?.version,
       runnerFirstMissedPublishedAt: firstMissed.map { RFC3339.string(from: $0.publishedAt) },
-      provenance: managed.metadata?.provenance.map(provenance))
+      provenance: managed.metadata?.provenance.map(provenance),
+      // Absent provenance means the image was built or pulled in RunnerVM's own format: only an
+      // import records where else it could have come from (spec §58).
+      sourceFormat: managed.metadata?.provenance?.imported?.format ?? "runnervm",
+      guestAgent: managed.metadata?.hasGuestAgent)
   }
 
   /// Summary only: `packages` is the whole `dpkg` manifest and stays in `metadata.json`, where a
@@ -127,7 +131,9 @@ enum Mapping {
       packageCount: source.packages?.count,
       diskSHA256: source.diskSHA256,
       builtAt: source.builder?.builtAt,
-      builderCommit: source.builder?.gitCommit)
+      builderCommit: source.builder?.gitCommit,
+      importedFormat: source.imported?.format,
+      importedManifestDigest: source.imported?.manifestDigest)
   }
 
   static func instance(

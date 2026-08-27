@@ -191,3 +191,66 @@ import Testing
     #expect(HostMode.draining.canTransition(to: .normal))
   }
 }
+
+@Suite struct ImageBuildStateTests {
+  static let expected: [ImageBuildState: Set<ImageBuildState>] = [
+    .queued: [.resolving, .failed, .cancelled],
+    .resolving: [.staging, .failed, .cancelled],
+    .staging: [.booting, .failed, .cancelled],
+    .booting: [.provisioning, .failed, .cancelled],
+    .provisioning: [.sealing, .failed, .cancelled],
+    .sealing: [.succeeded, .failed, .cancelled],
+    .succeeded: [],
+    .failed: [],
+    .cancelled: [],
+  ]
+
+  @Test func everyStateHasAnExpectedRow() {
+    #expect(Set(Self.expected.keys) == Set(ImageBuildState.allCases))
+    #expect(ImageBuildState.allCases.count == 9)
+  }
+
+  @Test func everyOrderedPairMatchesTheTable() throws {
+    for from in ImageBuildState.allCases {
+      let allowed = try #require(Self.expected[from])
+      for to in ImageBuildState.allCases {
+        #expect(from.canTransition(to: to) == allowed.contains(to), "\(from) -> \(to)")
+      }
+    }
+  }
+
+  @Test func terminalStatesMatchTheDocument() {
+    #expect(Set(ImageBuildState.allCases.filter(\.isTerminal)) == [.succeeded, .failed, .cancelled])
+  }
+
+  @Test func onlyTerminalStatesFailToConsumeCapacity() {
+    for state in ImageBuildState.allCases {
+      #expect(state.consumesCapacity == !state.isTerminal, "\(state)")
+    }
+  }
+
+  @Test func runningVMStatesAreExactlyBootingProvisioningSealing() {
+    #expect(ImageBuildState.booting.hasRunningVM)
+    #expect(ImageBuildState.provisioning.hasRunningVM)
+    #expect(ImageBuildState.sealing.hasRunningVM)
+    #expect(!ImageBuildState.queued.hasRunningVM)
+    #expect(!ImageBuildState.resolving.hasRunningVM)
+    #expect(!ImageBuildState.staging.hasRunningVM)
+    #expect(!ImageBuildState.succeeded.hasRunningVM)
+    #expect(!ImageBuildState.failed.hasRunningVM)
+    #expect(!ImageBuildState.cancelled.hasRunningVM)
+  }
+
+  @Test func everyNonTerminalStateCanFailOrBeCancelled() {
+    for state in ImageBuildState.allCases where !state.isTerminal {
+      #expect(state.canTransition(to: .failed), "\(state) -> failed")
+      #expect(state.canTransition(to: .cancelled), "\(state) -> cancelled")
+    }
+  }
+
+  @Test func selfTransitionsAreAlwaysIllegal() {
+    for state in ImageBuildState.allCases {
+      #expect(!state.canTransition(to: state), "\(state)")
+    }
+  }
+}

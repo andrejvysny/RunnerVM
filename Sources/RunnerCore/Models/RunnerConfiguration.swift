@@ -91,16 +91,34 @@ public struct DiagnosticsConfig: Codable, Sendable, Hashable {
   }
 }
 
+/// Local image-store safety ceilings (Phase 4/5 image builder), independent of `ImageCacheConfig`'s
+/// eviction policy: these bound what a single image/build may occupy, not what long-term caching
+/// keeps around.
+public struct ImageLimitsConfig: Codable, Sendable, Hashable {
+  public var maxVirtualDiskBytes: UInt64
+  public var maxLayers: Int
+
+  public init(maxVirtualDiskBytes: UInt64 = ByteSize.gibibytes(512).bytes, maxLayers: Int = 4_096) {
+    self.maxVirtualDiskBytes = maxVirtualDiskBytes
+    self.maxLayers = maxLayers
+  }
+}
+
 /// Image cache policy (spec §110).
 public struct ImageCacheConfig: Codable, Sendable, Hashable {
   /// `nil` means "bounded only by the host disk reserve".
   public var maxSizeBytes: UInt64?
   /// Grace window in which an unreferenced image is kept anyway.
   public var keepRecentlyUsed: DurationValue
+  public var limits: ImageLimitsConfig
 
-  public init(maxSizeBytes: UInt64? = nil, keepRecentlyUsed: DurationValue = .days(7)) {
+  public init(
+    maxSizeBytes: UInt64? = nil, keepRecentlyUsed: DurationValue = .days(7),
+    limits: ImageLimitsConfig = ImageLimitsConfig()
+  ) {
     self.maxSizeBytes = maxSizeBytes
     self.keepRecentlyUsed = keepRecentlyUsed
+    self.limits = limits
   }
 }
 
@@ -135,6 +153,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
   public var images: ImageCacheConfig
   public var imageUpdates: ImageUpdatesConfig
   public var logging: LoggingConfig
+  public var build: ImageBuildConfig
 
   public init(
     version: Int = RunnerConfiguration.currentVersion,
@@ -146,7 +165,8 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
     diagnostics: DiagnosticsConfig = DiagnosticsConfig(),
     images: ImageCacheConfig = ImageCacheConfig(),
     imageUpdates: ImageUpdatesConfig = ImageUpdatesConfig(),
-    logging: LoggingConfig = LoggingConfig()
+    logging: LoggingConfig = LoggingConfig(),
+    build: ImageBuildConfig = ImageBuildConfig()
   ) {
     self.version = version
     self.host = host
@@ -158,6 +178,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
     self.images = images
     self.imageUpdates = imageUpdates
     self.logging = logging
+    self.build = build
   }
 
   public func profile(named name: String) -> RunnerProfileConfig? {
@@ -172,7 +193,7 @@ public struct RunnerConfiguration: Codable, Sendable, Hashable {
 extension RunnerConfiguration {
   private enum CodingKeys: String, CodingKey {
     case version, host, github, profiles, security, metrics, diagnostics, images, imageUpdates
-    case logging
+    case logging, build
   }
 
   /// Every section except `version` defaults, so a minimal document decodes and validation — not
@@ -194,7 +215,10 @@ extension RunnerConfiguration {
       imageUpdates: try c.decodeIfPresent(ImageUpdatesConfig.self, forKey: .imageUpdates)
         ?? ImageUpdatesConfig(),
       // Same back-compat rule: a document written before log durability existed still loads.
-      logging: try c.decodeIfPresent(LoggingConfig.self, forKey: .logging) ?? LoggingConfig()
+      logging: try c.decodeIfPresent(LoggingConfig.self, forKey: .logging) ?? LoggingConfig(),
+      // Same back-compat rule: a document written before the in-daemon image builder existed
+      // still loads (Phase 4/5).
+      build: try c.decodeIfPresent(ImageBuildConfig.self, forKey: .build) ?? ImageBuildConfig()
     )
   }
 }

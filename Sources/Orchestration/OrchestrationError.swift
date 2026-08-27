@@ -1,4 +1,5 @@
 import Foundation
+import Persistence
 import RunnerCore
 
 /// Failures that abort daemon startup or an orchestration operation.
@@ -111,5 +112,5 @@ public enum OrchestrationError: RunnerError {
 public enum RunnerVMBuild {
   public static let version = "0.1.0-dev"
   /// Highest SQLite schema version this build migrates to (`Persistence.Migrator`).
-  public static let schemaVersion = 1
+  public static let schemaVersion = PersistenceSchema.currentVersion
 }

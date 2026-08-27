@@ -17,7 +17,8 @@ enum ConfigMapper {
       diagnostics: mapDiagnostics(dto.diagnostics),
       images: mapImages(dto.images),
       imageUpdates: mapImageUpdates(dto.imageUpdates),
-      logging: mapLogging(dto.logging)
+      logging: mapLogging(dto.logging),
+      build: mapBuild(dto.build)
     )
   }
 
@@ -185,9 +186,33 @@ enum ConfigMapper {
 
   private static func mapImages(_ dto: ConfigDTO.Images?) -> ImageCacheConfig {
     let d = ImageCacheConfig()
+    let dl = ImageLimitsConfig()
+    let limits = ImageLimitsConfig(
+      maxVirtualDiskBytes: dto?.limits?.maxVirtualDiskSize?.bytes ?? dl.maxVirtualDiskBytes,
+      maxLayers: dto?.limits?.maxLayers ?? dl.maxLayers
+    )
     return ImageCacheConfig(
       maxSizeBytes: dto?.cache?.maxSize?.bytes ?? d.maxSizeBytes,
-      keepRecentlyUsed: dto?.cache?.keepRecentlyUsed ?? d.keepRecentlyUsed
+      keepRecentlyUsed: dto?.cache?.keepRecentlyUsed ?? d.keepRecentlyUsed,
+      limits: limits
+    )
+  }
+
+  private static func mapBuild(_ dto: ConfigDTO.Build?) -> ImageBuildConfig {
+    let d = ImageBuildConfig()
+    return ImageBuildConfig(
+      cpuCount: dto?.cpu ?? d.cpuCount,
+      memoryBytes: dto?.memory?.bytes ?? d.memoryBytes,
+      diskBytes: dto?.disk?.bytes ?? d.diskBytes,
+      timeout: dto?.timeout ?? d.timeout,
+      stepTimeout: dto?.stepTimeout ?? d.stepTimeout,
+      maxConcurrent: dto?.maxConcurrent ?? d.maxConcurrent,
+      cacheDir: dto?.cacheDir ?? d.cacheDir,
+      guestAgentPath: dto?.guestAgentPath ?? d.guestAgentPath,
+      recipeFileName: dto?.recipeFileName ?? d.recipeFileName,
+      maxContextBytes: dto?.maxContextSize?.bytes ?? d.maxContextBytes,
+      maxLogBytes: dto?.maxLogSize?.bytes ?? d.maxLogBytes,
+      maxSteps: dto?.maxSteps ?? d.maxSteps
     )
   }
 

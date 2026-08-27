@@ -56,7 +56,8 @@ extension Orchestrator {
     let live = ((try? await sessionRows.list(limit: nil)) ?? []).filter { !$0.state.isTerminal }
     let bound = Set(live.map(\.instanceId))
     guard let reservations = try? await InstanceAdmission.reservations(
-      instances: instanceRows, profiles: profiles, bound: bound) else { return nil }
+      instances: instanceRows, profiles: profiles, bound: bound, builds: imageBuilds)
+    else { return nil }
     let budget = InstanceAdmission.budget(configuration: config, probe: probe, paths: paths)
     var entries: [SchedulingPass.ProfileEntry] = []
     for row in rows where row.enabled {

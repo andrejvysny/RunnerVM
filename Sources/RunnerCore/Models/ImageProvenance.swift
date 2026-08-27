@@ -14,10 +14,81 @@ extension ImageMetadata {
       public var source: String?
       /// `sha256:<hex>` of the base disk as it was fed to the builder.
       public var sha256: String?
+      /// `sha256:<hex>` of the base image exactly as downloaded, before any conversion (e.g. a
+      /// cloud provider's qcow2 before it was converted to raw). `sha256` above is the
+      /// post-conversion digest; the two differ whenever a conversion step ran.
+      public var rawSHA256: String?
 
-      public init(source: String? = nil, sha256: String? = nil) {
+      public init(source: String? = nil, sha256: String? = nil, rawSHA256: String? = nil) {
         self.source = source
         self.sha256 = sha256
+        self.rawSHA256 = rawSHA256
+      }
+    }
+
+    /// Recorded when this image's disk came from importing another tool's format rather than from
+    /// `scripts/build-ubuntu-image.sh`.
+    public struct Imported: Codable, Sendable, Equatable, Hashable {
+      /// The source format, e.g. `"tart"`.
+      public var format: String?
+      /// The source artifact's own manifest digest, when it had one.
+      public var manifestDigest: String?
+      public var tartConfig: TartConfig?
+
+      public init(format: String? = nil, manifestDigest: String? = nil, tartConfig: TartConfig? = nil) {
+        self.format = format
+        self.manifestDigest = manifestDigest
+        self.tartConfig = tartConfig
+      }
+    }
+
+    /// The subset of a Tart `config.json` worth carrying forward when importing a Tart-built VM,
+    /// so the original resource intent is not silently lost.
+    public struct TartConfig: Codable, Sendable, Equatable, Hashable {
+      public var version: Int?
+      public var cpuCount: Int?
+      public var cpuCountMin: Int?
+      public var memorySize: UInt64?
+      public var memorySizeMin: UInt64?
+      public var displayWidth: Int?
+      public var displayHeight: Int?
+      public var diskFormat: String?
+
+      public init(
+        version: Int? = nil, cpuCount: Int? = nil, cpuCountMin: Int? = nil,
+        memorySize: UInt64? = nil, memorySizeMin: UInt64? = nil, displayWidth: Int? = nil,
+        displayHeight: Int? = nil, diskFormat: String? = nil
+      ) {
+        self.version = version
+        self.cpuCount = cpuCount
+        self.cpuCountMin = cpuCountMin
+        self.memorySize = memorySize
+        self.memorySizeMin = memorySizeMin
+        self.displayWidth = displayWidth
+        self.displayHeight = displayHeight
+        self.diskFormat = diskFormat
+      }
+    }
+
+    /// The build recipe that produced this image, when it was declarative rather than an
+    /// operator-run shell script.
+    public struct Recipe: Codable, Sendable, Equatable, Hashable {
+      /// Repository-relative path of the recipe file.
+      public var path: String?
+      /// `sha256:<hex>` of the recipe file's bytes.
+      public var sha256: String?
+      /// The base image or recipe this one was built `from`.
+      public var from: String?
+      public var args: [String: String]?
+
+      public init(
+        path: String? = nil, sha256: String? = nil, from: String? = nil,
+        args: [String: String]? = nil
+      ) {
+        self.path = path
+        self.sha256 = sha256
+        self.from = from
+        self.args = args
       }
     }
 
@@ -120,12 +191,21 @@ extension ImageMetadata {
     public var partial: Bool?
     /// Why `partial` is true, e.g. "no usable RVM-MANIFEST block in serial.log".
     public var partialReason: String?
+    /// How this image's disk was produced, when it was imported from another tool's format
+    /// instead of built by `scripts/build-ubuntu-image.sh`.
+    public var imported: Imported?
+    /// The declarative recipe that produced this image, when there was one.
+    public var recipe: Recipe?
+    /// `sha256:<hex>` local digest (`ImageDigest`) of the image this one was derived from, e.g. by
+    /// a recipe's `from`. `nil` for an image with no known parent.
+    public var parentImageDigest: String?
 
     public init(
       baseImage: BaseImage? = nil, actionsRunner: ActionsRunner? = nil,
       guestAgent: GuestAgent? = nil, builder: Builder? = nil, docker: Docker? = nil,
       packageUpgrade: Bool? = nil, packages: [String]? = nil, kernelVersion: String? = nil,
-      diskSHA256: String? = nil, partial: Bool? = nil, partialReason: String? = nil
+      diskSHA256: String? = nil, partial: Bool? = nil, partialReason: String? = nil,
+      imported: Imported? = nil, recipe: Recipe? = nil, parentImageDigest: String? = nil
     ) {
       self.baseImage = baseImage
       self.actionsRunner = actionsRunner
@@ -138,6 +218,9 @@ extension ImageMetadata {
       self.diskSHA256 = diskSHA256
       self.partial = partial
       self.partialReason = partialReason
+      self.imported = imported
+      self.recipe = recipe
+      self.parentImageDigest = parentImageDigest
     }
   }
 }

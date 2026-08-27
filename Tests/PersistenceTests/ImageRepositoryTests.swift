@@ -103,4 +103,70 @@ import Testing
       try await repo.pin(ownerType: .profile, ownerId: "p", digest: ImageDigest(rawValue: "sha256:missing"))
     }
   }
+
+  // MARK: - aliases
+
+  @Test func aliasUpsertThenLookup() async throws {
+    let db = try TestDatabase.make()
+    let repo = GRDBImageRepository(db: db)
+    let image = Fixtures.image()
+    try await repo.upsert(image)
+
+    try await repo.setAlias(name: "app", digest: image.digest)
+
+    #expect(try await repo.alias(name: "app") == image.digest)
+    #expect(try await repo.aliases().map(\.name) == ["app"])
+  }
+
+  @Test func aliasSetTwiceReplacesTheTarget() async throws {
+    let db = try TestDatabase.make()
+    let repo = GRDBImageRepository(db: db)
+    let older = Fixtures.image()
+    let newer = Fixtures.image(digest: "sha256:\(String(repeating: "d", count: 64))")
+    try await repo.upsert(older)
+    try await repo.upsert(newer)
+
+    try await repo.setAlias(name: "app", digest: older.digest)
+    #expect(try await repo.alias(name: "app") == older.digest)
+
+    try await repo.setAlias(name: "app", digest: newer.digest)
+
+    #expect(try await repo.alias(name: "app") == newer.digest)
+    #expect(try await repo.aliases().count == 1)
+  }
+
+  @Test func removeAliasesDropsEveryAliasForADigest() async throws {
+    let db = try TestDatabase.make()
+    let repo = GRDBImageRepository(db: db)
+    let image = Fixtures.image()
+    try await repo.upsert(image)
+    try await repo.setAlias(name: "app", digest: image.digest)
+    try await repo.setAlias(name: "app-latest", digest: image.digest)
+
+    try await repo.removeAliases(digest: image.digest)
+
+    #expect(try await repo.alias(name: "app") == nil)
+    #expect(try await repo.alias(name: "app-latest") == nil)
+    #expect(try await repo.aliases().isEmpty)
+  }
+
+  @Test func aliasForAnUnknownNameIsNil() async throws {
+    let db = try TestDatabase.make()
+    let repo = GRDBImageRepository(db: db)
+    #expect(try await repo.alias(name: "does-not-exist") == nil)
+  }
+
+  /// A `.build` pin is `image_pins.owner_type = 'build'` -- not CHECK-constrained, but it must
+  /// still hide the digest from `unpinnedImages()` exactly like `.profile`/`.instance`/`.planning`.
+  @Test func buildPinHidesDigestFromUnpinnedImages() async throws {
+    let db = try TestDatabase.make()
+    let repo = GRDBImageRepository(db: db)
+    let image = Fixtures.image()
+    try await repo.upsert(image)
+
+    try await repo.pin(ownerType: .build, ownerId: "build-1", digest: image.digest)
+
+    #expect(try await repo.unpinnedImages().isEmpty)
+    #expect(try await repo.pinCount(digest: image.digest) == 1)
+  }
 }

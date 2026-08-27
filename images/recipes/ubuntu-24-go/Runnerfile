@@ -1,0 +1,19 @@
+# ubuntu-24-go: adds a pinned Go toolchain (upstream tarball, not apt) on top of ubuntu-24.
+FROM ubuntu-24
+
+ARG GO_VERSION=1.23.4
+ARG GO_SHA256=
+
+LABEL dev.runnervm.image.name="ubuntu-24-go"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+# GO_SHA256 is optional (defaults empty): when the operator provides one, the tarball must match it
+# or the build fails; when they don't, the build proceeds on the host's own download hash.
+RUN curl -fsSL --retry 5 --retry-delay 3 \
+      "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" -o /tmp/go.tar.gz && \
+    if [ -n "${GO_SHA256}" ]; then echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c -; fi && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm -f /tmp/go.tar.gz && \
+    echo 'export PATH=\$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh && \
+    chmod 0644 /etc/profile.d/golang.sh

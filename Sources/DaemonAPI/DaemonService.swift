@@ -37,6 +37,13 @@ public protocol DaemonService: Sendable {
   func imageDelete(_ request: ImageDeleteRequest) async throws -> ImageDeleteResponse
   func imagePrune(_ request: ImagePruneRequest) async throws -> ImagePruneResponse
 
+  /// Starts an in-daemon image build (Phase 5). `BUILD_UNAVAILABLE` until the builder lands.
+  func imageBuild(_ request: ImageBuildRequest) async throws -> ImageBuildResponse
+  func buildList() async throws -> BuildListResponse
+  func buildGet(_ request: BuildGetRequest) async throws -> BuildInfoDTO
+  func buildLog(_ request: BuildLogRequest) async throws -> BuildLogResponse
+  func buildCancel(_ request: BuildCancelRequest) async throws -> BuildCancelResponse
+
   /// Stores a registry credential in the daemon's Keychain (spec §79).
   func registryLogin(_ request: RegistryLoginRequest) async throws -> RegistryLoginResponse
   func registryLogout(_ request: RegistryLogoutRequest) async throws -> RegistryLogoutResponse

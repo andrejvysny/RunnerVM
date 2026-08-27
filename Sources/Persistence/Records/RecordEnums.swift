@@ -47,4 +47,15 @@ public enum ImagePinOwnerType: String, Codable, Sendable, Hashable, CaseIterable
   /// not-yet-inserted instance until `InstanceManager.create` either converts it into an
   /// `.instance` pin or releases it on failure. `ownerId` is the future instance id.
   case planning
+  /// Held by an in-progress image build against its `FROM image:` base, for the same reason
+  /// `.planning` holds one for an instance: the base cannot be reclaimed out from under a build
+  /// that has not finished cloning it yet. `ownerId` is the `ImageBuildID`.
+  case build
+}
+
+/// `image_builds.from_kind` (`docs/db_schema_v2.sql`).
+public enum ImageBuildFromKind: String, Codable, Sendable, Hashable, CaseIterable, DatabaseValueConvertible {
+  case image
+  case cloudImage
+  case registry
 }

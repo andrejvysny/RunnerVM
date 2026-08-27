@@ -39,6 +39,8 @@ let package = Package(
     .target(name: "GuestControl", dependencies: ["RunnerCore", "RPC"]),
     .target(name: "ImageStore", dependencies: ["RunnerCore", "RunnerLogging"]),
     .target(name: "OCIRegistry", dependencies: ["RunnerCore", "RunnerLogging"]),
+    // Runnerfile parser and planner: pure, no I/O.
+    .target(name: "ImageBuild", dependencies: ["RunnerCore"]),
     .target(name: "GitHubControl", dependencies: ["RunnerCore", "RunnerLogging"]),
     .target(name: "Scheduler", dependencies: ["RunnerCore"]),
     .target(name: "Metrics", dependencies: ["RunnerCore"]),
@@ -49,14 +51,17 @@ let package = Package(
     .target(name: "DaemonAPI", dependencies: ["RunnerCore", "RPC", "GuestControl"]),
     .target(name: "Orchestration", dependencies: [
       "RunnerCore", "RunnerLogging", "RPC", "DaemonAPI", "Persistence", "Scheduler",
-      "WorkerProtocol", "GuestControl", "ImageStore", "OCIRegistry", "GitHubControl", "Metrics",
+      "WorkerProtocol", "GuestControl", "ImageStore", "ImageBuild", "OCIRegistry", "GitHubControl",
+      "Metrics",
     ]),
     .executableTarget(name: "runnerd", dependencies: [
       "Orchestration", "DaemonAPI", "ConfigLoader", "RunnerLogging",
       .product(name: "ArgumentParser", package: "swift-argument-parser"),
     ]),
     .executableTarget(name: "runnerctl", dependencies: [
-      "DaemonAPI", "ConfigLoader", "GuestControl",
+      // ImageBuild is pure parsing (no I/O): `image build` uses RecipeParser for a local,
+      // fail-fast syntax pre-flight before ever calling the daemon.
+      "DaemonAPI", "ConfigLoader", "GuestControl", "ImageBuild",
       .product(name: "ArgumentParser", package: "swift-argument-parser"),
     ]),
     .executableTarget(name: "vmworker", dependencies: [
@@ -74,11 +79,14 @@ let package = Package(
     .testTarget(name: "MetricsTests", dependencies: ["Metrics"]),
     .testTarget(name: "GitHubControlTests", dependencies: ["GitHubControl"]),
     .testTarget(name: "OCIRegistryTests", dependencies: ["OCIRegistry", "ImageStore"]),
+    .testTarget(name: "ImageBuildTests", dependencies: ["ImageBuild", "RunnerCore"]),
     .testTarget(name: "WorkerProtocolTests", dependencies: ["WorkerProtocol"]),
+    .testTarget(name: "VMWorkerTests", dependencies: ["vmworker"]),
     .testTarget(name: "GuestControlTests", dependencies: ["GuestControl", "RPC", "RunnerCore"]),
     .testTarget(name: "OrchestrationTests", dependencies: [
-      "Orchestration", "ConfigLoader", "DaemonAPI", "Persistence", "ImageStore", "OCIRegistry",
-      "Scheduler", "WorkerProtocol", "GuestControl", "GitHubControl", "RPC", "RunnerCore",
+      "Orchestration", "ConfigLoader", "DaemonAPI", "Persistence", "ImageStore", "ImageBuild",
+      "OCIRegistry", "Scheduler", "WorkerProtocol", "GuestControl", "GitHubControl", "RPC",
+      "RunnerCore",
     ]),
     .testTarget(name: "VirtualizationCoreTests", dependencies: ["VirtualizationCore"]),
   ],

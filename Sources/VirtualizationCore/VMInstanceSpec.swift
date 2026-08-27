@@ -66,6 +66,8 @@ public struct VMRuntimePaths: Sendable, Equatable {
   public var serialLog: URL { directory.appendingPathComponent("serial.log") }
   /// Optional extra read-only disk (cloud-init NoCloud seed for image builds).
   public var seedDisk: URL { directory.appendingPathComponent("seed.img") }
+  /// Optional extra read-only disk: the build context, attached only inside a build VM.
+  public var contextDisk: URL { directory.appendingPathComponent("context.img") }
   /// Instance-scoped exclusive `fcntl` lock held by the owning vmworker.
   public var workerLock: URL { directory.appendingPathComponent("worker.lock") }
   public var spec: URL { directory.appendingPathComponent("spec.json") }

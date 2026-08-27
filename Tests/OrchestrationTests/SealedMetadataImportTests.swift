@@ -58,7 +58,10 @@ import Testing
 
       #expect(image.record.runnerVersion == "2.331.0")
       #expect(image.record.guestAgentVersion == "v0.1.0-12-g3fb473c")
-      #expect(image.metadata?.capabilities == ImageMetadata.Capabilities(docker: true, ssh: true))
+      // The sealed file itself carries docker/ssh but no explicit `guestAgent` (T6 predates it);
+      // a default import (T7) stamps that field explicitly rather than leaving it nil.
+      #expect(image.metadata?.capabilities
+        == ImageMetadata.Capabilities(docker: true, ssh: true, guestAgent: true))
       #expect(image.metadata?.provenance == Self.provenance)
       // The measured file wins over what the sealed file claimed.
       #expect(image.record.virtualSizeBytes == 32 << 20)
@@ -141,5 +144,48 @@ import Testing
       #expect(first.record.digest == second.record.digest)
       #expect(try await harness.images.list().count == 1)
     }
+  }
+
+  // MARK: - `--no-guest-agent` (T7)
+
+  @Test func defaultImportWritesAnExplicitGuestAgentTrue() async throws {
+    try await withHarness { harness in
+      let disk = try harness.sparseFile(named: "no-sealed.img", bytes: 32 << 20)
+      let image = try await harness.images.importLocal(
+        disk: disk, nvram: nil, os: .linux, name: "no-sealed")
+      #expect(image.metadata?.capabilities.guestAgent == true)
+      #expect(image.metadata?.hasGuestAgent == true)
+    }
+  }
+
+  @Test func noGuestAgentWritesFalseAndHasGuestAgentIsFalse() async throws {
+    try await withHarness { harness in
+      let disk = try harness.sparseFile(named: "no-agent.img", bytes: 32 << 20)
+      let image = try await harness.images.importLocal(
+        disk: disk, nvram: nil, os: .linux, name: "no-agent", guestAgent: false)
+      #expect(image.metadata?.capabilities.guestAgent == false)
+      #expect(image.metadata?.hasGuestAgent == false)
+    }
+  }
+
+  /// A sealed file that predates `capabilities.guestAgent` (T6) has no explicit field; the
+  /// fallback trusts a recorded guest agent version, since no build without an agent would ever
+  /// have set one. This tests `ImageMetadata.hasGuestAgent` itself, not the import path -- the
+  /// field an explicit `--no-guest-agent`/default import would stamp is a separate concern
+  /// (see the two tests above).
+  @Test func legacyMetadataWithAGuestAgentVersionButNoExplicitFieldFallsBackToTrue() {
+    let metadata = ImageMetadata(
+      os: .linux, virtualDiskSizeBytes: 1, guestAgentVersion: "v0.1.0-12-g3fb473c",
+      createdAt: Date(timeIntervalSince1970: 0), boot: ImageMetadata.Boot(type: .efi))
+    #expect(metadata.capabilities.guestAgent == nil)
+    #expect(metadata.hasGuestAgent == true)
+  }
+
+  @Test func legacyMetadataWithNeitherFallsBackToFalse() {
+    let metadata = ImageMetadata(
+      os: .linux, virtualDiskSizeBytes: 1, createdAt: Date(timeIntervalSince1970: 0),
+      boot: ImageMetadata.Boot(type: .efi))
+    #expect(metadata.capabilities.guestAgent == nil)
+    #expect(metadata.hasGuestAgent == false)
   }
 }

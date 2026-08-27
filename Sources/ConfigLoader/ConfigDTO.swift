@@ -128,12 +128,33 @@ struct ConfigDTO: Decodable {
       var keepRecentlyUsed: DurationValue?
     }
 
+    struct Limits: Decodable {
+      var maxVirtualDiskSize: ByteSize?
+      var maxLayers: Int?
+    }
+
     var cache: Cache?
+    var limits: Limits?
   }
 
   struct ImageUpdates: Decodable {
     var recycleReusable: Bool?
     var denyTooOldRunner: Bool?
+  }
+
+  struct Build: Decodable {
+    var cpu: Int?
+    var memory: ByteSize?
+    var disk: ByteSize?
+    var timeout: DurationValue?
+    var stepTimeout: DurationValue?
+    var maxConcurrent: Int?
+    var cacheDir: String?
+    var guestAgentPath: String?
+    var recipeFileName: String?
+    var maxContextSize: ByteSize?
+    var maxLogSize: ByteSize?
+    var maxSteps: Int?
   }
 
   struct Logging: Decodable {
@@ -163,4 +184,5 @@ struct ConfigDTO: Decodable {
   var images: Images?
   var imageUpdates: ImageUpdates?
   var logging: Logging?
+  var build: Build?
 }

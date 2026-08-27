@@ -52,8 +52,17 @@ enum ConfigSchema {
     "security": .object(["allowPublicRepositories": .scalar]),
     "metrics": .object(["prometheus": .object(["enabled": .scalar, "listen": .scalar])]),
     "diagnostics": .object(["failedInstanceRetention": .scalar]),
-    "images": .object(["cache": .object(["maxSize": .scalar, "keepRecentlyUsed": .scalar])]),
+    "images": .object([
+      "cache": .object(["maxSize": .scalar, "keepRecentlyUsed": .scalar]),
+      "limits": .object(["maxVirtualDiskSize": .scalar, "maxLayers": .scalar]),
+    ]),
     "imageUpdates": .object(["recycleReusable": .scalar, "denyTooOldRunner": .scalar]),
+    "build": .object([
+      "cpu": .scalar, "memory": .scalar, "disk": .scalar, "timeout": .scalar,
+      "stepTimeout": .scalar, "maxConcurrent": .scalar, "cacheDir": .scalar,
+      "guestAgentPath": .scalar, "recipeFileName": .scalar, "maxContextSize": .scalar,
+      "maxLogSize": .scalar, "maxSteps": .scalar,
+    ]),
     "logging": .object([
       "file": .object(["enabled": .scalar, "maxSize": .scalar, "maxFiles": .scalar]),
       "retention": .object(["instanceLogs": .scalar]),

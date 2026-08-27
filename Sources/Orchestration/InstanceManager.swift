@@ -49,6 +49,10 @@ public actor InstanceManager {
   let instanceStore: InstanceStore
   let supervisor: WorkerSupervisor
   let probe: HostProbeResult
+  /// The daemon-wide admission lock. `create` takes the capacity snapshot, admits against it and
+  /// inserts the `planned` row inside it, so the row the next snapshot must see already exists
+  /// before another caller can be admitted (spec §121).
+  let admissionQueue: AdmissionQueue
   let metrics: MetricRegistry
   /// Grades an image's baked-in `actions/runner` against the newest release (spec §53). `nil` in
   /// wiring that has no GitHub side at all, which admits every image unconditionally.
@@ -75,12 +79,17 @@ public actor InstanceManager {
   /// wiring keeps compiling and a daemon that cannot open the file simply has none. Not
   /// `private`: `InstanceReuse`/`InstanceDiagnostics` extend this actor from separate files.
   var events: LifecycleEventLog?
+  /// Capacity held by in-flight image builds. `nil` until Phase 5 attaches a builder; admission
+  /// then charges the host for builds and instances out of the same budget. Not `private`:
+  /// `InstanceCreation.swift` extends this actor from a separate file.
+  var imageBuilds: (any ImageBuildReservationSource)?
 
   public init(
     paths: RunnerPaths, hostId: HostID, instances: any InstanceRepository,
     profiles: any ProfileRepository, imageRows: any ImageRepository, images: ImageManager,
     imageStore: ImageStore, instanceStore: InstanceStore, supervisor: WorkerSupervisor,
-    probe: HostProbeResult, metrics: MetricRegistry = MetricRegistry(),
+    probe: HostProbeResult, admissionQueue: AdmissionQueue = AdmissionQueue(),
+    metrics: MetricRegistry = MetricRegistry(),
     runnerVersions: RunnerVersionMonitor? = nil, tuning: Tuning = Tuning(),
     logger: Logger = Logger(component: .daemon)
   ) {
@@ -94,6 +103,7 @@ public actor InstanceManager {
     self.instanceStore = instanceStore
     self.supervisor = supervisor
     self.probe = probe
+    self.admissionQueue = admissionQueue
     self.metrics = metrics
     self.runnerVersions = runnerVersions
     self.tuning = tuning
@@ -107,6 +117,12 @@ public actor InstanceManager {
 
   public func attachEventLog(_ log: LifecycleEventLog?) {
     events = log
+  }
+
+  /// Phase 5 seam: the builder registers here so its running builds are charged against the same
+  /// host budget instance admission uses.
+  public func attachImageBuilds(_ source: (any ImageBuildReservationSource)?) {
+    imageBuilds = source
   }
 
   /// `logging.collectRunnerDiagnostics` / `logging.diagnosticsTimeout`, resolved at the point of

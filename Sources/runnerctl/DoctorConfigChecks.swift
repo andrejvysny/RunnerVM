@@ -118,7 +118,7 @@ extension DoctorChecks {
 
   /// Without a `--config` doctor cannot know which images matter, so it grades all of them rather
   /// than reporting nothing.
-  private static func profileImages(
+  static func profileImages(
     _ images: [ImageInfoDTO], config: RunnerConfiguration?
   ) -> [ImageInfoDTO] {
     guard let config, !config.profiles.isEmpty else { return images }
@@ -156,6 +156,35 @@ extension DoctorChecks {
       return "no usable GitHub credential, so the latest release is unknown"
     }
     return "runnerd has not read the latest actions/runner release yet"
+  }
+
+  // MARK: Guest agent presence (spec §58)
+
+  /// A profile pointing at a cached image with no RunnerVM guest agent can never start a job:
+  /// `vm create` refuses it with `IMAGE_NO_GUEST_AGENT` before the clone. That is a hard failure,
+  /// not a warning -- the profile is misconfigured, not merely behind.
+  static func profileImageGuestAgent(
+    images: [ImageInfoDTO]?, config: RunnerConfiguration?
+  ) -> DoctorCheck {
+    let id = "profile_image_guest_agent"
+    let title = "Profile image guest agent"
+    guard let images else {
+      return DoctorCheck(id: id, title: title, status: .warn, detail: "runnerd is not reachable; skipped")
+    }
+    let agentless = profileImages(images, config: config).filter { $0.guestAgent == false }
+    guard agentless.isEmpty else {
+      let names = agentless.map { $0.name ?? Format.shortDigest($0.digest) }.joined(separator: ", ")
+      return DoctorCheck(
+        id: id, title: title, status: .fail,
+        detail: "\(agentless.count) profile image(s) carry no RunnerVM guest agent and cannot run "
+          + "jobs: \(names). Images imported from tart are inspection-only; build one with "
+          + "`runnerctl image build`."
+      )
+    }
+    return DoctorCheck(
+      id: id, title: title, status: .ok,
+      detail: "every profile image this host has cached carries a guest agent"
+    )
   }
 
   // MARK: GitHub credential presence

@@ -88,24 +88,15 @@ public actor InstanceStore {
     in staging: URL, instanceId: InstanceID, image: ImageDigest, info: ImageInfo,
     diskBytes: UInt64, spec: some Encodable & Sendable
   ) async throws -> CloneMethod {
-    let staged = VMInstanceLayout(
-      instanceId: instanceId, directory: staging, hasNVRAM: info.manifest.layer(.nvram) != nil
-    )
     let diskBlob = try await images.blobURL(role: .disk, digest: image)
-    let method = try APFSClone.cloneOrCopy(from: diskBlob, to: staged.disk, allowFullCopy: allowFullCopy)
-    // `clonefile(2)` copies the source mode, and image blobs are 0444; the guest needs to write.
-    try FileSystem.setMode(0o600, at: staged.disk)
-    if diskBytes > (info.manifest.layer(.disk)?.sizeBytes ?? 0) {
-      try FileSystem.truncate(staged.disk, to: diskBytes)
+    var nvramSource: VMDirectoryStaging.DiskSource?
+    if info.manifest.layer(.nvram) != nil {
+      nvramSource = .blob(try await images.blobURL(role: .nvram, digest: image))
     }
-    if let nvram = staged.nvram {
-      let blob = try await images.blobURL(role: .nvram, digest: image)
-      _ = try APFSClone.cloneOrCopy(from: blob, to: nvram, allowFullCopy: allowFullCopy)
-      try FileSystem.setMode(0o600, at: nvram)
-    }
-    try FileSystem.write(try CanonicalJSON.encode(spec), to: staged.spec, mode: 0o600)
-    try FileSystem.createEmptyFile(at: staged.workerLock, mode: 0o600)
-    return method
+    return try VMDirectoryStaging.stage(
+      into: staging, disk: .blob(diskBlob), nvram: nvramSource, diskBytes: diskBytes,
+      imageBytes: info.manifest.layer(.disk)?.sizeBytes ?? 0, spec: spec, allowFullCopy: allowFullCopy
+    )
   }
 
   // MARK: - Inventory

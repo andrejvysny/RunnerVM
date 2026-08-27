@@ -175,6 +175,25 @@ import Testing
     }
   }
 
+  /// `waitUntilReachable` is satisfied by `agent.hello` alone, so it must return long before
+  /// health ever reports `ready` -- and must never even call `agent.health`. `waitUntilReady`
+  /// against that same script still has to keep polling.
+  @Test func waitUntilReachableIgnoresHealthButWaitUntilReadyStillRequiresIt() async throws {
+    var script = FakeGuestAgent.Script()
+    script.health = Array(
+      repeating: HealthResponse(state: .degraded, reasons: ["docker restarting"]), count: 2
+    ) + [HealthResponse(state: .ready)]
+    try await withAgent(script: script) { client, agent in
+      let hello = try await client.waitUntilReachable(timeout: .seconds(30), policy: Self.fastPolling)
+      #expect(hello == FakeGuestAgent.Script.defaultHello)
+      #expect(await agent.callCount(.health) == 0)
+
+      let ready = try await client.waitUntilReady(timeout: .seconds(30), policy: Self.fastPolling)
+      #expect(ready == hello)
+      #expect(await agent.callCount(.health) == 3)
+    }
+  }
+
   @Test func waitUntilReadyHonoursCancellation() async throws {
     let tree = try SocketTree()
     defer { tree.remove() }

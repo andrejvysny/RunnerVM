@@ -276,6 +276,47 @@ extension ImageManagerTests {
     }
   }
 
+  // MARK: - aliases
+
+  /// A second import under the same local name (a rebuild) must resolve through the alias, not
+  /// through the older manifest a plain `canonicalReference`/`manifest.name` scan might still find
+  /// first depending on `images.list()`'s ordering.
+  @Test func recordForResolvesAnAliasOverAnOlderSameNamedManifest() async throws {
+    try await withHarness { harness in
+      let older = try await importSized(harness, name: "app", bytes: 32 << 20)
+      let newer = try await importSized(harness, name: "app", bytes: 33 << 20)
+
+      let resolved = try await harness.images.record(for: "app")
+
+      #expect(resolved.digest == newer.record.digest)
+      #expect(resolved.digest != older.record.digest)
+    }
+  }
+
+  /// The alias itself moves, not just what `record(for:)` happens to return.
+  @Test func rebuildStyleSecondImportOfTheSameNameMovesTheAlias() async throws {
+    try await withHarness { harness in
+      let first = try await importSized(harness, name: "app", bytes: 32 << 20)
+      #expect(try await harness.imageRows.alias(name: "app") == first.record.digest)
+
+      let second = try await importSized(harness, name: "app", bytes: 33 << 20)
+
+      #expect(try await harness.imageRows.alias(name: "app") == second.record.digest)
+      #expect(try await harness.imageRows.alias(name: "app") != first.record.digest)
+    }
+  }
+
+  @Test func deletingAnImageRemovesItsAliases() async throws {
+    try await withHarness { harness in
+      let image = try await importSized(harness, name: "app", bytes: 32 << 20)
+      #expect(try await harness.imageRows.alias(name: "app") == image.record.digest)
+
+      try await harness.images.delete(digest: image.record.digest)
+
+      #expect(try await harness.imageRows.alias(name: "app") == nil)
+    }
+  }
+
   @Test func sweepStalePlanningPinsRemovesOnlyOrphans() async throws {
     try await withHarness { harness in
       let image = try await harness.importLinuxImage()

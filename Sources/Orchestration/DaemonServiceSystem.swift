@@ -12,7 +12,9 @@ extension DaemonServiceImpl {
 
   func systemDrain(_ request: SystemDrainRequest) async throws -> SystemModeResponse {
     var report = try await hostMode.drain()
-    if request.wait, report.activeSessions > 0 {
+    // `activeWork`, not `activeSessions`: an in-flight image build owns a VM this host cannot hand
+    // to anyone else, so a drain has to outlive it too.
+    if request.wait, await hostMode.activeWork() > 0 {
       report = await hostMode.waitForIdle(timeout: .milliseconds(max(0, request.timeoutMs)))
     }
     return Self.response(report)
@@ -33,7 +35,7 @@ extension DaemonServiceImpl {
       throw DaemonServiceError.unavailable(reason: "this daemon cannot shut itself down")
     }
     var report = try await hostMode.drain()
-    if !request.force, report.activeSessions > 0 {
+    if !request.force, await hostMode.activeWork() > 0 {
       report = await hostMode.waitForIdle(timeout: .milliseconds(max(0, request.timeoutMs)))
       guard report.drained else {
         throw DaemonServiceError.unavailable(
@@ -52,6 +54,21 @@ extension DaemonServiceImpl {
   private static func response(_ report: HostModeControl.Report) -> SystemModeResponse {
     SystemModeResponse(
       mode: report.mode.rawValue, activeSessions: report.activeSessions, drained: report.drained)
+  }
+
+  // MARK: - status builds line
+
+  /// `SystemStatus.builds` (P6). Two filtered reads rather than one unfiltered `list(states: nil)`
+  /// plus in-Swift counting: `image_builds` has no upper bound on terminal rows between purges, and
+  /// this way `status` never pays to fetch/decode them just to throw them away.
+  private static let runningBuildStates: Set<ImageBuildState> = [
+    .resolving, .staging, .booting, .provisioning, .sealing,
+  ]
+
+  func buildsSummary() async -> BuildsSummary {
+    async let queued = try? imageBuildRows.list(states: [.queued])
+    async let running = try? imageBuildRows.list(states: Self.runningBuildStates)
+    return BuildsSummary(running: await running?.count ?? 0, queued: await queued?.count ?? 0)
   }
 
   // MARK: - metrics.snapshot

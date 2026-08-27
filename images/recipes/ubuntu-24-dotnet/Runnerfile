@@ -1,0 +1,14 @@
+# ubuntu-24-dotnet: adds the .NET SDK (Microsoft's dotnet-install.sh) on top of ubuntu-24.
+FROM ubuntu-24
+
+ARG DOTNET_CHANNEL=8.0
+
+LABEL dev.runnervm.image.name="ubuntu-24-dotnet"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+RUN curl -fsSL --retry 5 --retry-delay 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
+    chmod +x /tmp/dotnet-install.sh && \
+    /tmp/dotnet-install.sh --channel ${DOTNET_CHANNEL} --install-dir /usr/share/dotnet && \
+    rm -f /tmp/dotnet-install.sh && \
+    echo 'export PATH=\$PATH:/usr/share/dotnet' > /etc/profile.d/dotnet.sh && \
+    chmod 0644 /etc/profile.d/dotnet.sh

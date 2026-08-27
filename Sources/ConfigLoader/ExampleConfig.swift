@@ -68,5 +68,18 @@ public enum ExampleConfig {
 
     collectRunnerDiagnostics: true
     diagnosticsTimeout: 60s
+
+  # In-daemon image builds (Phase 4/5). Uncomment to override the defaults.
+  # build:
+  #   cpu: 4
+  #   memory: 4GiB
+  #   disk: 16GiB
+  #   timeout: 60m
+  #   stepTimeout: 30m
+  #   maxConcurrent: 1
+  #   recipeFileName: Runnerfile
+  #   maxContextSize: 1GiB
+  #   maxLogSize: 64MiB
+  #   maxSteps: 256
   """
 }

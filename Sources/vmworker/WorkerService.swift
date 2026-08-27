@@ -261,23 +261,21 @@ final class WorkerService {
 
   /// A worker with no live lease must not outlive the daemon that spawned it. An absent lease
   /// counts as expired, so a worker whose daemon died before the first `worker.lease` still ages
-  /// out through the idle path.
+  /// out through the idle path. `WorkerPolicy.decide` does the actual branching so it is testable
+  /// on its own; this just applies the verdict.
   func evaluatePolicy(now: Date) {
     guard !stopping else { return }
-    if let expiry = leaseExpiresAt, expiry > now {
-      orphanIdleSince = nil
-      return
-    }
-    guard bridge.activeConnections == 0 else {
-      orphanIdleSince = nil
-      if let deadline = options.hardDeadline, now >= deadline {
-        beginShutdown(reason: "hard-deadline", gracefulTimeoutMs: 30_000)
-      }
-      return
-    }
-    let since = orphanIdleSince ?? now
-    orphanIdleSince = since
-    if now.timeIntervalSince(since) >= options.orphanIdle {
+    let result = WorkerPolicy.decide(
+      now: now, hardDeadline: options.hardDeadline, leaseExpiresAt: leaseExpiresAt,
+      activeConnections: bridge.activeConnections, orphanIdleSince: orphanIdleSince,
+      orphanIdle: options.orphanIdle)
+    orphanIdleSince = result.orphanIdleSince
+    switch result.decision {
+    case .none:
+      break
+    case .hardDeadline:
+      beginShutdown(reason: "hard-deadline", gracefulTimeoutMs: 30_000)
+    case .orphanIdle:
       beginShutdown(reason: "orphan-idle", gracefulTimeoutMs: 30_000)
     }
   }

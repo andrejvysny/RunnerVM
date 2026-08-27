@@ -29,6 +29,11 @@ public enum RunnerVMMetrics {
   public static let diskPressureState = "runnervm_disk_pressure_state"
   public static let instanceCloneMethod = "runnervm_instance_clone_method"
 
+  // In-daemon image builds (spec §59-§62).
+  public static let imageBuildsTotal = "runnervm_image_builds_total"
+  public static let imageBuildSeconds = "runnervm_image_build_seconds"
+  public static let imageBuildStepSeconds = "runnervm_image_build_step_seconds"
+
   // Image runner-software freshness (spec §53).
   public static let imageRunnerVersionHealth = "runnervm_image_runner_version_health"
   public static let runnerLatestReleaseAgeSeconds = "runnervm_runner_latest_release_age_seconds"
@@ -59,6 +64,7 @@ public enum RunnerVMMetrics {
   public static let classLabel = "class"
   public static let digestLabel = "digest"
   public static let healthLabel = "health"
+  public static let instructionLabel = "instruction"
 
   /// `runnervm_disk_pressure_state` is numeric so it can be alerted on: 0 ok, 1 warning,
   /// 2 critical (spec §17).
@@ -128,6 +134,15 @@ public enum RunnerVMMetrics {
   ]
 
   private static let images: [MetricDefinition] = [
+    MetricDefinition(
+      name: imageBuildsTotal, kind: .counter,
+      help: "In-daemon image builds that reached a terminal state, by result."),
+    MetricDefinition(
+      name: imageBuildSeconds, kind: .histogram,
+      help: "Seconds one in-daemon image build took, from admission to its terminal state."),
+    MetricDefinition(
+      name: imageBuildStepSeconds, kind: .histogram,
+      help: "Seconds one image build step took, by recipe instruction."),
     MetricDefinition(
       name: imageRunnerVersionHealth, kind: .gauge,
       help: "1 for the runner-software freshness bucket each local image currently falls in: "

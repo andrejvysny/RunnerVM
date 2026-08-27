@@ -159,8 +159,12 @@ actor FakeWorkerLauncher: WorkerLauncher, WorkerLockProbe {
       return WorkerHandle(pid: pid)
     }
     let digest = try WorkerSupervisor.specDigest(at: request.specPath)
+    // From `request.socketDir`, not `paths.socketDir`: an image build's worker publishes under
+    // `<socketDir>/build/` so it cannot collide with an instance that shares its short id.
+    try? FileManager.default.createDirectory(
+      at: request.socketDir, withIntermediateDirectories: true)
     let worker = FakeWorker(
-      socketPath: paths.workerSocket(request.instanceId),
+      socketPath: Self.socket(in: request.socketDir, for: request.instanceId),
       script: FakeWorker.Script(
         generation: behaviour.generationOverride ?? request.generation,
         nonce: behaviour.nonceOverride ?? request.nonce,
@@ -173,6 +177,12 @@ actor FakeWorkerLauncher: WorkerLauncher, WorkerLockProbe {
     workers[id] = worker
     pids[id] = pid
     return WorkerHandle(pid: pid)
+  }
+
+  /// Where `RunnerPaths.workerSocket`/`buildWorkerSocket` put a worker's control socket, given
+  /// whichever namespace the request named.
+  static func socket(in directory: URL, for id: InstanceID) -> URL {
+    directory.appending(path: "vm-\(RunnerPaths.shortID(id)).sock")
   }
 
   // MARK: - WorkerLockProbe

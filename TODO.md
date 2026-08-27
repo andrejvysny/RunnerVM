@@ -150,3 +150,43 @@ All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: ha
 - Run 32999466546: `fanout=5` against a 3-VM host — GitHub assigned exactly 3 concurrently (advertised capacity honoured), RunnerVM ran 3 VMs in parallel, recycled them and booted 2 replacements for the queued legs; 5/5 jobs succeeded, all VMs deleted. Details in `docs/verification.md`.
 - Swift 6.1.2-only CI failures fixed this session: non-Sendable sends (VMRuntime start/stop, `withSessionRefresh<T>`, `gated<T>`, `mapTransportErrors<T>`), `UInt64` tuple inference in OCIRegistryTests, `@Test` macro type-check timeout in ByteSizeTests, and a wall-clock-sensitive `waitUntilReady` test.
 - macOS guests: milestone plan in `docs/macos-guests.md`; IPSW (macOS 26.6.2, build 25G83) downloading for the M8 build.
+
+## M14 — Tart read-only importer + M15 — in-daemon image builder (plan approved 2026-08-26)
+Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh review integrated; B1–B10, N1–N5 accepted).
+- [x] P0 prerequisites: Migrator literal versions + public `Persistence.currentSchemaVersion`; vmworker `hardDeadline` before lease early-return; `ArtifactLimits` + bounded LZ4 decompressor; `GuestAgentClient.waitUntilReachable`
+- [x] P1 Part A 1–2: `PlacedChunk`/`ChunkAnnotationKeys`; `ImageMetadata.Capabilities.guestAgent/labels`, `hasGuestAgent` inference, `Provenance.imported/recipe/parentImageDigest`; `image import --no-guest-agent`; golden-bytes digest test
+- [x] P2 Part A 3–9 + N1: `TartVMConfig`, `TartArtifact`, `RemoteArtifact`, `inspect(require:purpose:)`, `TartImagePublisher`, `IMAGE_NO_GUEST_AGENT` guard, `--format`, inspect fields, doctor, docs, PROVENANCE
+- [x] P3 `Sources/ImageBuild` (Runnerfile parser/planner/ignore/probe) + `ImageBuildTests` + `images/recipes/*`
+- [x] P4 schema v2 (`image_builds`, `image_aliases`), `ImageBuildRepository`, `QCOW2Reader`, `ImageBuildConfig`+`images.limits`, `ImageBuildError`, Build DTOs/methods, `Reservation.imageBuild` + `AdmissionQueue`, `VMDirectoryStaging`/`BuildStore`, `Run.swift` context disk
+- [x] P5 `Orchestration/Build/*`, `ImageSealing`, `DaemonServiceBuilds`, runtime wiring + drain, `BuildHarness` tests (crash matrix, concurrency, flood/stall)
+- [x] P6 CLI `image build` / `build *`, `status` builds line, `install.sh` assets, docs, doctor checks.
+  `runnerctl image build [<dir-or-Runnerfile>]` (`ImageBuildCommand.swift`): local pre-flight
+  (`access(R_OK)`, `RecipeParser.parse` for fast `path:line:` syntax errors, daemon-socket-owner
+  uid warning) before `image.build`; `--wait` (default) tails `build.log` to stdout + `[n/total]`
+  progress to stderr (TTY-gated) over one connection, then prints the `image inspect` table.
+  `runnerctl build list|show|log|cancel` (`BuildCommands.swift`, top-level `build` subcommand,
+  named `BuildCommand` to avoid colliding with `Image.Build`). `SystemStatus.builds?:
+  {running, queued}` (`BuildsSummary`, optional for wire compat) filled by
+  `DaemonServiceSystem.buildsSummary()` from a new `DaemonServiceImpl.imageBuildRows` reading
+  `ImageBuildRepository.list(states:)` directly (cheaper than decoding every `BuildInfoDTO`);
+  `runnerctl status` prints `Builds: N running, M queued` only when the field is present.
+  `scripts/install.sh`: builds/installs the guest agent (`make -C GuestAgent build-linux` when
+  missing and Go is available, `--skip-guest-agent` to opt out) to
+  `<state-dir>/guest-agent/linux-arm64/` + its systemd unit; copies `images/recipes/` to
+  `<state-dir>/share/recipes/` (`root:<group>`, not the service user); creates
+  `state/builds`, `cache/base-images`, `logs/builds`; 21 `scripts/tests/install-test.sh` checks
+  (was 10). Doctor: `build_tools` (real `hdiutil makehybrid` smoke test), `build_guest_agent`
+  (mirrors `BuildSeed.resolveAgent`'s config/env/rootDir precedence), `build_recipes`
+  (`DoctorBuildChecks.swift`). New `docs/image-build.md`; `docs/images.md` now points to it and
+  marks the host script legacy; `docs/install.md` gets the new assets + a one-way schema-v2
+  upgrade note; `Proto/daemon_api.md` documents `BuildInfoDTO`'s shape and `system.status.builds`.
+  1206 tests green (was 1203; +3 `SystemStatus.builds` DTO round-trip tests). Manually verified
+  against a live `runnerd --foreground`: `image build` against a recipe whose local-image `FROM`
+  does not exist yet fails clearly (`IMAGE_NOT_FOUND`) both with `--no-wait` (via `build show`)
+  and the default `--wait` path (`runnerctl: IMAGE_NOT_FOUND: ...`, exit 1); `build list`/`build
+  cancel`/`build show --output json` all behave correctly; `status` prints the builds line.
+  Deviation: `BuildInfoDTO` has no `args` field (the persisted `argsJson` is never surfaced past
+  `Sources/Orchestration/Build/BuildMapping.swift`, which was off-limits for this phase), so
+  `build show` omits the `args` row the plan asked for rather than adding a wire field on the side.
+- [x] P7 live (2026-08-27, dev host): bootstrap `ubuntu-24-minimal` 3m43s cold / 2m04s warm, derived `ubuntu-24` 1m16s, `vm create` → idle in 5s, tart import of `ghcr.io/cirruslabs/ubuntu:latest` + `--format runnervm` refusal + `IMAGE_NO_GUEST_AGENT` guardrail — see `docs/verification.md`. Not run live: GitHub job on the built image (no credential on host), restart mid-build, `--push` to a real registry, LaunchDaemon builds.
+- [ ] M14/M15 follow-ups: `image list` NAME should prefer the alias (rebuilds show two rows named alike); `build show` lacks an `args` row (`BuildInfoDTO` omits `argsJson`); `config validate` only flags an agentless profile image once the *tag* has been resolved locally (canonical digest row only); RPC-level stream backpressure (Codex B9 follow-up); `scripts/install.sh` is 572 lines; base-image cache is unbounded; consider `swiftformat .` as a standalone commit before enabling lint.

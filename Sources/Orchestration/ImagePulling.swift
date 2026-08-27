@@ -54,14 +54,20 @@ extension ImageManager {
   // MARK: - Resolution
 
   /// Local name/digest, or a registry reference resolved (and pulled when missing) per spec §21.
-  func resolveRecord(reference: String, profile: String?) async throws -> ImageRecord {
+  ///
+  /// `purpose` travels all the way into `inspect`, so a profile pointing at an agentless remote
+  /// image is refused after its config blobs and before any disk transfer, operation row, staging
+  /// directory or pin exists (spec §58).
+  func resolveRecord(
+    reference: String, profile: String?, purpose: ImagePullPurpose = .storage
+  ) async throws -> ImageRecord {
     guard let ref = Self.registryReference(reference) else {
       return try await record(for: reference)
     }
     if let known = try await cachedRegistryRecord(ref) {
       return try await touch(known)
     }
-    return try await pull(reference: ref.description, profile: profile)
+    return try await pull(reference: ref.description, profile: profile, purpose: purpose)
   }
 
   /// A `ready` row for `ref` without touching the network: a digest reference is its own answer, a
@@ -94,9 +100,12 @@ extension ImageManager {
   /// transfer; `progress` is only wired to the caller that actually starts it.
   @discardableResult
   public func pull(
-    reference: String, profile: String? = nil, progress: TransferProgress? = nil
+    reference: String, profile: String? = nil, progress: TransferProgress? = nil,
+    format: ImageArtifactFormat? = nil, purpose: ImagePullPurpose = .storage
   ) async throws -> ImageRecord {
-    switch try await beginPull(reference: reference, profile: profile, progress: progress) {
+    switch try await beginPull(
+      reference: reference, profile: profile, progress: progress, format: format, purpose: purpose
+    ) {
     case let .present(_, record): return record
     case let .started(_, task): return try await task.value
     }
@@ -105,21 +114,28 @@ extension ImageManager {
   /// Resolves and starts a pull, then returns. The transfer keeps running on this actor, so
   /// `image.pull` can answer an RPC in well under the socket's idle timeout and let the caller
   /// follow the `pull-image` operation instead.
-  public func startPull(reference: String, profile: String? = nil) async throws -> ImagePullStart {
-    switch try await beginPull(reference: reference, profile: profile, progress: nil) {
+  public func startPull(
+    reference: String, profile: String? = nil, format: ImageArtifactFormat? = nil
+  ) async throws -> ImagePullStart {
+    switch try await beginPull(
+      reference: reference, profile: profile, progress: nil, format: format
+    ) {
     case let .present(start, _): return start
     case let .started(start, _): return start
     }
   }
 
   func beginPull(
-    reference: String, profile: String?, progress: TransferProgress?
+    reference: String, profile: String?, progress: TransferProgress?,
+    format: ImageArtifactFormat? = nil, purpose: ImagePullPurpose = .storage
   ) async throws -> PullOutcome {
     let ref = try Self.requireRegistryReference(reference)
     // Deliberately unwrapped: an auth or not-found failure here is the operator's answer, and
-    // `REGISTRY_AUTH` says more than `IMAGE_PULL_FAILED` would.
+    // `REGISTRY_AUTH` says more than `IMAGE_PULL_FAILED` would. Nothing below this line has been
+    // written yet, so a format or guest-agent refusal leaves no trace either.
     let remote = try await RunnerVMImageTransfer.inspect(
-      ref, registry: try await registries.client(for: ref.registry))
+      ref, registry: try await registries.client(for: ref.registry), require: format,
+      purpose: purpose)
     let canonical = ref.canonical(withDigest: remote.digest)
     tagResolutions[ref.description] = (remote.digest, now())
     if let existing = try await readyRecord(canonical: canonical) {
@@ -210,7 +226,10 @@ extension ImageManager {
       logger.info(
         "image pulled",
         metadata: .context(imageDigest: record.digest)
-          .merging(["reference": .string(canonical.description)]) { $1 })
+          .merging([
+            "reference": .string(canonical.description),
+            "format": .string(remote.format.rawValue),
+          ]) { $1 })
       return record
     } catch {
       // The staging directory is deliberately kept: the next pull of the same digest resumes into

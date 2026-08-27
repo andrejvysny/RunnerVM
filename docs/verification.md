@@ -102,3 +102,39 @@ commit's CI is the authoritative check for full green.
 - **Linux/arm64: supported and proven** (above).
 - **macOS guests: not implemented.** Config validation rejects `os: macos` with
   `GUEST_OS_UNSUPPORTED`. See `docs/macos-guests.md` for the milestone plan and status.
+
+## Image builder + tart import (2026-08-27, dev host, uncommitted M14/M15 tree)
+
+Host: macOS 26.4, Swift 6.3.3, 14 CPU / 24 GiB, `runnerd --foreground --state-dir ~/runnervm-dev`,
+no GitHub credential configured (`github.demand: manual`).
+
+- `runnerctl image build images/recipes/ubuntu-24-minimal --name ubuntu-24-minimal` — **succeeded in
+  3m43s** from a cold cache: downloaded the pinned qcow2
+  (`ubuntu-24.04-server-cloudimg-arm64.img`, release-20260814, sha256 `4a281a92…`), converted it to a
+  sparse raw base with `QCOW2Reader`, booted with the cloud-init bootstrap seed, reached the guest
+  agent over vsock with `waitUntilReachable`, ran the 7 recipe steps over `agent.exec`
+  (`RUNNER_VERSION=latest` resolved on the host to `2.337.0`, tarball digest from the GitHub release
+  asset), passed the final `waitUntilReady` gate, probed, sealed and registered
+  `sha256:767002e8…` (16 GiB virtual, 2.5 GiB on disk, 736 packages).
+- `runnerctl image build images/recipes/ubuntu-24 --name ubuntu-24` (derived, `FROM ubuntu-24-minimal`)
+  — **succeeded in 1m16s**: Docker `5:29.7.2-1~ubuntu.24.04~noble`, 743 packages, 2.9 GiB on disk,
+  `provenance.parentImageDigest` set. Rebuilding under the same `--name` moved the `image_aliases`
+  row to the new digest (`image inspect ubuntu-24` → the newer digest; the old row stays listed).
+- Bugs found and fixed by the live run: the probe read no runner version (actions/runner ships none;
+  it is now taken from `Runner.Listener.deps.json`, with the host-resolved ARG as fallback),
+  `sshEnabled` was false on 24.04 (socket-activated `ssh.socket`), `architecture` was recorded as
+  `aarch64` (normalised to `arm64`), and `RUNNER_VERSION=latest` failed once a GitHub scope was
+  configured without a credential (the anonymous fallback was skipped).
+- `runnerctl vm create --profile ubuntu-24` on the built image: `planned → … → waitingForAgent → idle`
+  in 5 s (guest agent ready, boot id recorded); the orchestrator then reaped the idle VM because no
+  demand was queued. A GitHub job was **not** run (no credential on this host); the runner/JIT path is
+  unchanged from the proven 2026-08-26 e2e.
+- `runnerctl image pull ghcr.io/cirruslabs/ubuntu:latest` — **imported** (40 layers, 2.84 GiB
+  compressed → 20 GB sparse, 4.9 GiB on disk) as local `sha256:f5e2d25c…`, `source: tart (imported)`,
+  `guest agent: absent`, `createdAt` from the tart upload-time annotation; staging directory cleaned.
+- `image pull … --format runnervm` → `REGISTRY_UNSUPPORTED_MANIFEST: manifest is tart, not runnervm`
+  before any blob transfer.
+- `vm create --profile tart` (profile on the imported image) → `IMAGE_NO_GUEST_AGENT` in 1.8 s, no
+  clone, no pin left behind.
+- Not covered live: a daemon restart mid-build (covered by `ImageBuildTests` against fakes), `--push`
+  to a real registry, LaunchDaemon (`_runnervm`) builds — `doctor build_tools` gates those.

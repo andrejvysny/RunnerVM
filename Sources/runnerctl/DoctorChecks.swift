@@ -26,6 +26,10 @@ enum DoctorChecks {
     checks.append(diskHeadroom(rootDir: paths.rootDir, config: loaded.config))
     checks.append(githubToken(config: loaded.config, paths: paths))
 
+    checks.append(buildTools())
+    checks.append(buildGuestAgent(paths: paths, config: loaded.config))
+    checks.append(buildRecipes(paths: paths))
+
     checks.append(hostSleepDisabled())
     checks.append(launchdJobLoaded())
     checks.append(loginKeychainUnlocked())
@@ -35,6 +39,7 @@ enum DoctorChecks {
     if let status { checks.append(daemonHealth(status)) }
     checks.append(
       runnerVersion(images: images, config: loaded.config, authState: status?.github.authState))
+    checks.append(profileImageGuestAgent(images: images, config: loaded.config))
 
     return DoctorReport(checks: checks)
   }

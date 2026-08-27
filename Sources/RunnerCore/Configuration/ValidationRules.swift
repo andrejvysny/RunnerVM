@@ -244,6 +244,68 @@ extension ImageCacheConfig {
   }
 }
 
+extension ImageBuildConfig {
+  /// A step timeout longer than this never actually applies: the guest agent silently clamps every
+  /// exec it runs at 30 minutes, so a longer configured value would just be quietly ineffective.
+  static let maxStepTimeout = DurationValue.minutes(30)
+  static let minMemoryBytes = ByteSize.gibibytes(1).bytes
+  static let minDiskBytes = ByteSize.gibibytes(8).bytes
+  static let maxAllowedConcurrent = 4
+
+  func validate(facts: HostFacts) -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if cpuCount < 1 || cpuCount > facts.maximumAllowedCPUCount {
+      issues.append(.error(
+        "BUILD_CPUS_INVALID", "build.cpuCount",
+        "must be between 1 and \(facts.maximumAllowedCPUCount)"
+      ))
+    }
+    if memoryBytes < Self.minMemoryBytes {
+      issues.append(.error(
+        "BUILD_MEMORY_INVALID", "build.memoryBytes",
+        "must be at least \(ByteSize(bytes: Self.minMemoryBytes))"
+      ))
+    }
+    if diskBytes < Self.minDiskBytes {
+      issues.append(.error(
+        "BUILD_DISK_TOO_SMALL", "build.diskBytes",
+        "must be at least \(ByteSize(bytes: Self.minDiskBytes))"
+      ))
+    }
+    issues += validateTimeouts()
+    if maxConcurrent < 0 || maxConcurrent > Self.maxAllowedConcurrent {
+      issues.append(.error(
+        "BUILD_MAX_CONCURRENT_INVALID", "build.maxConcurrent",
+        "must be between 0 and \(Self.maxAllowedConcurrent)"
+      ))
+    }
+    if recipeFileName.isEmpty || recipeFileName.contains("/") {
+      issues.append(.error(
+        "BUILD_RECIPE_FILENAME_INVALID", "build.recipeFileName",
+        "must be a bare filename, not empty and containing no '/'"
+      ))
+    }
+    if maxSteps < 1 {
+      issues.append(.error("BUILD_MAX_STEPS_INVALID", "build.maxSteps", "must be at least 1"))
+    }
+    return issues
+  }
+
+  private func validateTimeouts() -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if !timeout.isPositive {
+      issues.append(.error("BUILD_TIMEOUT_INVALID", "build.timeout", "must be positive"))
+    }
+    if stepTimeout > Self.maxStepTimeout {
+      issues.append(.error(
+        "BUILD_STEP_TIMEOUT_TOO_LONG", "build.stepTimeout",
+        "must not exceed \(Self.maxStepTimeout); the guest agent clamps exec timeouts there"
+      ))
+    }
+    return issues
+  }
+}
+
 extension LoggingConfig {
   /// A file too small to hold one burst of startup logs rotates continuously, and a `maxFiles`
   /// of zero silently discards the archive an operator went looking for.

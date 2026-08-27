@@ -23,9 +23,17 @@ struct Status: AsyncParsableCommand {
     blocks.append(section("Capacity", capacityFields(status.capacity)))
     blocks.append(section("GitHub", githubFields(status.github)))
     blocks.append(section("Images", imageFields(status.images)))
+    if let line = buildsLine(status.builds) { blocks.append(line) }
     blocks.append("Profiles\n" + profileLines(status.profiles))
     blocks.append(section("Reconciliation", reconciliationFields(status.reconciliation)))
     return blocks.joined(separator: "\n\n")
+  }
+
+  /// `nil` when the daemon predates the image builder (`SystemStatus.builds` is optional for wire
+  /// compat) -- the line is dropped entirely rather than printed as zeroes that might not be true.
+  private static func buildsLine(_ builds: BuildsSummary?) -> String? {
+    guard let builds else { return nil }
+    return "Builds: \(builds.running) running, \(builds.queued) queued"
   }
 
   private static func imageFields(_ images: ImageSummary) -> [(String, String)] {

@@ -24,6 +24,39 @@ public struct RunnerPaths: Hashable, Sendable {
   public var imageBlobsDir: URL { imagesDir.appending(path: "blobs", directoryHint: .isDirectory) }
   public var daemonLogsDir: URL { logsDir.appending(path: "runnerd", directoryHint: .isDirectory) }
 
+  /// In-daemon image builds (Phase 4/5 image builder): each build gets `builds/<id>/vm/...`, the
+  /// same clone-then-publish layout an instance gets under `instances/<id>/`.
+  public var buildsDir: URL { stateDir.appending(path: "builds", directoryHint: .isDirectory) }
+  public func buildDir(_ id: ImageBuildID) -> URL {
+    buildsDir.appending(path: id.rawValue, directoryHint: .isDirectory)
+  }
+  /// The build's VM directory proper (disk, nvram, spec, seed, context). Nested under `buildDir`
+  /// rather than being it, so future build-only artifacts (the recipe copy, push manifests) have
+  /// somewhere to live alongside the VM without crowding its directory.
+  public func buildVMDir(_ id: ImageBuildID) -> URL {
+    buildDir(id).appending(path: "vm", directoryHint: .isDirectory)
+  }
+
+  /// Per-build *logs*, mirroring `instanceLogsDir`: outlives the build directory, which goes away
+  /// once the build is deleted.
+  public var buildLogsDir: URL { logsDir.appending(path: "builds", directoryHint: .isDirectory) }
+  public func buildLogDir(_ id: ImageBuildID) -> URL {
+    buildLogsDir.appending(path: id.rawValue, directoryHint: .isDirectory)
+  }
+  public func buildLogFile(_ id: ImageBuildID) -> URL {
+    buildLogDir(id).appending(path: "build.log")
+  }
+
+  /// Where a build caches a `FROM cloudImage:`/`FROM registry:` base before staging its VM.
+  public var baseImageCacheDir: URL {
+    rootDir.appending(path: "cache", directoryHint: .isDirectory)
+      .appending(path: "base-images", directoryHint: .isDirectory)
+  }
+
+  /// Builder workers get their own socket namespace, separate from `socketDir`'s instance sockets:
+  /// a build and an instance can share the same short id prefix without colliding.
+  public var buildSocketDir: URL { socketDir.appending(path: "build", directoryHint: .isDirectory) }
+
   /// Per-instance *logs*, deliberately separate from `instances/<id>/`: the instance directory is
   /// the VM's disk and goes away with the VM, while its serial console, worker output and
   /// collected guest diagnostics have to outlive it (spec §74, §131).
@@ -61,8 +94,19 @@ public struct RunnerPaths: Hashable, Sendable {
     socketDir.appending(path: "vm-\(Self.shortID(id))-agent.sock")
   }
 
-  /// First 8 characters of the instance UUID, matching the `rvm-<profile>-<shortid>` naming (§125).
-  public static func shortID(_ id: InstanceID) -> String {
+  /// runnerd <-> build vmworker control socket, under the builder's own namespace.
+  public func buildWorkerSocket(_ id: ImageBuildID) -> URL {
+    buildSocketDir.appending(path: "vm-\(Self.shortID(id)).sock")
+  }
+
+  /// vmworker's UDS bridge in front of the build guest's vsock listener.
+  public func buildAgentSocket(_ id: ImageBuildID) -> URL {
+    buildSocketDir.appending(path: "vm-\(Self.shortID(id))-agent.sock")
+  }
+
+  /// First 8 characters of the id, matching the `rvm-<profile>-<shortid>` naming (§125). Generic
+  /// over `TypedID` so instance and build ids share one implementation.
+  public static func shortID(_ id: some TypedID) -> String {
     String(id.rawValue.prefix(shortIDLength))
   }
 

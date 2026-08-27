@@ -17,6 +17,9 @@ public enum ImageError: RunnerError {
   case insufficientDiskSpace(requiredBytes: UInt64, availableBytes: UInt64)
   case stillPinned(digest: ImageDigest)
   case runnerTooOld(digest: ImageDigest, imageVersion: String?, latestVersion: String)
+  /// The image carries no RunnerVM guest agent, so no VM built from it could ever take a job
+  /// (spec §58). Raised before any disk byte moves and before any pin is taken.
+  case noGuestAgent(digest: ImageDigest?, reference: String?)
 
   public var code: String {
     switch self {
@@ -35,6 +38,7 @@ public enum ImageError: RunnerError {
     case .insufficientDiskSpace: "IMAGE_INSUFFICIENT_DISK_SPACE"
     case .stillPinned: "IMAGE_STILL_PINNED"
     case .runnerTooOld: "IMAGE_RUNNER_TOO_OLD"
+    case .noGuestAgent: "IMAGE_NO_GUEST_AGENT"
     }
   }
 
@@ -62,6 +66,10 @@ public enum ImageError: RunnerError {
       "image \(digest) has actions/runner \(imageVersion ?? "unknown") but \(latest) has been "
         + "published for more than \(RunnerVersionPolicy.graceDays) days; rebuild the image "
         + "(imageUpdates.denyTooOldRunner is on)"
+    case .noGuestAgent(let digest, let reference):
+      "image \(digest?.rawValue ?? reference ?? "(unknown)") declares no RunnerVM guest agent; "
+        + "it cannot run jobs. Images imported from tart are for inspection/re-publishing only "
+        + "— build one with `runnerctl image build` (or scripts/build-ubuntu-image.sh)"
     }
   }
 
@@ -71,7 +79,7 @@ public enum ImageError: RunnerError {
       true
     case .referenceInvalid, .notFound, .digestMismatch, .manifestUnsupported, .metadataInvalid,
          .incompatibleHost, .incompatibleGuestOS, .diskSmallerThanImage, .cloneUnsupported,
-         .runnerTooOld:
+         .runnerTooOld, .noGuestAgent:
       false
     }
   }

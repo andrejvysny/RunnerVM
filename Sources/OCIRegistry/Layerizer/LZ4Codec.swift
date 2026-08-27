@@ -62,12 +62,26 @@ enum LZ4Codec {
   }
 
   /// Streaming decompressor: compressed bytes in, plain bytes out to `sink`.
+  ///
+  /// `limit`, when given, bounds how many plain bytes the stream may ever emit. Without it a
+  /// chunk's declared uncompressed size is trusted, and a manifest lying about it (an LZ4 bomb)
+  /// would let a pull decompress and write arbitrarily more than was ever budgeted for.
   struct Decompressor {
     private let filter: OutputFilter
 
-    init(sink: @escaping (Data) throws -> Void) throws {
+    init(sink: @escaping (Data) throws -> Void, limit: Int? = nil) throws {
+      var emitted = 0
       filter = try OutputFilter(.decompress, using: .lz4, bufferCapacity: LZ4Codec.bufferBytes) { data in
         guard let data, !data.isEmpty else { return }
+        if let limit {
+          emitted += data.count
+          guard emitted <= limit else {
+            throw RegistryError.invalidResponse(
+              operation: "decompress chunk",
+              reason: "chunk expands beyond its declared \(limit) bytes"
+            )
+          }
+        }
         try sink(data)
       }
     }

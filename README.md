@@ -31,12 +31,17 @@ account) see [`docs/install.md`](docs/install.md).
   [docs/verification.md](docs/verification.md). macOS guests: see [docs/macos-guests.md](docs/macos-guests.md).
 - Recommended production lifecycle: `ephemeral` — one job per VM, then destroy. `reusable`
   exists but ephemeral is the mode this project is validated against.
+- In-daemon image builder (`runnerctl image build`, [docs/image-build.md](docs/image-build.md)) is
+  implemented and unit-tested; a live bootstrap→derived→job build chain is the open verification
+  item (`TODO.md` P7).
 
 ## Documentation
 
 - [`RunnerVM — GitHub Actions VM Orchestrator.md`](<RunnerVM — GitHub Actions VM Orchestrator.md>) — the full architecture/implementation spec.
 - [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
-- [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md), [`docs/state_machines.md`](docs/state_machines.md).
+- [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
+  build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
+  [`docs/state_machines.md`](docs/state_machines.md).
 - [`Proto/`](Proto) — the daemon/worker/guest wire protocols.
 
 ## Provenance

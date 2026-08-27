@@ -61,6 +61,36 @@ import Testing
     await runtime.stop()
   }
 
+  /// Phase 5 wiring: the builder exists, answers `build.*` (without one every method returns
+  /// `BUILD_UNAVAILABLE`), owns the directories it needs, and is stopped as part of teardown.
+  @Test func theImageBuilderIsWiredIntoTheRuntime() async throws {
+    let tree = try TempTree()
+    defer { tree.remove() }
+    let configPath = try tree.file("config.yaml", contents: ExampleConfig.example)
+
+    try await withRunningDaemon(configPath: configPath, tree: tree) { runtime, client in
+      let builds = try await client.buildList()
+      #expect(builds.builds.isEmpty)
+      for directory in [tree.paths.buildsDir, tree.paths.buildLogsDir, tree.paths.buildSocketDir,
+                        tree.paths.baseImageCacheDir] {
+        #expect(
+          FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)),
+          "\(directory.lastPathComponent) must exist")
+      }
+      // The whole path daemon socket -> service -> builder, proven by an intake refusal that only
+      // the builder itself can produce.
+      var refusal: String?
+      do {
+        _ = try await client.imageBuild(
+          ImageBuildRequest(recipePath: "/nonexistent/Runnerfile", name: "x"))
+      } catch {
+        refusal = "\(error)"
+      }
+      #expect(refusal?.contains("BUILD_RECIPE_UNREADABLE") == true, "got \(refusal ?? "success")")
+      #expect(await runtime.isRunning)
+    }
+  }
+
   @Test func startAppliesTheConfigAndServesStatus() async throws {
     let tree = try TempTree()
     defer { tree.remove() }

@@ -89,16 +89,18 @@ public struct RunnerVMArtifact: Sendable, Equatable {
   public let metadata: ImageMetadata
   public let configDescriptor: OCIDescriptor
   /// In manifest order, which is disk order.
-  public let diskChunks: [OCIDescriptor]
+  public let diskChunks: [PlacedChunk]
   public let nvram: OCIDescriptor?
   public let diskVirtualSize: UInt64
   public let diskContentDigest: String
   public let createdAt: Date?
 
-  /// Structural validation without fetching the config blob.
-  public static func layout(of manifest: OCIManifest) throws
-    -> (chunks: [OCIDescriptor], nvram: OCIDescriptor?)
-  {
+  /// Structural validation without fetching the config blob. `limits` runs first: a manifest that
+  /// fails it is rejected before any of the checks below even look at it.
+  public static func layout(
+    of manifest: OCIManifest, limits: ArtifactLimits = .default
+  ) throws -> (chunks: [OCIDescriptor], nvram: OCIDescriptor?) {
+    try limits.validate(manifest: manifest)
     guard manifest.schemaVersion == 2, manifest.mediaType == RunnerVMMediaType.ociManifest else {
       throw RegistryError.unsupportedManifest(
         reason: "expected an OCI image manifest, got \(manifest.mediaType) v\(manifest.schemaVersion)"
@@ -131,8 +133,10 @@ public struct RunnerVMArtifact: Sendable, Equatable {
     return (chunks, nvramLayers.first)
   }
 
-  public static func parse(manifest: OCIManifest, configBlob: Data) throws -> RunnerVMArtifact {
-    let (chunks, nvram) = try layout(of: manifest)
+  public static func parse(
+    manifest: OCIManifest, configBlob: Data, limits: ArtifactLimits = .default
+  ) throws -> RunnerVMArtifact {
+    let (chunkDescriptors, nvram) = try layout(of: manifest, limits: limits)
     let config = try RunnerVMConfig.decode(configBlob)
     guard config.artifactSchemaVersion == RunnerVMConfig.currentSchemaVersion else {
       throw RegistryError.unsupportedManifest(
@@ -149,19 +153,16 @@ public struct RunnerVMArtifact: Sendable, Equatable {
       throw RegistryError
         .unsupportedManifest(reason: "manifest is missing \(RunnerVMAnnotation.diskContentDigest)")
     }
-    let declared = try chunks.reduce(UInt64(0)) {
-      try $0 + ($1.requiredUInt64Annotation(RunnerVMAnnotation.chunkUncompressedSize))
-    }
-    guard declared == virtualSize else {
-      throw RegistryError.unsupportedManifest(
-        reason: "chunks total \(declared) bytes but the disk is \(virtualSize)"
-      )
-    }
+    try limits.validate(virtualDiskBytes: virtualSize)
+    // Cross-checks the chunks' declared sizes against `virtualSize` with checked arithmetic; this
+    // is also what used to be a plain, unchecked `reduce` here.
+    let chunks = try PlacedChunk.layout(of: chunkDescriptors, virtualSize: virtualSize)
     guard nvram == nil || nvram?.mediaType == RunnerVMMediaType.nvram(for: config.metadata.os) else {
       throw RegistryError.unsupportedManifest(
         reason: "NVRAM layer type does not match a \(config.metadata.os.rawValue) guest"
       )
     }
+    if let nvram { try limits.validate(nvram: nvram) }
     return RunnerVMArtifact(
       metadata: config.metadata, configDescriptor: manifest.config, diskChunks: chunks, nvram: nvram,
       diskVirtualSize: virtualSize, diskContentDigest: contentDigest,

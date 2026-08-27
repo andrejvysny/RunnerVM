@@ -35,17 +35,25 @@ public actor HostModeControl {
   private let sessions: any RunnerSessionRepository
   private let audit: any AuditRepository
   private let actorName: String
+  /// In-flight image builds. A build owns a VM producing an artifact and cannot be handed to
+  /// another host, so a drain has to wait it out exactly like a runner session; it is a separate
+  /// closure (rather than folded into the session count) because `Report.activeSessions` is what
+  /// `runnerctl system drain` prints, and a build is not a session.
+  private let builds: @Sendable () async -> Int
   private let logger: Logger
 
   public init(
     hostId: HostID, hosts: any HostRepository, sessions: any RunnerSessionRepository,
-    audit: any AuditRepository, actorName: String, logger: Logger = Logger(component: .daemon)
+    audit: any AuditRepository, actorName: String,
+    builds: @escaping @Sendable () async -> Int = { 0 },
+    logger: Logger = Logger(component: .daemon)
   ) {
     self.hostId = hostId
     self.hosts = hosts
     self.sessions = sessions
     self.audit = audit
     self.actorName = actorName
+    self.builds = builds
     self.logger = logger
   }
 
@@ -62,6 +70,11 @@ public actor HostModeControl {
   public func activeSessions() async -> Int {
     let rows = (try? await sessions.list(limit: nil)) ?? []
     return rows.count { !$0.state.isTerminal }
+  }
+
+  /// Everything a drain has to outlive: runner sessions plus in-flight image builds.
+  public func activeWork() async -> Int {
+    await activeSessions() + builds()
   }
 
   // MARK: - Transitions
@@ -105,17 +118,26 @@ public actor HostModeControl {
   /// here: the caller has already put the host in `draining`, which is what stops new work.
   public func waitForIdle(timeout: Duration) async -> Report {
     let deadline = ContinuousClock.now + timeout
+    var loggedBuildWait = false
     while ContinuousClock.now < deadline {
-      let active = await activeSessions()
-      if active == 0 {
+      let sessions = await activeSessions()
+      let running = await builds()
+      if sessions == 0, running == 0 {
         return Report(
           mode: (try? await mode()) ?? .draining, activeSessions: 0, drained: true)
       }
+      if sessions == 0, running > 0, !loggedBuildWait {
+        loggedBuildWait = true
+        logger.notice(
+          "drain is waiting for in-flight image builds",
+          metadata: ["builds": .stringConvertible(running)])
+      }
       do { try await Task.sleep(for: Self.pollInterval) } catch { break }
     }
-    let active = await activeSessions()
+    let remaining = await activeWork()
     return Report(
-      mode: (try? await mode()) ?? .draining, activeSessions: active, drained: active == 0)
+      mode: (try? await mode()) ?? .draining, activeSessions: await activeSessions(),
+      drained: remaining == 0)
   }
 
   // MARK: - Internals

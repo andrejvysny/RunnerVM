@@ -29,6 +29,15 @@ public protocol ImageRepository: Sendable {
   func pins(ownerType: ImagePinOwnerType) async throws -> [ImagePinRecord]
   /// Images with zero rows in `image_pins`, regardless of `state`.
   func unpinnedImages() async throws -> [ImageRecord]
+
+  /// Upserts `name -> digest` (spec: a mutable local name a rebuild or re-import can repoint,
+  /// unlike the immutable name baked into an image's own manifest).
+  func setAlias(name: String, digest: ImageDigest) async throws
+  func alias(name: String) async throws -> ImageDigest?
+  func aliases() async throws -> [ImageAliasRecord]
+  /// Drops every alias currently pointing at `digest`. Called from the image delete path so a
+  /// stale alias never outlives the image it names.
+  func removeAliases(digest: ImageDigest) async throws
 }
 
 public final class GRDBImageRepository: ImageRepository, Sendable {
@@ -135,6 +144,27 @@ public final class GRDBImageRepository: ImageRepository, Sendable {
       try ImageRecord.fetchAll(
         db, sql: "SELECT * FROM images WHERE digest NOT IN (SELECT digest FROM image_pins)"
       )
+    }
+  }
+
+  public func setAlias(name: String, digest: ImageDigest) async throws {
+    try await db.write { db in
+      let alias = ImageAliasRecord(name: name, digest: digest, updatedAt: .now)
+      try DatabaseErrorMapper.run(entity: "image_aliases") { try alias.upsert(db) }
+    }
+  }
+
+  public func alias(name: String) async throws -> ImageDigest? {
+    try await db.read { db in try ImageAliasRecord.fetchOne(db, key: name)?.digest }
+  }
+
+  public func aliases() async throws -> [ImageAliasRecord] {
+    try await db.read { db in try ImageAliasRecord.fetchAll(db) }
+  }
+
+  public func removeAliases(digest: ImageDigest) async throws {
+    try await db.write { db in
+      _ = try ImageAliasRecord.filter(Column("digest") == digest.rawValue).deleteAll(db)
     }
   }
 }

@@ -95,12 +95,13 @@ struct Run: ParsableCommand {
   private static func buildConfiguration(
     spec: VMInstanceSpec, paths: VMRuntimePaths, logger: Logger
   ) throws -> VZVirtualMachineConfiguration {
-    // A cloud-init NoCloud seed is a build-time-only extra: scripts/build-ubuntu-image.sh drops
-    // seed.img into the instance directory, runner instances never have one (spec §60).
+    // A cloud-init NoCloud seed and a build context are build-time-only extras: the image builder
+    // drops seed.img/context.img into the instance directory, runner instances never have either
+    // (spec §60).
     var readOnlyDisks: [URL] = []
-    if FileManager.default.fileExists(atPath: paths.seedDisk.path) {
-      readOnlyDisks.append(paths.seedDisk)
-      logger.info("attaching read-only seed disk", metadata: ["path": "\(paths.seedDisk.path)"])
+    for disk in [paths.seedDisk, paths.contextDisk] where FileManager.default.fileExists(atPath: disk.path) {
+      readOnlyDisks.append(disk)
+      logger.info("attaching read-only build disk", metadata: ["path": "\(disk.path)"])
     }
     do {
       return try VMConfigurationBuilder(spec: spec, paths: paths, readOnlyDisks: readOnlyDisks)

@@ -29,6 +29,12 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   case imagePush = "image.push"
   case imageDelete = "image.delete"
   case imagePrune = "image.prune"
+  /// Phase 5 image builder. `runnerd` answers `BUILD_UNAVAILABLE` until it lands.
+  case imageBuild = "image.build"
+  case buildList = "build.list"
+  case buildGet = "build.get"
+  case buildLog = "build.log"
+  case buildCancel = "build.cancel"
 
   case registryLogin = "registry.login"
   case registryLogout = "registry.logout"
@@ -68,9 +74,9 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
          .configApply, .imageDelete, .imagePrune, .imagePull, .imagePush,
          .registryLogin, .registryLogout,
          .instanceStop, .instanceDelete, .instanceTaint, .authLogin, .authLogout,
-         .debugDemandSet:
+         .debugDemandSet, .buildCancel:
       return .idempotentMutation
-    case .imageImport, .instanceCreate, .instanceExec, .debugRunJIT:
+    case .imageImport, .instanceCreate, .instanceExec, .debugRunJIT, .imageBuild:
       return .singleShot
     default:
       return .readOnly
@@ -89,6 +95,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .configGet, .configValidate, .configApply,
     .profileList, .profileGet, .scopeList, .scopeGet,
     .imageList, .imageGet, .imageImport, .imagePull, .imagePush, .imageDelete, .imagePrune,
+    .imageBuild, .buildList, .buildGet, .buildLog, .buildCancel,
     .registryLogin, .registryLogout, .registryStatus,
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,
     .instanceTaint,

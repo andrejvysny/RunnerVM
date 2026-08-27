@@ -35,6 +35,13 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
   /// Build provenance, when the image was sealed with any; `nil` for images built before
   /// provenance existed or imported without their `metadata.json`.
   public var provenance: ImageProvenanceSummaryDTO?
+  /// Which artifact schema this image's disk came from: `runnervm` for anything RunnerVM built or
+  /// pulled in its own format, `tart` for a read-only import (spec §58). `nil` from a daemon that
+  /// predates the field.
+  public var sourceFormat: String?
+  /// Whether the image carries a RunnerVM guest agent. `false` means it can be inspected and
+  /// re-published but never run a job. `nil` from a daemon that predates the field.
+  public var guestAgent: Bool?
 
   public init(
     digest: String, name: String?, os: String, architecture: String, state: String,
@@ -42,7 +49,8 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     createdAt: String, canonicalReference: String? = nil, pulledAt: String? = nil,
     runnerVersion: String? = nil, runnerVersionHealth: RunnerVersionHealth = .unknown,
     runnerFirstMissedVersion: String? = nil, runnerFirstMissedPublishedAt: String? = nil,
-    provenance: ImageProvenanceSummaryDTO? = nil
+    provenance: ImageProvenanceSummaryDTO? = nil, sourceFormat: String? = nil,
+    guestAgent: Bool? = nil
   ) {
     self.digest = digest
     self.name = name
@@ -61,6 +69,8 @@ public struct ImageInfoDTO: Codable, Sendable, Hashable {
     self.runnerFirstMissedVersion = runnerFirstMissedVersion
     self.runnerFirstMissedPublishedAt = runnerFirstMissedPublishedAt
     self.provenance = provenance
+    self.sourceFormat = sourceFormat
+    self.guestAgent = guestAgent
   }
 }
 
@@ -78,12 +88,17 @@ public struct ImageProvenanceSummaryDTO: Codable, Sendable, Hashable {
   public var diskSHA256: String?
   public var builtAt: String?
   public var builderCommit: String?
+  /// Set when this image's disk was imported from another tool's format, e.g. `tart` (spec §58).
+  public var importedFormat: String?
+  /// The source artifact's own manifest digest, when it had one.
+  public var importedManifestDigest: String?
 
   public init(
     baseImageSource: String? = nil, baseImageSHA256: String? = nil, runnerSHA256: String? = nil,
     guestAgentCommit: String? = nil, dockerVersion: String? = nil, kernelVersion: String? = nil,
     packageUpgrade: Bool? = nil, packageCount: Int? = nil, diskSHA256: String? = nil,
-    builtAt: String? = nil, builderCommit: String? = nil
+    builtAt: String? = nil, builderCommit: String? = nil, importedFormat: String? = nil,
+    importedManifestDigest: String? = nil
   ) {
     self.baseImageSource = baseImageSource
     self.baseImageSHA256 = baseImageSHA256
@@ -96,6 +111,8 @@ public struct ImageProvenanceSummaryDTO: Codable, Sendable, Hashable {
     self.diskSHA256 = diskSHA256
     self.builtAt = builtAt
     self.builderCommit = builderCommit
+    self.importedFormat = importedFormat
+    self.importedManifestDigest = importedManifestDigest
   }
 }
 
@@ -118,16 +135,21 @@ public struct ImageImportRequest: Codable, Sendable, Hashable {
   /// `path`; naming a file that does not exist, or one that describes a different guest OS, is an
   /// error rather than a silent fallback.
   public var metadataPath: String?
+  /// Whether this disk carries a RunnerVM guest agent. `nil` means `true`; an image imported with
+  /// this explicitly `false` (`runnerctl image import --no-guest-agent`) cannot run jobs and is
+  /// only useful as a build/inspection artifact.
+  public var guestAgent: Bool?
 
   public init(
     path: String, nvramPath: String? = nil, os: String, name: String? = nil,
-    metadataPath: String? = nil
+    metadataPath: String? = nil, guestAgent: Bool? = nil
   ) {
     self.path = path
     self.nvramPath = nvramPath
     self.os = os
     self.name = name
     self.metadataPath = metadataPath
+    self.guestAgent = guestAgent
   }
 }
 
@@ -144,8 +166,15 @@ public struct ImageGetRequest: Codable, Sendable, Hashable {
 public struct ImagePullRequest: Codable, Sendable, Hashable {
   /// A registry-qualified reference: `<registry>/<repository>[:tag][@sha256:…]`.
   public var reference: String
+  /// `runnervm` or `tart`. `nil` auto-detects from the manifest; an explicit value refuses
+  /// anything else before a byte moves, and steers the choice when a tag fronts an index
+  /// carrying both (spec §58).
+  public var format: String?
 
-  public init(reference: String) { self.reference = reference }
+  public init(reference: String, format: String? = nil) {
+    self.reference = reference
+    self.format = format
+  }
 }
 
 public struct ImagePullResponse: Codable, Sendable, Hashable {

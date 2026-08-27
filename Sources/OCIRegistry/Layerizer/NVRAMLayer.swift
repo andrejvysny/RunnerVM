@@ -31,6 +31,11 @@ public enum NVRAMLayer {
   public static func pull(
     descriptor: OCIDescriptor, to fileURL: URL, repository: String, registry: RegistryClient
   ) async throws {
+    guard descriptor.size >= 0 else {
+      throw RegistryError.unsupportedManifest(
+        reason: "NVRAM layer declares a negative size \(descriptor.size)"
+      )
+    }
     guard descriptor.size <= Int64(maximumBytes) else {
       throw RegistryError.unsupportedManifest(
         reason: "NVRAM layer of \(descriptor.size) bytes exceeds the \(maximumBytes)-byte limit"

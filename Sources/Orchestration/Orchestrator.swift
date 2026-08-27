@@ -54,6 +54,9 @@ public actor Orchestrator {
   var workerCPU: [InstanceID: (cpuSeconds: Double, at: Date)] = [:]
   var nextStartToken = 0
   var events: [OrchestratorEventRecord] = []
+  /// Capacity held by in-flight image builds, so a scheduling pass plans against the same host
+  /// admission will enforce. `nil` until Phase 5 attaches a builder.
+  var imageBuilds: (any ImageBuildReservationSource)?
   /// `logs/events.jsonl`. Attached after construction; see `InstanceManager.attachEventLog`.
   var eventLog: LifecycleEventLog?
   private var eventTask: Task<Void, Never>?
@@ -143,6 +146,11 @@ public actor Orchestrator {
 
   public func attachEventLog(_ log: LifecycleEventLog?) {
     eventLog = log
+  }
+
+  /// Phase 5 seam; see `InstanceManager.attachImageBuilds`.
+  public func attachImageBuilds(_ source: (any ImageBuildReservationSource)?) {
+    imageBuilds = source
   }
 
   // MARK: - Queries

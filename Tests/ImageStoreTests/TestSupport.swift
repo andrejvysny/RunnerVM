@@ -31,6 +31,10 @@ final class TempStore {
     InstanceStore(paths: paths, images: images, allowFullCopy: allowFullCopy, now: now)
   }
 
+  func buildStore(allowFullCopy: Bool = false) -> BuildStore {
+    BuildStore(paths: paths, images: images, allowFullCopy: allowFullCopy)
+  }
+
   // MARK: - Fixtures
 
   /// Sparse raw disk: a few real bytes, then a hole out to the virtual size.

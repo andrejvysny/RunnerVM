@@ -14,6 +14,11 @@ extension Image {
         Hub. A tag is resolved to an immutable digest before anything is downloaded, and a digest \
         already in the store is returned without moving a byte. Concurrent pulls of the same \
         digest share one transfer. Credentials come from the daemon: see `runnerctl registry`.
+
+        The artifact format is detected from the manifest; --format pins it and refuses anything \
+        else before a byte moves. A tart image (--format tart) is imported read-only: it carries \
+        no RunnerVM guest agent, so it can be inspected and re-pushed in RunnerVM format but \
+        never run a job.
         """)
 
     @OptionGroup var options: GlobalOptions
@@ -21,13 +26,27 @@ extension Image {
     @Argument(help: "ghcr.io/acme/runners/ubuntu-24:stable or …@sha256:<hex>.")
     var reference: String
 
+    @Option(
+      name: .long,
+      help: "runnervm or tart. Default: auto-detect from the manifest.")
+    var format: String?
+
     @Flag(
       inversion: .prefixedNo,
       help: "Wait for the pull to finish. --no-wait returns the operation id immediately.")
     var wait = true
 
+    func validate() throws {
+      guard let format else { return }
+      guard Image.artifactFormats.contains(format) else {
+        throw ValidationError("--format must be one of \(Image.artifactFormats.joined(separator: ", "))")
+      }
+    }
+
     func run() async throws {
-      let response = try await options.withDaemon { try await $0.imagePull(reference: reference) }
+      let response = try await options.withDaemon {
+        try await $0.imagePull(reference: reference, format: format)
+      }
       if response.alreadyPresent || !wait || response.operationId == nil {
         try report(response)
         return

@@ -25,6 +25,10 @@ actor DaemonServiceImpl: DaemonService {
   let operations: any OperationRepository
   let imageRows: any ImageRepository
   let instanceRows: any InstanceRepository
+  /// Read directly (not through `builder`) for `status()`'s builds line: `builder` is `nil` in the
+  /// M1-M5 test harness, and a `list(states:)` query filtered at the database is cheaper than
+  /// decoding every `BuildInfoDTO` just to count two buckets.
+  let imageBuildRows: any ImageBuildRepository
   let audit: any AuditRepository
   let images: ImageManager
   let instances: InstanceManager
@@ -48,6 +52,9 @@ actor DaemonServiceImpl: DaemonService {
   let registryCredentials: RegistryCredentials
   /// `logs/events.jsonl`; `nil` when the file could not be opened.
   let eventLog: LifecycleEventLog?
+  /// `nil` until Phase 5 wires the image builder in; the five `image.build`/`build.*` methods
+  /// answer `ImageBuildError.unavailable` until then.
+  let builder: (any ImageBuildService)?
   let logger: Logger
 
   /// Set by `DaemonRuntime` once it owns both halves. `nil` means nothing can stop the process,
@@ -68,7 +75,7 @@ actor DaemonServiceImpl: DaemonService {
     runnerVersions: RunnerVersionMonitor, runners: RunnerSessionManager,
     orchestrator: Orchestrator? = nil, metrics: MetricRegistry = MetricRegistry(),
     registryCredentials: RegistryCredentials = RegistryCredentials(),
-    eventLog: LifecycleEventLog? = nil, logger: Logger
+    eventLog: LifecycleEventLog? = nil, builder: (any ImageBuildService)? = nil, logger: Logger
   ) {
     self.paths = paths
     self.hostId = hostId
@@ -78,6 +85,7 @@ actor DaemonServiceImpl: DaemonService {
     self.operations = GRDBOperationRepository(db: database)
     self.imageRows = GRDBImageRepository(db: database)
     self.instanceRows = GRDBInstanceRepository(db: database)
+    self.imageBuildRows = GRDBImageBuildRepository(db: database)
     // Every audit row is mirrored into `logs/events.jsonl` by the decorator, so the two can never
     // disagree about what an operator did.
     let auditRows = GRDBAuditRepository(db: database)
@@ -86,6 +94,7 @@ actor DaemonServiceImpl: DaemonService {
     } ?? auditRows
     self.audit = audit
     self.eventLog = eventLog
+    self.builder = builder
     self.images = images
     self.instances = instances
     self.supervisor = supervisor
@@ -106,8 +115,16 @@ actor DaemonServiceImpl: DaemonService {
     self.hostMode = HostModeControl(
       hostId: hostId, hosts: GRDBHostRepository(db: database),
       sessions: GRDBRunnerSessionRepository(db: database),
-      audit: audit, actorName: actorName, logger: logger)
+      audit: audit, actorName: actorName,
+      builds: { await DaemonServiceImpl.activeBuilds(builder) }, logger: logger)
     self.logger = logger
+  }
+
+  /// Non-terminal build rows, read through the service protocol so `HostModeControl` needs no
+  /// dependency on the builder's concrete type.
+  private static func activeBuilds(_ builder: (any ImageBuildService)?) async -> Int {
+    guard let builder, let rows = try? await builder.list() else { return 0 }
+    return rows.count { ImageBuildState(rawValue: $0.state)?.isTerminal == false }
   }
 
   func setShutdownHandler(_ handler: @escaping @Sendable (Bool) async -> Void) {
@@ -202,7 +219,8 @@ actor DaemonServiceImpl: DaemonService {
       reconciliation: Mapping.reconciliation(await reconciler.state(), now: now),
       diskPressure: DiskPressureSummary(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes,
-        state: pressure.state.rawValue))
+        state: pressure.state.rawValue),
+      builds: await buildsSummary())
   }
 
   /// Profile ids by name, for the API surfaces that take a profile name.
@@ -233,12 +251,16 @@ actor DaemonServiceImpl: DaemonService {
 
   func configValidate(_ request: ConfigValidateRequest) async throws -> ConfigValidateResponse {
     let config = try parseConfig(request.yaml)
-    return ConfigValidateResponse(issues: config.validate(host: probe.facts))
+    let imageIssues = await imageIssues(config)
+    return ConfigValidateResponse(issues: config.validate(host: probe.facts) + imageIssues)
   }
 
   func configApply(_ request: ConfigApplyRequest) async throws -> ConfigApplyResponse {
     let config = try parseConfig(request.yaml)
-    let issues = config.validate(host: probe.facts)
+    // `imageIssues` needs the local image catalogue, which `RunnerConfiguration.validate` cannot
+    // see, so the two sets are merged before the error gate rather than after it.
+    let cached = await imageIssues(config)
+    let issues = config.validate(host: probe.facts) + cached
     guard !issues.hasErrors else {
       throw ConfigurationError.validationFailed(issues: issues.errors)
     }

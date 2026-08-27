@@ -159,29 +159,62 @@ public actor GuestAgentClient {
   public func waitUntilReady(
     timeout: Duration, policy: ReadinessPolicy = ReadinessPolicy()
   ) async throws -> HelloResponse {
+    let reason = ReadinessReason()
+    return try await poll(timeout: timeout, policy: policy, reason: reason) { _ in
+      let health = try await self.health()
+      if health.isReady { return true }
+      reason.text = Self.describe(health)
+      return false
+    }
+  }
+
+  /// Like ``waitUntilReady(timeout:policy:)`` but is satisfied as soon as `agent.hello` answers,
+  /// without ever calling `agent.health`. For a caller that only needs to know a guest agent is
+  /// listening at all -- readiness itself (docker up, runner user provisioned, ...) may still be
+  /// minutes away, and reported as `degraded`/`starting` rather than an error.
+  @discardableResult
+  public func waitUntilReachable(
+    timeout: Duration, policy: ReadinessPolicy = ReadinessPolicy()
+  ) async throws -> HelloResponse {
+    try await poll(timeout: timeout, policy: policy) { _ in true }
+  }
+
+  /// The one retry loop shared by ``waitUntilReady(timeout:policy:)`` and
+  /// ``waitUntilReachable(timeout:policy:)``: dial, call `agent.hello`, ask `isSatisfied` whether
+  /// that alone is enough. `reason` is a small mutable box rather than part of `isSatisfied`'s
+  /// return type, so a caller that needs a more specific "why" (readiness does, from
+  /// `agent.health`) can update it without widening the shared closure's signature.
+  private func poll(
+    timeout: Duration, policy: ReadinessPolicy, reason: ReadinessReason = ReadinessReason(),
+    isSatisfied: (HelloResponse) async throws -> Bool
+  ) async throws -> HelloResponse {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     var backoff = policy.initialBackoff
-    var lastReason = "no answer from the agent bridge yet"
     while true {
       try Task.checkCancellation()
       do {
         let hello = try await hello()
-        let health = try await health()
-        if health.isReady { return hello }
-        lastReason = Self.describe(health)
+        if try await isSatisfied(hello) { return hello }
       } catch let error as GuestAgentError {
         guard error.retryable else { throw error }
-        lastReason = error.message
+        reason.text = error.message
         await drop()
       }
       let remaining = clock.now.duration(to: deadline)
       guard remaining > .zero else {
-        throw GuestAgentError.readinessTimeout(seconds: timeout.seconds, lastReason: lastReason)
+        throw GuestAgentError.readinessTimeout(seconds: timeout.seconds, lastReason: reason.text)
       }
       try await Task.sleep(for: min(backoff, remaining), clock: clock)
       backoff = min(backoff * policy.multiplier, policy.maxBackoff)
     }
+  }
+
+  /// Mutable "why is it not there yet" message for ``poll(timeout:policy:reason:isSatisfied:)``.
+  /// `@unchecked Sendable`: never touched off the actor that owns the `poll` call using it, but the
+  /// compiler cannot see that through a plain closure capture plus a same-call argument.
+  private final class ReadinessReason: @unchecked Sendable {
+    var text = "no answer from the agent bridge yet"
   }
 
   private static func describe(_ health: HealthResponse) -> String {

@@ -24,9 +24,23 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
   public struct Capabilities: Codable, Sendable, Equatable {
     public var docker: Bool
     public var ssh: Bool
-    public init(docker: Bool = false, ssh: Bool = false) {
+    /// Explicit record of whether this image carries the RunnerVM guest agent. `nil` on metadata
+    /// sealed before this field existed; `ImageMetadata.hasGuestAgent` falls back to
+    /// `guestAgentVersion` for those. Always explicit on anything imported after T7 (spec `image
+    /// import --no-guest-agent`).
+    public var guestAgent: Bool?
+    /// Free-form labels a build or import attached to the image; RunnerVM itself does not
+    /// interpret these.
+    public var labels: [String: String]?
+
+    public init(
+      docker: Bool = false, ssh: Bool = false, guestAgent: Bool? = nil,
+      labels: [String: String]? = nil
+    ) {
       self.docker = docker
       self.ssh = ssh
+      self.guestAgent = guestAgent
+      self.labels = labels
     }
   }
 
@@ -68,5 +82,14 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
     self.macos = macos
     self.capabilities = capabilities
     self.provenance = provenance
+  }
+
+  /// Whether this image carries a RunnerVM guest agent and can therefore run jobs.
+  ///
+  /// The explicit field wins when present. Legacy metadata with no `capabilities.guestAgent`
+  /// (sealed before that field existed) is trusted only when it also recorded a guest agent
+  /// version -- no build without an agent would ever have set that.
+  public var hasGuestAgent: Bool {
+    capabilities.guestAgent ?? (guestAgentVersion != nil)
   }
 }

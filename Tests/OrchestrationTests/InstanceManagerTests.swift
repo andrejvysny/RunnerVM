@@ -189,6 +189,36 @@ import WorkerProtocol
     }
   }
 
+  /// The `maxInstances` check and the row that satisfies it are one atomic step: four creates
+  /// racing for the last slot must still leave one instance behind (spec §121).
+  @Test func concurrentCreatesCannotExceedProfileMaxInstances() async throws {
+    try await withHarness(configuration: M2Harness.configuration(maxInstances: 1)) { harness in
+      try await harness.importLinuxImage()
+      let manager = harness.instances
+
+      let codes = await withTaskGroup(of: String?.self) { group -> [String?] in
+        for _ in 0..<4 {
+          group.addTask {
+            do {
+              _ = try await manager.create(profileName: "linux")
+              return nil
+            } catch {
+              return (error as? any RunnerError)?.code ?? "UNKNOWN"
+            }
+          }
+        }
+        var results: [String?] = []
+        for await code in group { results.append(code) }
+        return results
+      }
+
+      #expect(codes.count(where: { $0 == nil }) == 1)
+      #expect(codes.compactMap { $0 }
+        .allSatisfy { $0 == "SCHEDULER_PROFILE_AT_MAX_INSTANCES" })
+      #expect(try await harness.instances.list().count == 1)
+    }
+  }
+
   @Test func profileMaxInstancesIsHonoured() async throws {
     try await withHarness(configuration: M2Harness.configuration(maxInstances: 1)) { harness in
       let linux = try await harness.importLinuxImage()

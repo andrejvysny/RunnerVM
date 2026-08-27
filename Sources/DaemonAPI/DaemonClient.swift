@@ -90,8 +90,8 @@ public actor DaemonClient {
     try await call(.imageImport, request)
   }
 
-  public func imagePull(reference: String) async throws -> ImagePullResponse {
-    try await call(.imagePull, ImagePullRequest(reference: reference))
+  public func imagePull(reference: String, format: String? = nil) async throws -> ImagePullResponse {
+    try await call(.imagePull, ImagePullRequest(reference: reference, format: format))
   }
 
   public func imagePush(image: String, reference: String) async throws -> ImagePushResponse {
@@ -120,6 +120,26 @@ public actor DaemonClient {
 
   public func imagePrune(dryRun: Bool = false) async throws -> ImagePruneResponse {
     try await call(.imagePrune, ImagePruneRequest(dryRun: dryRun))
+  }
+
+  public func imageBuild(_ request: ImageBuildRequest) async throws -> ImageBuildResponse {
+    try await call(.imageBuild, request)
+  }
+
+  public func buildList() async throws -> BuildListResponse { try await call(.buildList) }
+
+  public func buildGet(buildId: String) async throws -> BuildInfoDTO {
+    try await call(.buildGet, BuildGetRequest(buildId: buildId))
+  }
+
+  public func buildLog(
+    buildId: String, offset: Int64 = 0, maxBytes: Int64? = nil
+  ) async throws -> BuildLogResponse {
+    try await call(.buildLog, BuildLogRequest(buildId: buildId, offset: offset, maxBytes: maxBytes))
+  }
+
+  public func buildCancel(buildId: String) async throws -> BuildCancelResponse {
+    try await call(.buildCancel, BuildCancelRequest(buildId: buildId))
   }
 
   public func instanceList() async throws -> InstanceListResponse { try await call(.instanceList) }

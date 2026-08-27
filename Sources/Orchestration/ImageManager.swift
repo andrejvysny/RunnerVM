@@ -117,18 +117,29 @@ public actor ImageManager {
   /// A `metadata.json` sealed next to the disk -- or named explicitly with `metadataPath` -- is
   /// adopted whole, so `runnerVersion`, `guestAgentVersion`, `capabilities` and `provenance`
   /// survive the import instead of being re-synthesised (see `SealedImageMetadata.swift`).
+  ///
+  /// `guestAgent` records whether this disk carries a RunnerVM guest agent (`runnerctl image
+  /// import --no-guest-agent` for one that does not, e.g. a build/inspection-only artifact).
   public func importLocal(
     disk: URL, nvram: URL?, os: GuestOS, name: String?, hardwareModel: String? = nil,
-    metadataPath: URL? = nil
+    metadataPath: URL? = nil, guestAgent: Bool = true
   ) async throws -> ManagedImage {
     let size = try Self.fileSize(at: disk)
-    let metadata = try resolveImportMetadata(
+    var metadata = try resolveImportMetadata(
       disk: disk, size: size, os: os, hardwareModel: hardwareModel, metadataPath: metadataPath)
+    metadata.capabilities.guestAgent = Self.resolvedGuestAgent(
+      requested: guestAgent, existing: metadata.capabilities.guestAgent)
     let imported = try await store.importLocal(
       disk: disk, nvram: nvram, metadata: metadata, name: name)
     let info = try await store.inspect(digest: imported.digest)
     let record = try makeRecord(info: info, directory: imported.manifestDirectory, name: name)
     try await images.upsert(record)
+    // Last successful registration under a name wins: a rebuild-style re-import of the same local
+    // name repoints the alias at the new digest instead of leaving `record(for:)` to guess between
+    // two manifests that both happen to carry that name.
+    if let name {
+      try await images.setAlias(name: name, digest: record.digest)
+    }
     logger.info(
       "image registered",
       metadata: .context(imageDigest: record.digest)
@@ -136,6 +147,16 @@ public actor ImageManager {
     return ManagedImage(
       record: record, allocatedBytes: info.allocatedBytes, pinCount: 0,
       name: info.manifest.name ?? name, metadata: info.metadata)
+  }
+
+  /// `--no-guest-agent` (`requested == false`) always wins. Otherwise (the default `true`), an
+  /// adopted sealed `metadata.json` that already recorded an explicit value keeps it -- an image
+  /// deliberately sealed without an agent must not silently gain one just because the caller did
+  /// not pass the flag -- and only a metadata with nothing recorded (synthesised, or a sealed file
+  /// from before this field existed) is stamped `true`.
+  private static func resolvedGuestAgent(requested: Bool, existing: Bool?) -> Bool {
+    guard requested else { return false }
+    return existing ?? true
   }
 
   func makeRecord(
@@ -160,28 +181,6 @@ public actor ImageManager {
       pulledAt: .now)
   }
 
-  // MARK: - Read
-
-  public func list() async throws -> [ManagedImage] {
-    var result: [ManagedImage] = []
-    for record in try await images.list(state: nil).sorted(by: { $0.digest.rawValue < $1.digest.rawValue }) {
-      result.append(try await decorate(record))
-    }
-    return result
-  }
-
-  /// `ref` is a `sha256:` digest or a local name (the label the image was imported under).
-  public func get(reference: String) async throws -> ManagedImage {
-    try await decorate(try await record(for: reference))
-  }
-
-  /// Profile `image:` values: a local name or digest resolves from the catalogue, a
-  /// registry-qualified reference is resolved against the registry and pulled if missing
-  /// (spec §21, §137). A tag is re-resolved at most once every `tagResolutionTTL`.
-  public func resolve(reference: String) async throws -> ImageDigest {
-    try await resolveRecord(reference: reference, profile: nil).digest
-  }
-
   // MARK: - Reservations
 
   /// Resolves `reference`, inspects the blobs and pins the digest to `instanceId` under the
@@ -197,8 +196,15 @@ public actor ImageManager {
   public func reserve(
     reference: String, for instanceId: InstanceID, profile: String? = nil
   ) async throws -> (ImageDigest, ImageInfo) {
-    let digest = try await resolveRecord(reference: reference, profile: profile).digest
+    let digest = try await resolveRecord(
+      reference: reference, profile: profile, purpose: .instance).digest
     let info = try await store.inspect(digest: digest)
+    // Before the pin, not after: an image that can never run a job must not leave a `planning`
+    // pin behind for the caller to clean up, and a locally cached agentless image (spec §58)
+    // never went through the remote refusal in `resolveRecord`.
+    guard info.metadata.hasGuestAgent else {
+      throw ImageError.noGuestAgent(digest: digest, reference: reference)
+    }
     try await images.pin(ownerType: .planning, ownerId: instanceId.rawValue, digest: digest)
     return (digest, info)
   }
@@ -223,29 +229,8 @@ public actor ImageManager {
     return orphaned.count
   }
 
-  func record(for reference: String) async throws -> ImageRecord {
-    if reference.hasPrefix("sha256:"),
-       let found = try await images.get(digest: ImageDigest(rawValue: reference)) {
-      return found
-    }
-    let all = try await images.list(state: nil)
-    if let named = all.first(where: { $0.canonicalReference == reference }) {
-      return named
-    }
-    // Pulling content this host had already imported overwrites `canonical_reference` with the
-    // registry reference (spec §21); the label it was imported under survives in the immutable
-    // local manifest, and must keep resolving.
-    for row in all {
-      if let info = try? await store.inspect(digest: row.digest), info.manifest.name == reference {
-        return row
-      }
-    }
-    throw ImageError.notFound(
-      reference: "\(reference) (no local image with that name or digest; import one with "
-        + "`runnerctl image import <disk> --name \(reference)`, or name a registry reference)")
-  }
 
-  private func decorate(_ record: ImageRecord) async throws -> ManagedImage {
+  func decorate(_ record: ImageRecord) async throws -> ManagedImage {
     // `name` is the local label from the immutable manifest, which a later registry pull cannot
     // move; `canonicalReference` is the provenance, which it can.
     let info = try? await store.inspect(digest: record.digest)
@@ -279,6 +264,7 @@ public actor ImageManager {
       try await images.setState(digest: digest, from: record.state, to: .deleting)
     }
     let purged = try await instances.purgeDeleted(imageDigest: digest)
+    try await images.removeAliases(digest: digest)
     try await images.delete(digest: digest)
     try await store.delete(digest: digest)
     logger.info(

@@ -15,6 +15,7 @@ extension GitHubScopeID: DatabaseValueConvertible {}
 extension OperationID: DatabaseValueConvertible {}
 extension HostID: DatabaseValueConvertible {}
 extension ImageDigest: DatabaseValueConvertible {}
+extension ImageBuildID: DatabaseValueConvertible {}
 
 extension GuestOS: DatabaseValueConvertible {}
 extension InstanceLifecycle: DatabaseValueConvertible {}
@@ -23,3 +24,4 @@ extension GitHubScopeKind: DatabaseValueConvertible {}
 extension InstanceState: DatabaseValueConvertible {}
 extension RunnerSessionState: DatabaseValueConvertible {}
 extension HostMode: DatabaseValueConvertible {}
+extension ImageBuildState: DatabaseValueConvertible {}

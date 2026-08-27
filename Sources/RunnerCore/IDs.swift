@@ -34,6 +34,10 @@ public struct HostID: TypedID { public let rawValue: String; public init(rawValu
 /// sha256:<hex> content digest of an image manifest.
 public struct ImageDigest: TypedID { public let rawValue: String; public init(rawValue: String) { self.rawValue = rawValue } }
 
+/// One in-daemon image build (Phase 4/5 image builder). Distinct from `ImageDigest`: a build is the
+/// process, not its output -- a successful build eventually produces one.
+public struct ImageBuildID: TypedID { public let rawValue: String; public init(rawValue: String) { self.rawValue = rawValue } }
+
 public enum GuestOS: String, Codable, Sendable {
   case linux
   case macos

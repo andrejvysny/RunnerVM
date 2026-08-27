@@ -236,6 +236,37 @@ actor FakeDaemonService: DaemonService {
       keptPinned: [], reclaimedBytes: request.dryRun ? 0 : 2_000_000_000, staleStagingRemoved: 1)
   }
 
+  // MARK: - image.build / build.*
+
+  var builds: [BuildInfoDTO] = []
+  var lastBuildRequest: ImageBuildRequest?
+  var lastCancelledBuildId: String?
+
+  func imageBuild(_ request: ImageBuildRequest) async throws -> ImageBuildResponse {
+    lastBuildRequest = request
+    return ImageBuildResponse(
+      buildId: "build-1", operationId: "op-build-1", name: request.name,
+      from: "ghcr.io/acme/ubuntu-24:stable", totalSteps: 3)
+  }
+
+  func buildList() async throws -> BuildListResponse { BuildListResponse(builds: builds) }
+
+  func buildGet(_ request: BuildGetRequest) async throws -> BuildInfoDTO {
+    guard let match = builds.first(where: { $0.buildId == request.buildId }) else {
+      throw DaemonServiceError.notFound(entity: "build", name: request.buildId)
+    }
+    return match
+  }
+
+  func buildLog(_ request: BuildLogRequest) async throws -> BuildLogResponse {
+    BuildLogResponse(data: "", nextOffset: request.offset, done: true)
+  }
+
+  func buildCancel(_ request: BuildCancelRequest) async throws -> BuildCancelResponse {
+    lastCancelledBuildId = request.buildId
+    return BuildCancelResponse(buildId: request.buildId, state: "cancelled")
+  }
+
   var scaleSets: [ScaleSetSummary] = []
   var lastDemand: DebugDemandSetRequest?
 

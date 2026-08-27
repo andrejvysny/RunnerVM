@@ -87,6 +87,7 @@ extension RunnerConfiguration {
     issues += diagnostics.validate()
     issues += images.validate()
     issues += logging.validate()
+    issues += build.validate(facts: facts)
     return issues
   }
 

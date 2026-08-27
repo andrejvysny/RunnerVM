@@ -25,6 +25,7 @@ LOG_LEVEL="info"
 DRY_RUN=0
 UNINSTALL=0
 ALLOW_STAFF_GROUP=0
+SKIP_GUEST_AGENT=0
 : "${CODESIGN_IDENTITY:=-}"
 
 usage() {
@@ -43,6 +44,9 @@ usage: install.sh [options]
   --allow-staff-group   Permit --group staff (or a default left unchanged from an older install).
                          Refused otherwise: every local macOS user is in "staff", so state/log/
                          config modes end up readable by every account on the Mac.
+  --skip-guest-agent    Skip building/installing the Linux guest-agent binary the image builder's
+                         boot seed installs. Only useful when Go is unavailable and a build isn't
+                         needed on this host; `runnerctl image build` will fail without it.
   --dry-run             Print every action instead of performing it; no filesystem writes.
   --uninstall           Remove installed binaries and the launchd job; state is left in place.
   -h, --help             Show this help.
@@ -66,6 +70,7 @@ while [ $# -gt 0 ]; do
     --config) CONFIG_SRC="$2"; shift 2 ;;
     --log-level) LOG_LEVEL="$2"; shift 2 ;;
     --allow-staff-group) ALLOW_STAFF_GROUP=1; shift ;;
+    --skip-guest-agent) SKIP_GUEST_AGENT=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -124,6 +129,16 @@ VMWORKER_DEST="$LIBEXEC_DIR/vmworker"
 RUNNERCTL_DEST="$BIN_DIR/runnerctl"
 AGENT_PLIST_DEST="/Library/LaunchAgents/com.runnervm.runnerd.agent.plist"
 DAEMON_PLIST_DEST="/Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist"
+# Image builder assets (spec P6): the Linux guest agent the boot seed installs, the shipped
+# Runnerfile recipes, and the directories the builder itself expects under STATE_DIR
+# (RunnerPaths.buildsDir/baseImageCacheDir/buildLogsDir -- see Sources/RunnerCore/Configuration/Paths.swift).
+GUEST_AGENT_BUILT="$REPO_ROOT/GuestAgent/bin/linux-arm64/runnervm-guest-agent"
+GUEST_AGENT_DIR="$STATE_DIR/guest-agent/linux-arm64"
+GUEST_AGENT_DEST="$GUEST_AGENT_DIR/runnervm-guest-agent"
+GUEST_AGENT_UNIT_SRC="$REPO_ROOT/GuestAgent/packaging/systemd/runnervm-guest-agent.service"
+GUEST_AGENT_UNIT_DEST="$GUEST_AGENT_DIR/runnervm-guest-agent.service"
+RECIPES_SRC="$REPO_ROOT/images/recipes"
+RECIPES_DEST="$STATE_DIR/share/recipes"
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] warning: %s\n' "$*" >&2; }
@@ -389,7 +404,7 @@ privileged "create $STATE_DIR (0750, $SERVICE_USER:$SERVICE_GROUP)" \
     mkdir -p -m 0750 "$STATE_DIR"
 privileged "chown $STATE_DIR to $SERVICE_USER:$SERVICE_GROUP" \
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR"
-for sub in images instances logs; do
+for sub in images instances logs state cache; do
     privileged "create $STATE_DIR/$sub" mkdir -p "$STATE_DIR/$sub"
     privileged "chown $STATE_DIR/$sub to $SERVICE_USER:$SERVICE_GROUP" \
         chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/$sub"
@@ -401,6 +416,19 @@ privileged "create $STATE_DIR/logs/instances (0750, $SERVICE_USER:$SERVICE_GROUP
     mkdir -p -m 0750 "$STATE_DIR/logs/instances"
 privileged "chown $STATE_DIR/logs/instances to $SERVICE_USER:$SERVICE_GROUP" \
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/logs/instances"
+# Image builder directories (spec P6): RunnerPaths.buildsDir / .baseImageCacheDir / .buildLogsDir
+# (Sources/RunnerCore/Configuration/Paths.swift) -- runnerd creates these lazily too, but a fresh
+# install lays them out up front with the same ownership as everything else under $STATE_DIR.
+privileged "create $STATE_DIR/state/builds" mkdir -p "$STATE_DIR/state/builds"
+privileged "chown $STATE_DIR/state/builds to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/state/builds"
+privileged "create $STATE_DIR/cache/base-images" mkdir -p "$STATE_DIR/cache/base-images"
+privileged "chown $STATE_DIR/cache/base-images to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/cache/base-images"
+privileged "create $LOG_DIR/builds (0750, $SERVICE_USER:$SERVICE_GROUP)" \
+    mkdir -p -m 0750 "$LOG_DIR/builds"
+privileged "chown $LOG_DIR/builds to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_DIR/builds"
 privileged "create $RUNTIME_DIR (0700, $SERVICE_USER:$SERVICE_GROUP)" \
     mkdir -p -m 0700 "$RUNTIME_DIR"
 privileged "chown $RUNTIME_DIR to $SERVICE_USER:$SERVICE_GROUP" \
@@ -415,6 +443,66 @@ if [ -n "$CONFIG_SRC" ]; then
 else
     log "no --config given; place one at $CONFIG_DEST before starting runnerd"
 fi
+
+# --------------------------------------------------------------------------
+# 6b. Image builder assets (spec P6): the Linux guest agent the boot seed installs, and the
+#     shipped Runnerfile recipes. Both are optional-ish (guest agent build can be skipped; a
+#     recipe root can always be pointed at directly), but `runnerctl image build` needs at least
+#     one of them to be useful out of the box.
+# --------------------------------------------------------------------------
+if [ "$SKIP_GUEST_AGENT" -eq 1 ]; then
+    warn "--skip-guest-agent: not installing a guest agent; \`runnerctl image build\` will fail until one is placed at $GUEST_AGENT_DEST"
+elif [ -f "$GUEST_AGENT_BUILT" ]; then
+    log "found prebuilt guest agent: $GUEST_AGENT_BUILT"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    # Never actually build in a dry run: whether Go happens to be installed on the machine
+    # running --dry-run has nothing to do with what a real install would do.
+    printf '+ make -C GuestAgent build-linux\n'
+elif command -v go >/dev/null 2>&1; then
+    step "make -C GuestAgent build-linux" make -C "$REPO_ROOT/GuestAgent" build-linux
+else
+    echo "error: $GUEST_AGENT_BUILT not found and Go is not installed to build it." >&2
+    echo "install Go, or pass --skip-guest-agent to install without it (image builds will fail" >&2
+    echo "until a guest agent is placed at $GUEST_AGENT_DEST)." >&2
+    exit 1
+fi
+
+if [ "$SKIP_GUEST_AGENT" -ne 1 ]; then
+    privileged "create $GUEST_AGENT_DIR" mkdir -p "$GUEST_AGENT_DIR"
+    privileged "install guest agent -> $GUEST_AGENT_DEST" \
+        install -m 0755 "$GUEST_AGENT_BUILT" "$GUEST_AGENT_DEST"
+    privileged "chown $GUEST_AGENT_DEST to $SERVICE_USER:$SERVICE_GROUP" \
+        chown "$SERVICE_USER:$SERVICE_GROUP" "$GUEST_AGENT_DEST"
+    # The unit is never read by the builder (BuildSeed.guestAgentUnit ships it inline, kept
+    # byte-identical to this file) -- installed alongside the binary purely for operator reference.
+    privileged "install guest agent systemd unit -> $GUEST_AGENT_UNIT_DEST" \
+        install -m 0644 "$GUEST_AGENT_UNIT_SRC" "$GUEST_AGENT_UNIT_DEST"
+    privileged "chown $GUEST_AGENT_UNIT_DEST to $SERVICE_USER:$SERVICE_GROUP" \
+        chown "$SERVICE_USER:$SERVICE_GROUP" "$GUEST_AGENT_UNIT_DEST"
+fi
+
+# root:$SERVICE_GROUP (not $SERVICE_USER) on purpose: the daemon reads these but must not be able
+# to rewrite the shipped recipes it builds from.
+install_recipes() {
+    privileged "create $RECIPES_DEST" mkdir -p "$RECIPES_DEST"
+    privileged "chown $RECIPES_DEST to root:$SERVICE_GROUP" chown "root:$SERVICE_GROUP" "$RECIPES_DEST"
+    privileged "chmod 0755 $RECIPES_DEST" chmod 0755 "$RECIPES_DEST"
+
+    local src rel dest
+    while IFS= read -r -d '' src; do
+        rel="${src#"$RECIPES_SRC"/}"
+        dest="$RECIPES_DEST/$rel"
+        if [ -d "$src" ]; then
+            privileged "create $dest" mkdir -p "$dest"
+            privileged "chown $dest to root:$SERVICE_GROUP" chown "root:$SERVICE_GROUP" "$dest"
+            privileged "chmod 0755 $dest" chmod 0755 "$dest"
+        else
+            privileged "install $rel -> $dest" install -m 0644 "$src" "$dest"
+            privileged "chown $dest to root:$SERVICE_GROUP" chown "root:$SERVICE_GROUP" "$dest"
+        fi
+    done < <(find "$RECIPES_SRC" -mindepth 1 \( -type d -o -type f \) -print0 | sort -z)
+}
+install_recipes
 
 # --------------------------------------------------------------------------
 # 7. launchd job (spec §7.2; plan C3 S3 — see packaging/launchd/README.md)

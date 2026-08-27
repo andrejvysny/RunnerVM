@@ -54,15 +54,10 @@ extension InstanceManager {
     try await enforceRunnerVersion(digest: digest, image: image)
     let reservation = DiskAccounting.estimatedAdditionalAllocation(
       for: profile.resources.diskBytes, image: image)
-    try await InstanceAdmission(
-      paths: paths, instances: instances, profiles: profiles, probe: probe,
-      configuration: configuration
-    ).admit(profile: profile, profileId: profileRow.id, reservationBytes: reservation)
-
     let record = makeRecord(
       id: instanceId, profile: profile, profileId: profileRow.id, digest: digest,
       reservation: reservation)
-    try await instances.insert(record)
+    try await admit(record, profile: profile, profileId: profileRow.id, reservation: reservation)
     // Convert: add the permanent pin before dropping the temporary one, so the digest is never
     // observably unpinned.
     try await imageRows.pin(ownerType: .instance, ownerId: record.id.rawValue, digest: digest)
@@ -71,6 +66,32 @@ extension InstanceManager {
       "instance planned",
       metadata: .context(profile: profileRow.id, instance: record.id, imageDigest: digest))
     return record
+  }
+
+  /// The capacity critical section: reading the reservations, deciding they leave room and
+  /// inserting the row that *is* the new reservation happen with nothing else admitted in between.
+  /// Two concurrent creates would otherwise both measure the host before either had written its
+  /// row and both proceed (spec §121).
+  ///
+  /// The body captures repositories and value types rather than `self`, so it stays `@Sendable`
+  /// and the actor is free while the queue is contended.
+  private func admit(
+    _ record: InstanceRecord, profile: RunnerProfileConfig, profileId: RunnerProfileID,
+    reservation: UInt64
+  ) async throws {
+    let paths = paths
+    let instances = instances
+    let profiles = profiles
+    let probe = probe
+    let configuration = configuration
+    let builds = imageBuilds
+    try await admissionQueue.admit {
+      try await InstanceAdmission(
+        paths: paths, instances: instances, profiles: profiles, probe: probe,
+        configuration: configuration, builds: builds
+      ).admit(profile: profile, profileId: profileId, reservationBytes: reservation)
+      try await instances.insert(record)
+    }
   }
 
   /// Spec §53. An image whose baked-in runner is past GitHub's 30-day update window would be

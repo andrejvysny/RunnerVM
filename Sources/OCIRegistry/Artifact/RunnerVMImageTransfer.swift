@@ -1,6 +1,76 @@
 import Foundation
 import RunnerCore
 
+/// Which producer's artifact schema a manifest speaks. RunnerVM only ever *publishes*
+/// `runnervm`; `tart` is a read-only import path (spec §58).
+public enum ImageArtifactFormat: String, Sendable, Codable, CaseIterable {
+  case runnervm
+  case tart
+}
+
+/// Why an image is being inspected. A pull into the local store is allowed to fetch anything
+/// RunnerVM can read; a pull that exists to boot a VM (or to seed an image build) is not, because
+/// an image with no guest agent could never take a job and refusing it early is the difference
+/// between a fast error and a multi-gigabyte download followed by one.
+public enum ImagePullPurpose: Sendable {
+  case storage
+  case instance
+  case buildBase
+}
+
+/// A parsed remote artifact in whichever schema it turned out to be.
+///
+/// Everything below the transfer layer works off this rather than off a concrete artifact type, so
+/// the reassembly path is shared byte for byte between the two formats.
+public enum RemoteArtifact: Sendable, Equatable {
+  case runnervm(RunnerVMArtifact)
+  case tart(TartArtifact)
+
+  public var format: ImageArtifactFormat {
+    switch self {
+    case .runnervm: .runnervm
+    case .tart: .tart
+    }
+  }
+
+  public var metadata: ImageMetadata {
+    switch self {
+    case let .runnervm(artifact): artifact.metadata
+    case let .tart(artifact): artifact.metadata
+    }
+  }
+
+  public var diskChunks: [PlacedChunk] {
+    switch self {
+    case let .runnervm(artifact): artifact.diskChunks
+    case let .tart(artifact): artifact.diskChunks
+    }
+  }
+
+  public var diskVirtualSize: UInt64 {
+    switch self {
+    case let .runnervm(artifact): artifact.diskVirtualSize
+    case let .tart(artifact): artifact.diskVirtualSize
+    }
+  }
+
+  /// sha256 of the whole reassembled disk. `nil` for tart: a flat tart manifest carries no
+  /// whole-file digest, so per-chunk digests are the only end-to-end check available.
+  public var diskContentDigest: String? {
+    switch self {
+    case let .runnervm(artifact): artifact.diskContentDigest
+    case .tart: nil
+    }
+  }
+
+  public var nvram: OCIDescriptor? {
+    switch self {
+    case let .runnervm(artifact): artifact.nvram
+    case let .tart(artifact): artifact.nvram
+    }
+  }
+}
+
 /// Whole-image push and pull. This is the surface `ImageManager` calls; everything below it is
 /// transport detail.
 ///
@@ -20,19 +90,26 @@ public enum RunnerVMImageTransfer {
 
   public struct RemoteImage: Sendable, Equatable {
     public let resolved: ResolvedManifest
-    public let artifact: RunnerVMArtifact
+    public let artifact: RemoteArtifact
 
     public var digest: ImageDigest {
       resolved.digest
+    }
+
+    public var format: ImageArtifactFormat {
+      artifact.format
     }
 
     public var metadata: ImageMetadata {
       artifact.metadata
     }
 
-    /// Compressed bytes a pull will move; use it to size progress and disk reservations.
+    /// Compressed bytes a pull will move; use it to size progress and disk reservations. Checked
+    /// arithmetic: chunk sizes come off a registry-supplied manifest.
     public var transferBytes: UInt64 {
-      UInt64(artifact.diskChunks.reduce(0) { $0 + $1.size } + (artifact.nvram?.size ?? 0))
+      let chunkSizes = artifact.diskChunks.map { UInt64(clamping: $0.descriptor.size) }
+      let nvramSize = UInt64(clamping: artifact.nvram?.size ?? 0)
+      return checkedSum(chunkSizes + [nvramSize])
     }
   }
 
@@ -93,23 +170,55 @@ public enum RunnerVMImageTransfer {
   ///
   /// Split out so the daemon can deduplicate concurrent pulls on the resolved digest before any
   /// download starts (spec §137).
+  ///
+  /// - Parameter require: refuse anything that is not this format. Also steers index selection, so
+  ///   a mirror that fronts both a RunnerVM and a tart manifest behind one tag can be asked for
+  ///   either. `nil` auto-detects.
+  /// - Parameter purpose: `.instance` / `.buildBase` additionally refuse an image with no guest
+  ///   agent — after the config blobs, still before any disk chunk.
   public static func inspect(
     _ reference: OCIReference,
-    registry: RegistryClient
+    registry: RegistryClient,
+    require: ImageArtifactFormat? = nil,
+    purpose: ImagePullPurpose = .storage,
+    limits: ArtifactLimits = .default
   ) async throws -> RemoteImage {
-    let resolved = try await registry.resolve(reference)
-    let configBlob = try await registry.blob(
-      resolved.manifest.config.digest, repository: reference.repositoryPath
+    let resolved = try await registry.resolve(reference, preferring: require)
+    let detected = try detectFormat(resolved.manifest)
+    if let require, require != detected {
+      throw RegistryError.unsupportedManifest(
+        reason: "manifest is \(detected.rawValue), not \(require.rawValue)"
+      )
+    }
+    let image = RemoteImage(
+      resolved: resolved,
+      artifact: try await parse(
+        detected, resolved: resolved, reference: reference, registry: registry, limits: limits
+      )
     )
-    let artifact = try RunnerVMArtifact.parse(manifest: resolved.manifest, configBlob: configBlob)
-    return RemoteImage(resolved: resolved, artifact: artifact)
+    try requireRunnable(image, purpose: purpose)
+    return image
+  }
+
+  /// Which schema a manifest speaks. RunnerVM's own `artifactType` is decisive; otherwise the only
+  /// remaining candidate is tart's layer shape, and anything else is refused by name so the
+  /// operator can see what the registry actually served.
+  public static func detectFormat(_ manifest: OCIManifest) throws -> ImageArtifactFormat {
+    if manifest.artifactType == RunnerVMMediaType.artifact { return .runnervm }
+    if TartArtifact.looksLikeTart(manifest) { return .tart }
+    throw RegistryError.unsupportedManifest(
+      reason: "manifest is neither \(RunnerVMMediaType.artifact) nor \(TartMediaType.config)"
+    )
   }
 
   public static func pull(
     _ reference: OCIReference, registry: RegistryClient, into staging: URL,
+    require: ImageArtifactFormat? = nil, purpose: ImagePullPurpose = .storage,
     concurrency: Int = DiskLayerizer.defaultConcurrency, progress: TransferProgress? = nil
   ) async throws -> PulledImage {
-    let remote = try await inspect(reference, registry: registry)
+    let remote = try await inspect(
+      reference, registry: registry, require: require, purpose: purpose
+    )
     return try await pull(
       remote, registry: registry, into: staging, concurrency: concurrency, progress: progress
     )
@@ -125,7 +234,7 @@ public enum RunnerVMImageTransfer {
     let repository = remote.resolved.reference.repositoryPath
     let diskURL = staging.appending(path: diskFileName)
     try await DiskLayerizer.pull(
-      chunks: remote.artifact.diskChunks, to: diskURL, virtualSize: remote.artifact.diskVirtualSize,
+      placed: remote.artifact.diskChunks, to: diskURL, virtualSize: remote.artifact.diskVirtualSize,
       contentDigest: remote.artifact.diskContentDigest, repository: repository, registry: registry,
       concurrency: concurrency, progress: progress
     )
@@ -144,5 +253,45 @@ public enum RunnerVMImageTransfer {
       reference: remote.resolved.reference, manifestDigest: remote.digest,
       metadata: remote.artifact.metadata, diskURL: diskURL, nvramURL: nvramURL
     )
+  }
+
+  // MARK: - Helpers
+
+  private static func parse(
+    _ format: ImageArtifactFormat, resolved: ResolvedManifest, reference: OCIReference,
+    registry: RegistryClient, limits: ArtifactLimits
+  ) async throws -> RemoteArtifact {
+    switch format {
+    case .runnervm:
+      let configBlob = try await registry.blob(
+        resolved.manifest.config.digest, repository: reference.repositoryPath
+      )
+      return .runnervm(
+        try RunnerVMArtifact.parse(
+          manifest: resolved.manifest, configBlob: configBlob, limits: limits
+        )
+      )
+    case .tart:
+      return .tart(
+        try await TartArtifact.fetch(
+          resolved: resolved, reference: reference, registry: registry, limits: limits
+        )
+      )
+    }
+  }
+
+  /// Spec §58: an agentless image is importable but never bootable. Refusing here — with the
+  /// config blobs read and not one disk chunk fetched — is what keeps a `vm create` against a
+  /// tart image cheap.
+  private static func requireRunnable(_ image: RemoteImage, purpose: ImagePullPurpose) throws {
+    switch purpose {
+    case .storage:
+      return
+    case .instance, .buildBase:
+      guard !image.metadata.hasGuestAgent else { return }
+      throw ImageError.noGuestAgent(
+        digest: image.digest, reference: image.resolved.reference.description
+      )
+    }
   }
 }

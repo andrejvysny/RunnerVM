@@ -1,4 +1,12 @@
-# Building the Ubuntu 24.04 arm64 runner image
+# Building the Ubuntu 24.04 arm64 runner image (legacy host script)
+
+**Superseded by the in-daemon image builder.** New images should use
+`runnerctl image build` against a `Runnerfile`-style recipe — see
+[docs/image-build.md](image-build.md) for the instruction set, the shipped
+`images/recipes/` family, and the build lifecycle. Everything below documents
+`scripts/build-ubuntu-image.sh`, the original host-side script the builder
+replaces; it still works and this page is kept accurate, but it is no longer
+the recommended path for a new image and receives no new features.
 
 `scripts/build-ubuntu-image.sh` turns a stock Ubuntu 24.04 arm64 cloud disk into
 a RunnerVM base image: `disk.img` + `nvram.bin` + `metadata.json`, ready for
@@ -455,6 +463,75 @@ incident stays reproducible after `:stable` moves. Consequences worth knowing:
 `images.canonical_reference` holds the immutable reference the image was
 resolved from; `image list`'s `NAME` column keeps showing the local label from
 the image manifest, which a later pull cannot move.
+
+## Importing tart images (spec §58)
+
+RunnerVM can read a [tart](https://github.com/cirruslabs/tart) OCI VM image and
+import it as a native RunnerVM image. The pipeline is **one-way**: what lands in
+the store is a RunnerVM image whose disk happens to have come from tart, and
+pushing it back out publishes a RunnerVM artifact. There is no way to write
+tart's format, and once imported the tart compatibility ends.
+
+```bash
+runnerctl image pull ghcr.io/cirruslabs/ubuntu:latest
+runnerctl image pull ghcr.io/cirruslabs/ubuntu:latest --format tart   # refuse anything else
+runnerctl image inspect <digest>      # source: tart (imported), guest agent: absent
+```
+
+The artifact format is detected from the manifest — RunnerVM's own `artifactType`
+first, then tart's `config + disk.v2 + nvram` layer shape. `--format` pins it and
+refuses anything else *before a byte moves*; it also decides which entry is taken
+when a tag fronts an index carrying both schemas.
+
+**An imported tart image can never run a job.** It carries no RunnerVM guest
+agent, so its metadata records `capabilities.guestAgent: false` and every path
+that would boot it refuses:
+
+* `runnerctl vm create` (and any profile-driven create) fails with
+  `IMAGE_NO_GUEST_AGENT` — for a remote image after the two small config blobs
+  and before any disk transfer, operation row, staging directory or image pin
+  exists; for a cached one before the `planning` pin is taken.
+* `runnerctl config validate` reports an ERROR-severity
+  `PROFILE_IMAGE_NO_GUEST_AGENT` at `profiles[i].image`, and `config apply`
+  refuses the document. This check reads the *local* image catalogue, so it only
+  fires for an image this host has already pulled — "not pulled yet" is not a
+  configuration error — and, because it lives in the daemon, it is only visible
+  when `runnerctl` can reach runnerd.
+* `runnerctl doctor` fails the `profile_image_guest_agent` check for the same
+  reason.
+
+Imported images are therefore for inspection and re-publishing only. Build a
+runnable image with `runnerctl image build` (or `scripts/build-ubuntu-image.sh`).
+
+What is refused, all of it decided from the manifest plus the two config blobs:
+
+* the legacy `application/vnd.cirruslabs.tart.disk.v1` layer ("re-push the image
+  with tart ≥2");
+* ASIF overlays (`…tart.disk.asif.overlay.v1`) and stacked images (a chunk
+  carrying `org.cirruslabs.tart.disk-file-chunk-count`) — only a flat raw disk
+  can be imported;
+* a `diskFormat` other than `raw`, in the tart config or in the
+  `org.cirruslabs.tart.disk.format` label;
+* anything but `arm64`, in either config — Apple Virtualization is arm64-only;
+* a manifest whose `org.cirruslabs.tart.uncompressed-disk-size` disagrees with
+  what its chunks add up to;
+* a darwin config with no base64 `hardwareModel`, or a linux one that carries
+  one.
+
+The `ecid`, `macAddress` and `displayRefit` fields are dropped: the first two are
+instance identity, which spec §24 keeps out of image metadata. The sizing hints
+survive under `provenance.imported.tartConfig`, alongside
+`provenance.imported.format = "tart"` and the source manifest digest.
+
+Sizes are worth planning for: `ghcr.io/cirruslabs/ubuntu:latest` is 40 layers and
+about **2.84 GiB compressed**, expanding to a **20 GB** raw disk that is written
+sparsely, so the on-disk footprint is far smaller than 20 GB. The pre-pull
+free-space check counts the *compressed* transfer size only, so a host that is
+close to `host.reserve.disk` can still run out while the sparse file grows.
+
+A flat tart manifest carries no whole-disk digest, so the per-chunk
+`org.cirruslabs.tart.uncompressed-content-digest` is the end-to-end check; it is
+also what lets an interrupted pull resume, exactly as for a RunnerVM image.
 
 ## Known limitations
 

@@ -10,6 +10,10 @@ public struct SystemStatus: Codable, Sendable, Hashable {
   public var profiles: [ProfileRuntimeSummary]
   public var reconciliation: ReconciliationSummary
   public var diskPressure: DiskPressureSummary
+  /// Phase 6. Optional for wire compat: a daemon that predates the image builder (or one that has
+  /// never wired a builder into `DaemonServiceImpl`) simply omits the field, and the synthesized
+  /// `Decodable` conformance leaves it `nil` rather than failing to decode.
+  public var builds: BuildsSummary?
 
   public init(
     daemon: DaemonHealth,
@@ -19,7 +23,8 @@ public struct SystemStatus: Codable, Sendable, Hashable {
     images: ImageSummary,
     profiles: [ProfileRuntimeSummary],
     reconciliation: ReconciliationSummary,
-    diskPressure: DiskPressureSummary
+    diskPressure: DiskPressureSummary,
+    builds: BuildsSummary? = nil
   ) {
     self.daemon = daemon
     self.host = host
@@ -29,6 +34,20 @@ public struct SystemStatus: Codable, Sendable, Hashable {
     self.profiles = profiles
     self.reconciliation = reconciliation
     self.diskPressure = diskPressure
+    self.builds = builds
+  }
+}
+
+/// In-daemon image builds that have not reached a terminal state (spec P6). `queued` mirrors
+/// `ImageBuildState.queued`; `running` is every non-terminal state past it (`resolving` through
+/// `sealing`) -- the states in which a build VM is expected to exist.
+public struct BuildsSummary: Codable, Sendable, Hashable {
+  public var running: Int
+  public var queued: Int
+
+  public init(running: Int = 0, queued: Int = 0) {
+    self.running = running
+    self.queued = queued
   }
 }
 

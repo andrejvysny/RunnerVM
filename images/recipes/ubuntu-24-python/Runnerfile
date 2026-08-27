@@ -1,0 +1,15 @@
+# ubuntu-24-python: adds a pinned python3.x venv/dev package on top of ubuntu-24.
+#
+# Apt-only by design (no deadsnakes PPA, no pyenv): noble already ships python3.12, and the venv
+# module is what most CI workflows actually need beyond the python3 that ubuntu-24-minimal has.
+FROM ubuntu-24
+
+ARG PYTHON_VERSION=3.12
+
+LABEL dev.runnervm.image.name="ubuntu-24-python"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+ENV APT="apt-get -y -o DPkg::Lock::Timeout=900 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+RUN $APT update && \
+    $APT install python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev

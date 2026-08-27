@@ -17,11 +17,14 @@ struct InstanceAdmission {
   let profiles: any ProfileRepository
   let probe: HostProbeResult
   let configuration: RunnerConfiguration?
+  /// Image builds hold host capacity too; `nil` until Phase 5 wires a builder in.
+  var builds: (any ImageBuildReservationSource)? = nil
 
   func admit(
     profile: RunnerProfileConfig, profileId: RunnerProfileID, reservationBytes: UInt64
   ) async throws {
-    let reservations = try await Self.reservations(instances: instances, profiles: profiles)
+    let reservations = try await Self.reservations(
+      instances: instances, profiles: profiles, builds: builds)
     if let limit = profile.limits.maxInstances,
        reservations.count(where: { $0.profileId == profileId }) >= limit {
       throw SchedulerError.profileAtMaxInstances(profile: profile.name, limit: limit)
@@ -53,13 +56,17 @@ struct InstanceAdmission {
   /// `bound` is the set of instances a runner session has claimed. The scheduler may never cancel
   /// one of those — a JIT config has been issued against it and tearing the VM down would strand a
   /// runner registration on GitHub (plan C1 "Cancellation").
+  ///
+  /// `builds` contributes the capacity in-flight image builds hold under the `@image-build`
+  /// sentinel profile. A source that throws aborts the whole pass rather than silently
+  /// under-counting the host.
   static func reservations(
     instances: any InstanceRepository, profiles: any ProfileRepository,
-    bound: Set<InstanceID> = []
+    bound: Set<InstanceID> = [], builds: (any ImageBuildReservationSource)? = nil
   ) async throws -> [Reservation] {
     let guestOS = Dictionary(
       try await profiles.list().map { ($0.id, $0.guestOS) }, uniquingKeysWith: { first, _ in first })
-    return try await instances.list(profile: nil, states: nil)
+    let rows = try await instances.list(profile: nil, states: nil)
       .filter { $0.state.consumesCapacity }
       .map { record in
         Reservation(
@@ -68,5 +75,7 @@ struct InstanceAdmission {
           memoryBytes: record.memoryBytes, diskReservationBytes: record.diskReservationBytes,
           state: record.state, bound: bound.contains(record.id), createdAt: record.createdAt.date)
       }
+    guard let builds else { return rows }
+    return try await rows + builds.activeBuildReservations()
   }
 }

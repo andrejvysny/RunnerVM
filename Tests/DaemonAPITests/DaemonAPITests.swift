@@ -136,6 +136,10 @@ import Testing
     let decoded = try JSONDecoder().decode(ImageInfoDTO.self, from: Data(json.utf8))
     #expect(decoded.runnerVersion == nil)
     #expect(decoded.runnerVersionHealth == .unknown)
+    // Appended later still (spec §58); a daemon that predates them says nothing rather than
+    // guessing that the image is a native, agent-carrying one.
+    #expect(decoded.sourceFormat == nil)
+    #expect(decoded.guestAgent == nil)
   }
 
   @Test func imagePruneRoundTripsAndCarriesDryRun() async throws {
