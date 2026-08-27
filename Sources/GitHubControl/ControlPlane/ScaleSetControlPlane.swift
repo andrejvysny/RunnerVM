@@ -173,6 +173,9 @@ public protocol ScaleSetControlPlane: Sendable {
     scope: GitHubScope, scaleSetID: Int64, runnerName: String, workFolder: String
   ) async throws -> JITRunnerConfig
   func runner(scope: GitHubScope, id: Int64) async throws -> ScaleSetRunnerReference?
+  /// Lookup by the name the JIT request carried; `nil` when the scale set holds no such runner.
+  /// Restart recovery uses it when the registration's id never made it onto the session row.
+  func runner(scope: GitHubScope, name: String) async throws -> ScaleSetRunnerReference?
   /// Idempotent (404 ⇒ success).
   func ensureRunnerRemoved(scope: GitHubScope, runnerID: Int64) async throws
 }

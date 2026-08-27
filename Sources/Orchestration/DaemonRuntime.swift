@@ -178,6 +178,11 @@ public actor DaemonRuntime {
       service: service, socketPath: options.paths.daemonSocket, allowedUIDs: options.allowedUIDs)
     try await server.start()
     self.server = server
+    // Before the orchestrator, not on the first reconcile tick: `Orchestrator.receive` acts on a
+    // demand event as soon as the provider is running, which can be well before the reconciler
+    // ticks, and a session nobody is watching any more would hold the VM it was bound to out of
+    // that pass (spec §69).
+    if let runners { _ = await runners.recoverSessions() }
     // After the socket is up (spec §69): a slow first GitHub round trip must not delay the
     // control surface, and the first reconcile tick drives the first scheduling pass anyway.
     try await orchestrator?.start()
@@ -383,6 +388,10 @@ public actor DaemonRuntime {
         InstanceReconciler(
           instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
           retention: { await instances.failedInstanceRetention() }, images: images),
+        // After the instance sweep: a VM the reconciler has just interrupted is what tells session
+        // recovery the runner behind it is gone. Before the orchestrator: the sessions it closes
+        // free the capacity that pass is about to plan against.
+        RunnerSessionReconciler(runners: runners),
         OrchestratorReconcileStep(orchestrator: orchestrator),
         BuildReconciler(builder: builder),
       ]))

@@ -16,10 +16,13 @@ extension RunnerSessionManager {
   /// `remove-runner` operations carry this idempotency prefix so a retry reuses the same row.
   static let removalOperationKind = "remove-runner"
 
-  func observe(_ session: RunnerSessionRecord, context: SessionContext) {
+  /// `sawBusy` seeds the loop's memory of "this session has already run a job". A fresh session
+  /// starts at `false`; one re-adopted after a daemon restart carries what its row proves, so a
+  /// runner that exits on the first poll is still reported as having run the job.
+  func observe(_ session: RunnerSessionRecord, context: SessionContext, sawBusy: Bool = false) {
     let id = session.id
     observers[id] = Task { [weak self] in
-      await self?.watch(session, context: context)
+      await self?.watch(session, context: context, sawBusy: sawBusy)
       await self?.clearObserver(id)
     }
   }
@@ -28,9 +31,11 @@ extension RunnerSessionManager {
     observers[id] = nil
   }
 
-  private func watch(_ started: RunnerSessionRecord, context: SessionContext) async {
+  private func watch(
+    _ started: RunnerSessionRecord, context: SessionContext, sawBusy initialSawBusy: Bool
+  ) async {
     var session = started
-    var sawBusy = false
+    var sawBusy = initialSawBusy
     var lostPolls = 0
     while !Task.isCancelled {
       do { try await Task.sleep(for: tuning.pollInterval) } catch { return }
@@ -85,8 +90,13 @@ extension RunnerSessionManager {
     case .exited:
       // A JIT runner is single-use: GitHub removes the registration itself once the job ends, so
       // the happy path deliberately issues no DELETE (spec §36).
-      await finish(
-        session, to: .completed, result: sawBusy ? "job" : "no-job", context: context)
+      //
+      // `runnerStarting` has no edge to `completed`: a runner that finished before any poll saw it
+      // online — the usual shape right after a daemon restart — is walked through `runnerOnline`
+      // first rather than being reported as lost.
+      let ended = session.state == .runnerStarting
+        ? ((try? await markOnline(session)) ?? session) : session
+      await finish(ended, to: .completed, result: sawBusy ? "job" : "no-job", context: context)
       return nil
     case .unknown:
       await abandon(
@@ -145,11 +155,11 @@ extension RunnerSessionManager {
       session, to: .timedOut, failureCode: code, result: "timed-out", context: context)
   }
 
-  private func abandon(
+  func abandon(
     _ session: RunnerSessionRecord, code: String, reason: String, sawBusy: Bool,
     context: SessionContext
   ) async {
-    let state: RunnerSessionState = session.state == .jobRunning ? .jobInterrupted : .runnerLost
+    let state = Self.abandonTarget(from: session.state)
     logger.warning(
       "runner session abandoned",
       metadata: .context(instance: session.instanceId, session: session.id).merging([
@@ -157,6 +167,18 @@ extension RunnerSessionManager {
       ]) { $1 })
     await finish(
       session, to: state, failureCode: code, result: "interrupted", context: context)
+  }
+
+  /// The terminal state an abandoned session may legally reach from where it actually is.
+  ///
+  /// `runnerLost` is the honest answer for a runner that was up, but the state machine has no edge
+  /// to it from `jitIssued` or `jitDelivered` — a session abandoned that early never had a runner
+  /// to lose — so those fall back to the failure state their own edges allow.
+  static func abandonTarget(from state: RunnerSessionState) -> RunnerSessionState {
+    let preference: [RunnerSessionState] = state == .jobRunning
+      ? [.jobInterrupted, .runnerLost]
+      : [.runnerLost, .runnerStartFailed, .jobInterrupted, .jitFailed]
+    return preference.first { state.allowedTransitions.contains($0) } ?? .runnerLost
   }
 
   private static func expired(_ since: DatabaseDate?, limit: DurationValue) -> Bool {
@@ -176,35 +198,73 @@ extension RunnerSessionManager {
     failureCode: String? = nil, result: String?, context: SessionContext
   ) async {
     let code = (error as? any RunnerError)?.code ?? failureCode
-    let terminal: RunnerSessionRecord
-    do {
-      terminal = try await move(session, to: state) { row in
-        row.result = result
-        row.failureCode = code
-        if row.jobStartedAt != nil || state == .completed { row.jobFinishedAt = .now }
-      }
-    } catch {
-      logger.error(
-        "could not close the runner session",
-        metadata: .context(session: session.id).merging([
-          "target": .string(state.rawValue), "error": .string(String(describing: error)),
-        ]) { $1 })
+    guard let settled = await settle(session, to: state, result: result, code: code) else { return }
+    let terminal = settled.record
+    // A row somebody else closed still owns a VM nobody has handed back. `afterSession` is
+    // idempotent, so the teardown runs rather than being lost with the CAS.
+    guard settled.closedHere else {
+      await teardown(terminal, context: context, failed: terminal.state != .completed)
       return
     }
     await recordJobSummary(terminal)
     await recordSessionMetrics(terminal, profile: context.profile.name)
-    if state.requiresRunnerRemoval, let runnerID = terminal.githubRunnerId {
+    if terminal.state.requiresRunnerRemoval, let runnerID = terminal.githubRunnerId {
       await ensureRunnerRemoved(
         session: terminal.id, runnerID: runnerID, scope: context.scope,
         source: terminal.jitSource)
     }
-    await teardown(terminal, context: context, failed: state != .completed)
+    await teardown(terminal, context: context, failed: terminal.state != .completed)
     logger.info(
       "runner session finished",
       metadata: .context(instance: terminal.instanceId, session: terminal.id).merging([
-        "state": .string(state.rawValue), "result": .string(result ?? "-"),
+        "state": .string(terminal.state.rawValue), "result": .string(result ?? "-"),
         "failure": .string(code ?? "-"),
       ]) { $1 })
+  }
+
+  /// The outcome of the terminal CAS: the row as it now stands, and whether *this* call is the one
+  /// that closed it. Only the closer writes the summary, the metrics and the GitHub removal.
+  private struct Settled {
+    var record: RunnerSessionRecord
+    var closedHere: Bool
+  }
+
+  /// Compare-and-swap onto the terminal state, tolerating one lost race.
+  ///
+  /// The caller's snapshot can be stale: a poll and a deadline can both decide to end the same
+  /// session. A row that is already terminal is reported as somebody else's; one that merely moved
+  /// on is retried once from what it actually says, because dropping it would strand a VM.
+  private func settle(
+    _ session: RunnerSessionRecord, to state: RunnerSessionState, result: String?, code: String?
+  ) async -> Settled? {
+    let mutate: @Sendable (inout RunnerSessionRecord) -> Void = { row in
+      row.result = result
+      row.failureCode = code
+      if row.jobStartedAt != nil || state == .completed { row.jobFinishedAt = .now }
+    }
+    if let closed = try? await move(session, to: state, mutate: mutate) {
+      return Settled(record: closed, closedHere: true)
+    }
+    guard let fresh = try? await sessions.get(id: session.id) else {
+      logger.error(
+        "could not close the runner session",
+        metadata: .context(session: session.id).merging([
+          "target": .string(state.rawValue), "error": .string("the row could not be re-read"),
+        ]) { $1 })
+      return nil
+    }
+    if fresh.state.isTerminal { return Settled(record: fresh, closedHere: false) }
+    let target = fresh.state.allowedTransitions.contains(state)
+      ? state : Self.abandonTarget(from: fresh.state)
+    guard let closed = try? await move(fresh, to: target, mutate: mutate) else {
+      logger.error(
+        "could not close the runner session",
+        metadata: .context(session: session.id).merging([
+          "target": .string(target.rawValue), "error": .string("state is \(fresh.state.rawValue)"),
+        ]) { $1 })
+      return nil
+    }
+    return Settled(record: closed, closedHere: true)
   }
 
   /// Idempotent and durable: the attempt is bracketed by an `operations` row keyed on the session,
@@ -303,7 +363,7 @@ extension RunnerSessionManager {
         completed: !failed,
         failureCode: session.failureCode ?? (failed ? "RUNNER_SESSION_FAILED" : nil),
         detail: "runner session \(session.id.rawValue) ended as \(session.state.rawValue)",
-        publicRepositoryScope: context.scopeRecord.isPublicRepository == true))
+        publicRepositoryScope: context.scopeRecord?.isPublicRepository == true))
     // `afterSession` is where a reusable VM is wiped and an ephemeral one is retired, so the call
     // itself is the cleanup window spec §41 asks about; `InstanceReuse` owns the steps inside it.
     await instances.metricRegistry().observe(

@@ -98,6 +98,9 @@ extension InstanceManager {
     id: InstanceID, session: RunnerSessionID, profile: RunnerProfileConfig,
     outcome: SessionOutcome
   ) async {
+    // Restart recovery can close a session whose VM the reconciler already removed; there is
+    // nothing to hand back, and the guest is long gone, so the diagnostics window is skipped.
+    guard let existing = try? await instances.get(id: id), existing.state != .deleted else { return }
     guard let record = try? await instances.applyReuse(id: id, ReuseUpdate(consumeJob: true))
     else { return }
     guard profile.lifecycle == .reusable, let policy = profile.effectiveReuse else {

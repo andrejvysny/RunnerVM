@@ -67,6 +67,8 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
     var refusedIDs: Set<Int64> = []
     var deletedMessages: [Int64] = []
     var removedRunners: [Int64] = []
+    /// Registrations by runner name, so a lookup by name answers the way the Actions service does.
+    var runnersByName: [String: Int64] = [:]
     var pollFailures: [Int64: [FakeScaleSetError]] = [:]
     var ensureFailure: FakeScaleSetError?
     var jitFailure: FakeScaleSetError?
@@ -104,6 +106,12 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
       state.queues[scaleSetID, default: []].append(message)
       return id
     }
+  }
+
+  /// Pretends the scale set already holds a registration under `name` — the state a daemon that
+  /// died around `generate-jitconfig` leaves behind.
+  public func seedRunner(id: Int64, name: String) {
+    state.withLock { $0.runnersByName[name] = id }
   }
 
   /// The next `getMessage` on `scaleSetID` throws instead of answering.
@@ -211,6 +219,7 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
       if let failure = state.jitFailure { throw failure }
       let id = state.nextRunnerID
       state.nextRunnerID += 1
+      state.runnersByName[runnerName] = id
       return JITRunnerConfig(
         runnerID: id, runnerName: runnerName,
         encodedJITConfig: "FAKESCALESETJIT-\(scaleSetID)-\(id)")
@@ -222,6 +231,15 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
       state.removedRunners.contains(id)
         ? nil
         : ScaleSetRunnerReference(id: id, name: "runner-\(id)", runnerScaleSetId: 0)
+    }
+  }
+
+  public func runner(scope: GitHubScope, name: String) async throws -> ScaleSetRunnerReference? {
+    state.withLock { state -> ScaleSetRunnerReference? in
+      guard let id = state.runnersByName[name], !state.removedRunners.contains(id) else {
+        return nil
+      }
+      return ScaleSetRunnerReference(id: id, name: name, runnerScaleSetId: 0)
     }
   }
 

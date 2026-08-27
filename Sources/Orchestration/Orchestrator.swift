@@ -289,6 +289,7 @@ public struct CompositeReconcileStep: ReconcileStep {
         counts.interrupted += result.interrupted
         counts.orphans += result.orphans
         counts.swept += result.swept
+        counts.sessionsTerminalized += result.sessionsTerminalized
       } catch {
         failure = failure ?? error
       }

@@ -45,12 +45,17 @@ public actor RunnerSessionManager {
 
   /// Everything one session needs, resolved once so the observer never re-reads configuration
   /// mid-flight and changes its mind about scope or lifecycle.
+  ///
+  /// Recovery after a restart builds one of these for a session whose profile or scope row may
+  /// have been removed from the configuration since, so everything the session did not strictly
+  /// need to *start* is optional here.
   struct SessionContext: Sendable {
-    let profileRow: RunnerProfileRecord
     let profile: RunnerProfileConfig
-    let scopeRecord: GitHubScopeRecord
+    let scopeRecord: GitHubScopeRecord?
     let scope: GitHubScope
-    let plane: any GitHubActionsControlPlane
+    /// `nil` when no GitHub credential is configured. Only `issueJIT` requires it; a removal
+    /// resolves its own plane through the gateway so an outage becomes a retryable operation row.
+    let plane: (any GitHubActionsControlPlane)?
     let origin: JITOrigin
     let scaleSetPlane: (any ScaleSetControlPlane)?
   }
@@ -159,7 +164,7 @@ public actor RunnerSessionManager {
         reason: "no scale-set control plane is configured")
     }
     return SessionContext(
-      profileRow: profileRow, profile: try profileRow.decodedConfig(), scopeRecord: scopeRecord,
+      profile: try profileRow.decodedConfig(), scopeRecord: scopeRecord,
       scope: try GitHubMapping.scope(scopeRecord), plane: plane, origin: origin,
       scaleSetPlane: scaleSetPlane)
   }
@@ -219,11 +224,15 @@ public actor RunnerSessionManager {
   ) async throws -> JITRunnerConfig {
     switch context.origin {
     case .rest:
-      return try await context.plane.generateJITConfig(
+      guard let plane = context.plane else {
+        throw OrchestrationError.githubNotConfigured(
+          reason: "no GitHub credential provider is configured")
+      }
+      return try await plane.generateJITConfig(
         scope: context.scope,
         request: JITRunnerRequest(
           name: instance.name, labels: Self.labels(context.profile),
-          runnerGroupID: context.scopeRecord.runnerGroupId))
+          runnerGroupID: context.scopeRecord?.runnerGroupId))
     case let .scaleSet(id):
       guard let plane = context.scaleSetPlane else {
         throw OrchestrationError.githubNotConfigured(
@@ -282,7 +291,7 @@ public actor RunnerSessionManager {
   ) async throws -> RunnerSessionRecord {
     let now = DatabaseDate.now
     let record = RunnerSessionRecord(
-      id: .generate(), instanceId: instance.id, profileId: context.profileRow.id,
+      id: .generate(), instanceId: instance.id, profileId: instance.profileId,
       jitSource: context.origin.source, state: .planned, createdAt: now, updatedAt: now)
     do {
       try await sessions.insert(record)

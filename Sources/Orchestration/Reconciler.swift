@@ -10,6 +10,8 @@ public struct ReconcileCounts: Sendable, Hashable {
   public var interrupted = 0
   public var orphans = 0
   public var swept = 0
+  /// Persisted runner sessions a daemon restart orphaned and this sweep closed out.
+  public var sessionsTerminalized = 0
 
   public init() {}
 }

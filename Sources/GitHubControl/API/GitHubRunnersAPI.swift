@@ -54,9 +54,14 @@ public struct GitHubRunnersAPI: Sendable {
 
   // MARK: - Runners
 
-  public func listRunners(scope: GitHubScope) async throws -> [GitHubRunner] {
-    try await client.paginate(
-      GitHubRequest.get(scope.runnersPath), of: Wire.RunnersPage.self, items: { $0.runners }
+  /// `name` narrows the listing server-side (`GET .../runners?name=`). Restart recovery has only
+  /// the name the JIT request carried, and paging the whole scope to find one runner would make a
+  /// large organization pay for every orphan.
+  public func listRunners(scope: GitHubScope, name: String? = nil) async throws -> [GitHubRunner] {
+    let query = name.map { [URLQueryItem(name: "name", value: $0)] } ?? []
+    return try await client.paginate(
+      GitHubRequest.get(scope.runnersPath, query: query), of: Wire.RunnersPage.self,
+      items: { $0.runners }
     )
   }
 

@@ -50,6 +50,7 @@ public enum RunnerVMMetrics {
 
   // Outcomes.
   public static let sessionsTotal = "runnervm_sessions_total"
+  public static let sessionsRecoveredTotal = "runnervm_sessions_recovered_total"
   public static let instanceFailuresTotal = "runnervm_instance_failures_total"
   public static let reconcileRunsTotal = "runnervm_reconcile_runs_total"
   public static let reconcileErrorsTotal = "runnervm_reconcile_errors_total"
@@ -72,6 +73,7 @@ public enum RunnerVMMetrics {
   public static let healthLabel = "health"
   public static let instructionLabel = "instruction"
   public static let reasonLabel = "reason"
+  public static let outcomeLabel = "outcome"
 
   /// `runnervm_disk_pressure_state` is numeric so it can be alerted on: 0 ok, 1 warning,
   /// 2 critical (spec §17).
@@ -187,6 +189,10 @@ public enum RunnerVMMetrics {
     MetricDefinition(
       name: sessionsTotal, kind: .counter,
       help: "Runner sessions that reached a terminal state, by profile and terminal state."),
+    MetricDefinition(
+      name: sessionsRecoveredTotal, kind: .counter,
+      help: "Persisted runner sessions a daemon restart left behind, by what recovery did with "
+        + "them: reattached to a live runner, or terminalized."),
     MetricDefinition(
       name: instanceFailuresTotal, kind: .counter,
       help: "Instances that failed to come up, by profile and failure code."),

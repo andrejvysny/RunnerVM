@@ -300,6 +300,10 @@ public actor InstanceManager {
   ) async {
     guard let record = try? await require(id),
           Self.interruptibleStates.contains(record.state) else { return }
+    // Same bracket `stop` and `delete` take: the worker events this teardown provokes are expected,
+    // and handling them as failures would interrupt the instance a second time.
+    teardown.insert(id)
+    defer { teardown.remove(id) }
     // Row first, guest second. The actor is reentrant at every `await`, so a runner-session
     // observer polling `agent.runnerStatus` in between would otherwise see a half-closed guest
     // client under a row that still says `busy` and report the loss as an agent failure rather

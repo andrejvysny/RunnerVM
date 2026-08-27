@@ -41,12 +41,21 @@ extension InstanceManager {
     return await guests.client(for: id)
   }
 
-  /// Reconnect after a daemon restart: an instance still waiting simply resumes waiting, while an
-  /// `idle` one has to prove it is the boot we handed out. A reboot underneath us voids every
-  /// session-scoped assumption, so the instance is tainted and interrupted rather than reused.
+  /// Reconnect after a daemon restart: an instance still waiting simply resumes waiting, while
+  /// every instance that claims to hold a boot we handed out has to prove it. A reboot underneath
+  /// us voids every session-scoped assumption, so the instance is tainted and interrupted rather
+  /// than reused.
+  ///
+  /// The runner states are checked too, not just `idle`: a VM that rebooted while runnerd was away
+  /// has lost the runner its session row still points at, and interrupting it here is what lets
+  /// `recoverSessions` see a dead VM instead of re-adopting a session with no runner behind it.
   public func recheckAgents() async {
     guard let records = try? await instances.list(
-      profile: nil, states: [.waitingForAgent, .idle, .cleaning]) else { return }
+      profile: nil,
+      states: [
+        .waitingForAgent, .idle, .cleaning, .configuringRunner, .runnerStarting, .runnerOnline,
+        .busy,
+      ]) else { return }
     for record in records where !teardown.contains(record.id) {
       switch record.state {
       case .waitingForAgent:
