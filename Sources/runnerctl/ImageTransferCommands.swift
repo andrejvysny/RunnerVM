@@ -113,7 +113,10 @@ extension Image {
       guard operation.state == "succeeded" else { throw Image.failed(operation) }
       switch options.output {
       case .json: try JSONOut.print(operation)
-      case .human: print("pushed \(Format.shortDigest(response.digest)) to \(response.reference)")
+      case .human:
+        // The registry's immutable form, when the daemon recorded it, is the reference to pin.
+        let landed = operation.result?["pushedReference"] ?? response.reference
+        print("pushed \(Format.shortDigest(response.digest)) to \(landed)")
       }
     }
   }

@@ -168,6 +168,11 @@ import Testing
       let pushed = try await harness.images.push(imageRef: M2Harness.linuxImageName, to: target)
 
       #expect(pushed.hasPrefix("\(harness.registry.host)/acme/exported@sha256:"))
+      // The immutable reference is recorded on the push operation so `runnerctl image push
+      // --wait` can report what the registry actually assigned.
+      let operation = try #require(try await harness.operations().first { $0.kind == "push-image" })
+      #expect(operation.state == .succeeded)
+      #expect(operation.metadataJson?.contains(pushed) == true)
       let record = try await harness.images.pull(reference: pushed)
       #expect(record.digest == local.record.digest)
       // Pushing does not rename the local image; the row still answers to its imported name.

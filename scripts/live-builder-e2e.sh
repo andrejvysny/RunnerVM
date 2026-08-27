@@ -285,13 +285,17 @@ step_oci() {
     log "skipping the OCI leg (--skip-oci)"
     return 0
   fi
-  local push_ref pull_ref pulled_json pulled_digest pulled_guest_agent
+  local push_ref push_json pull_ref pulled_json pulled_digest pulled_guest_agent
   push_ref="$REGISTRY:$IMAGE_NAME"
   log "pushing $IMAGE_NAME to $push_ref"
-  rc image push "$IMAGE_NAME" "$push_ref" >/dev/null || { warn "image push failed"; return 1; }
+  push_json=$(rc image push "$IMAGE_NAME" "$push_ref" --wait) || { warn "image push failed"; return 1; }
+  # The registry's manifest digest is not the image's content digest: the immutable reference to
+  # pull by is the one the push operation recorded (`result.pushedReference`).
+  pull_ref=$(echo "$push_json" | jq -r '.result.pushedReference // empty')
+  [ -n "$pull_ref" ] || { warn "push operation reported no pushedReference"; return 1; }
+  log "pushed as $pull_ref"
   log "deleting the local image $IMAGE_DIGEST (alias $IMAGE_NAME)"
   rc image delete "$IMAGE_DIGEST" >/dev/null || { warn "image delete failed"; return 1; }
-  pull_ref="${REGISTRY}@${IMAGE_DIGEST}"
   log "pulling back by immutable digest: $pull_ref"
   rc image pull "$pull_ref" >/dev/null || { warn "image pull by digest failed"; return 1; }
   pulled_json=$(rc image inspect "$IMAGE_DIGEST") || { warn "image inspect after pull failed"; return 1; }

@@ -325,7 +325,11 @@ extension ImageManager {
     do {
       try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
       let pushed = try await upload(record, to: target, staging: staging, progress: progress)
-      try? await finish(operationId, state: .succeeded, error: nil)
+      // The immutable reference is the one thing the caller could not know when it started the
+      // push; the operation row is where `runnerctl image push --wait` reads it back from.
+      try? await finish(
+        operationId, state: .succeeded, error: nil,
+        metadataJson: Self.resultJSON(["pushedReference": pushed]))
       try await touch(record)
       return pushed
     } catch {
@@ -416,10 +420,20 @@ extension ImageManager {
     (error as? any RunnerError)?.message ?? String(describing: error)
   }
 
-  private func finish(_ id: OperationID?, state: OperationState, error: (any Error)?) async throws {
+  private func finish(
+    _ id: OperationID?, state: OperationState, error: (any Error)?, metadataJson: String? = nil
+  ) async throws {
     guard let id else { return }
     let code = error.map { ($0 as? any RunnerError)?.code ?? "IMAGE_PULL_FAILED" }
     try await operations?.finish(
-      id: id, state: state, errorCode: code, errorMessage: error.map(Self.message))
+      id: id, state: state, errorCode: code, errorMessage: error.map(Self.message),
+      metadataJson: metadataJson)
+  }
+
+  static func resultJSON(_ values: [String: String]) -> String? {
+    guard let data = try? JSONSerialization.data(
+      withJSONObject: values, options: [.sortedKeys, .withoutEscapingSlashes])
+    else { return nil }
+    return String(data: data, encoding: .utf8)
   }
 }

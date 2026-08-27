@@ -19,7 +19,12 @@ public protocol OperationRepository: Sendable {
     kind: String, resourceType: String, resourceId: String, idempotencyKey: String
   ) async throws -> OperationRecord
 
-  func finish(id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?) async throws
+  /// `metadataJson`, when given, replaces the row's metadata: the place a finished operation
+  /// leaves a result its caller could not know up front (the immutable reference a push landed on).
+  func finish(
+    id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?,
+    metadataJson: String?
+  ) async throws
   func list(state: OperationState?) async throws -> [OperationRecord]
 }
 
@@ -69,7 +74,10 @@ public final class GRDBOperationRepository: OperationRepository, Sendable {
     }
   }
 
-  public func finish(id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?) async throws {
+  public func finish(
+    id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?,
+    metadataJson: String?
+  ) async throws {
     try await db.write { db in
       guard var record = try OperationRecord.fetchOne(db, key: id) else {
         throw PersistenceError.notFound(entity: "operations", id: id.rawValue)
@@ -78,6 +86,7 @@ public final class GRDBOperationRepository: OperationRepository, Sendable {
       record.finishedAt = .now
       record.errorCode = errorCode
       record.errorMessage = errorMessage
+      if let metadataJson { record.metadataJson = metadataJson }
       try DatabaseErrorMapper.run(entity: "operations") { try record.update(db) }
     }
   }
@@ -90,5 +99,14 @@ public final class GRDBOperationRepository: OperationRepository, Sendable {
         try OperationRecord.fetchAll(db)
       }
     }
+  }
+}
+
+extension OperationRepository {
+  public func finish(
+    id: OperationID, state: OperationState, errorCode: String?, errorMessage: String?
+  ) async throws {
+    try await finish(
+      id: id, state: state, errorCode: errorCode, errorMessage: errorMessage, metadataJson: nil)
   }
 }

@@ -46,7 +46,17 @@ enum Mapping {
       startedAt: RFC3339.string(from: record.startedAt.date),
       finishedAt: record.finishedAt.map { RFC3339.string(from: $0.date) },
       errorCode: record.errorCode,
-      errorMessage: record.errorMessage)
+      errorMessage: record.errorMessage,
+      result: operationResult(record.metadataJson))
+  }
+
+  /// Only a flat string map is a "result"; anything else in `metadata_json` stays internal.
+  static func operationResult(_ json: String?) -> [String: String]? {
+    guard let json, let data = json.data(using: .utf8),
+          let decoded = try? JSONDecoder().decode([String: String].self, from: data),
+          !decoded.isEmpty
+    else { return nil }
+    return decoded
   }
 
   static func host(_ probe: HostProbeResult, freeDiskBytes: UInt64) -> HostSummary {

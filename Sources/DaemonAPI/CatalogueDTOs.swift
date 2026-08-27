@@ -103,11 +103,14 @@ public struct OperationInfo: Codable, Sendable, Hashable {
   public var finishedAt: String?
   public var errorCode: String?
   public var errorMessage: String?
+  /// Key/value result a finished operation reports, e.g. `pushedReference` for `push-image` (the
+  /// immutable `@sha256:` form the registry assigned). Absent on daemons predating the field.
+  public var result: [String: String]?
 
   public init(
     id: String, kind: String, resourceType: String, resourceId: String, state: String,
     startedAt: String, finishedAt: String? = nil, errorCode: String? = nil,
-    errorMessage: String? = nil
+    errorMessage: String? = nil, result: [String: String]? = nil
   ) {
     self.id = id
     self.kind = kind
@@ -118,6 +121,7 @@ public struct OperationInfo: Codable, Sendable, Hashable {
     self.finishedAt = finishedAt
     self.errorCode = errorCode
     self.errorMessage = errorMessage
+    self.result = result
   }
 }
 
