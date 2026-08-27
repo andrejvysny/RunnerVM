@@ -38,12 +38,13 @@ public enum BuildContextPacker {
     let payload = staging.appending(path: "payload", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
 
-    let list = staging.appending(path: "files.txt")
-    try Data(entries.paths.joined(separator: "\n").appending("\n").utf8).write(to: list)
+    let list = staging.appending(path: "files.list")
+    try writeNulDelimitedList(entries.paths, to: list)
     let tarball = payload.appending(path: tarName)
     try await runner.runChecked(tar, [
       "-cf", tarball.path(percentEncoded: false),
       "-C", root.path(percentEncoded: false),
+      "--null",
       "-T", list.path(percentEncoded: false), "--no-recursion",
     ])
     let digest = try SHA256Digest.file(at: tarball)
@@ -56,6 +57,25 @@ public enum BuildContextPacker {
     try? FileManager.default.removeItem(at: destination)
     try FileManager.default.moveItem(at: iso, to: destination)
     return PackedContext(image: destination, bytes: entries.bytes, sha256: digest)
+  }
+
+  /// Writes `entries` as `entry\0entry\0…`, matched by `tar`'s `--null` on the `-T` read side.
+  ///
+  /// A newline-joined list (the previous format) hands bsdtar's `-T` reader two footguns: a line
+  /// reading exactly `-C` changes tar's working directory for every entry after it (verified: a
+  /// file merely *named* `-C` redirects subsequent lookups into whatever directory follows it on
+  /// the next line -- `man tar` calls this out, and it reproduces against the host's bsdtar 3.5.3),
+  /// and a name containing "\n" is split into two bogus entries. `--null` disables both: verified
+  /// on this host that a NUL-delimited entry equal to `-C`, one starting with `-`, and one
+  /// containing "\n" are each archived literally as a single member with that exact name (see
+  /// `BuildContextPackerTests`) -- no `./` prefix is needed to defeat the `-C` special case.
+  private static func writeNulDelimitedList(_ entries: [String], to url: URL) throws {
+    var bytes = Data()
+    for entry in entries {
+      bytes.append(contentsOf: entry.utf8)
+      bytes.append(0)
+    }
+    try bytes.write(to: url)
   }
 
   // MARK: - Walk
@@ -85,6 +105,7 @@ public enum BuildContextPacker {
     for case let url as URL in walker {
       let relative = try Self.relativePath(of: url, under: root)
       guard !relative.isEmpty else { continue }
+      try Self.validateListable(relative)
       let values = try url.resourceValues(forKeys: keys)
       if values.isDirectory == true {
         if ignore.excludes(relativePath: relative, isDirectory: true) { walker.skipDescendants() }
@@ -127,6 +148,22 @@ public enum BuildContextPacker {
       throw refuse("hard link with \(links) references")
     }
     return UInt64(values.fileSize ?? 0)
+  }
+
+  /// Refuses two byte patterns the NUL-delimited list can't carry. A NUL inside a path is
+  /// impossible on any POSIX filesystem (the kernel uses it as the C-string terminator), but the
+  /// list format's own delimiter depends on that holding, so it is checked rather than assumed. An
+  /// empty component (e.g. from a doubled or trailing `/`) can't come out of the enumerator either,
+  /// but would collide the entry with its own parent directory's name if it ever did.
+  private static func validateListable(_ relative: String) throws {
+    guard !relative.utf8.contains(0) else {
+      throw ImageBuildError.contextUnsafeEntry(path: relative, reason: "name contains a NUL byte")
+    }
+    let hasEmptyComponent = relative.split(separator: "/", omittingEmptySubsequences: false)
+      .contains { $0.isEmpty }
+    guard !hasEmptyComponent else {
+      throw ImageBuildError.contextUnsafeEntry(path: relative, reason: "name has an empty path component")
+    }
   }
 
   /// `.producesRelativePathURLs` gives a `relativePath`, but a caller that passed an absolute
