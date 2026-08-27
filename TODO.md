@@ -136,7 +136,7 @@ All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: ha
 - [x] R2-3 missing guest manifest fails closed (`--allow-partial-provenance` for dev; `provenance.partial`)
 - [x] R2-4 service group default `_runnervm` (refuses `staff` without `--allow-staff-group`), `scripts/tests/install-test.sh`
 - [x] R2-5 `SecureFile.ownerAndGroupRead` rejects `0o037`; `WorkerEnvironment` derives `HOME` from passwd; vsock connect closes the fd if cancelled mid-flight; `actionlint` in CI
-- [~] R2-6 CI green on `master` — blocked 2026-08-26 by a GitHub Actions major outage (runs `startup_failure`/`queued` with zero jobs, incl. Dependabot's own runs); re-dispatch `ci.yml` when githubstatus.com reports Actions operational
+- [x] R2-6 CI green on `master` — run 33063743404 (commit 0c15077, 2026-08-27): Swift 6.1 build+tests, shellcheck, guest agent all green. Timing-sensitive suites (`RunnerSessionTests`, `ReusableLifecycleTests`) still flake under CI load on some runs — de-flake candidate.
 
 ## Live end-to-end PROVEN (2026-08-26)
 - Registered RunnerVM as a repo Runner Scale Set (`runnervm-ubuntu-24`, label `ubuntu-24`) on andrejvysny/github-managed-runners.
