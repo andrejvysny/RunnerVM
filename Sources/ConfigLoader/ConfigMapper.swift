@@ -213,7 +213,17 @@ enum ConfigMapper {
       recipeFileName: dto?.recipeFileName ?? d.recipeFileName,
       maxContextBytes: dto?.maxContextSize?.bytes ?? d.maxContextBytes,
       maxLogBytes: dto?.maxLogSize?.bytes ?? d.maxLogBytes,
-      maxSteps: dto?.maxSteps ?? d.maxSteps
+      maxSteps: dto?.maxSteps ?? d.maxSteps,
+      cache: mapBaseImageCache(dto?.cache)
+    )
+  }
+
+  private static func mapBaseImageCache(_ dto: ConfigDTO.Build.Cache?) -> BaseImageCachePolicy {
+    let d = BaseImageCachePolicy()
+    return BaseImageCachePolicy(
+      maxBytes: dto?.maxBytes?.bytes ?? d.maxBytes,
+      minimumHostFreeBytes: dto?.minimumHostFreeBytes?.bytes ?? d.minimumHostFreeBytes,
+      maxEntries: dto?.maxEntries ?? d.maxEntries
     )
   }
 

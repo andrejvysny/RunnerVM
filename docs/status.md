@@ -64,8 +64,8 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 - `hdiutil makehybrid` under a LaunchDaemon is gated by `doctor build_tools`, not yet qualified.
 - `image list` shows the manifest name, so two rows can share a name after a rebuild; `image inspect
   <name>` follows the alias to the newest.
-- Base-image cache (`cache/base-images`) is unbounded; free-space check for pulls counts compressed
-  bytes only.
+- Base-image cache (`cache/base-images`) is bounded by `build.cache` (LRU, pins live builds, honours
+  the disk reserve) — but the free-space check for *image pulls* still counts compressed bytes only.
 - `config validate` flags an agentless profile image only once its *tag* has been resolved locally.
 
 ## Open verification / next steps

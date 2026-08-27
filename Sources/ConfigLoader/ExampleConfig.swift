@@ -81,5 +81,9 @@ public enum ExampleConfig {
   #   maxContextSize: 1GiB
   #   maxLogSize: 64MiB
   #   maxSteps: 256
+  #   cache:                     # the FROM cloud-image: base cache, LRU-evicted
+  #     maxBytes: 40GiB          # omit for "no size ceiling"
+  #     minimumHostFreeBytes: 10GiB   # free space the cache refuses to eat into
+  #     maxEntries: 4            # omit for "no count ceiling"
   """
 }

@@ -68,7 +68,8 @@ sets the image's virtual disk size when not overridden by `--disk` on `runnerctl
 itself or `build.diskBytes`. The converted raw disk is cached under
 `<rootDir>/cache/base-images/base-<sha256>.raw` (see [Bootstrap flow](#bootstrap-flow)); the
 downloaded/converted digest is always re-verified against a cache hit's sidecar before it is
-trusted.
+trusted. That cache is bounded and LRU-evicted -- see
+[Base image cache](#base-image-cache).
 
 A local-image or registry `FROM` is a *derived* build: it must resolve to a Linux image that
 already carries a RunnerVM guest agent (`BUILD_BASE_NO_GUEST_AGENT` otherwise — a build cannot
@@ -82,8 +83,10 @@ A `cloud-image:` build is the only one that runs cloud-init at all:
 1. **Fetch + verify + convert.** `BaseImageCache` downloads (or copies, for a local `/` path) the
    URL, verifies the whole file against `--sha256`, converts qcow2 → raw with the embedded
    `QCOW2Reader` (no `qemu-img` dependency), and caches the raw disk plus a JSON sidecar
-   (`{sourceSHA256, rawSHA256, virtualSize}`) so a second build from the same digest costs nothing
-   — the sidecar is re-validated (file size vs. recorded size) on every hit, not just trusted.
+   (`{sourceSHA256, rawSHA256, virtualSize, lastUsedAt}`) so a second build from the same digest
+   costs nothing — the sidecar is re-validated (file size vs. recorded size) on every hit, not just
+   trusted. The conversion writes `base-<sha256>.raw.part` and renames, and the sidecar lands the
+   same way, so an entry is only ever visible complete.
 2. **Stage.** The cached raw disk is APFS-cloned into the build's own directory
    (`<stateDir>/builds/<id>/vm/`), grown to the requested disk size, and a cloud-init NoCloud seed
    ISO (`BuildSeed`) is generated and attached: a minimal `user-data`/`meta-data` that creates the
@@ -275,6 +278,10 @@ build:
   maxContextBytes: 1073741824   # 1GiB
   maxLogBytes: 67108864         # 64MiB; a step that would exceed it fails BUILD_STEP_OUTPUT_TOO_LARGE
   maxSteps: 256                 # BUILD_TOO_MANY_STEPS beyond this
+  cache:                        # the FROM cloud-image: base cache (see below)
+    maxBytes: 40GiB             # omit/null for no size ceiling
+    minimumHostFreeBytes: 10GiB # default; free space the cache refuses to eat into
+    maxEntries: 4               # omit/null for no count ceiling
 
 images:
   limits:
@@ -291,6 +298,46 @@ host disk pressure at admission time.
 `--cpus`/`--memory`/`--disk`/`--timeout`/`--no-cache` on `runnerctl image build` override the
 matching `build:` default for that one build; `--no-cache` ignores a cached `FROM cloud-image:`
 base and re-downloads/re-converts it.
+
+### Base image cache
+
+`<rootDir>/cache/base-images/` (or `build.cacheDir`) holds one entry per `FROM cloud-image:`
+digest: `base-<sha256>.raw` plus `base-<sha256>.json`. It is bounded by `build.cache`, and every
+bound is checked **before** a byte is downloaded and again before the conversion runs, so a fetch
+that cannot fit fails closed (`BUILD_INSUFFICIENT_DISK`) instead of filling the volume.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `build.cache.maxBytes` | unset | ceiling on what the cache occupies on disk; unset means "no size ceiling" |
+| `build.cache.minimumHostFreeBytes` | `10GiB` | free space the cache refuses to consume, *on top of* `host.reserve.disk` |
+| `build.cache.maxEntries` | unset | ceiling on cached bases; unset means "no count ceiling" |
+
+Eviction is least-recently-used, where "used" is the `lastUsedAt` stamp a cache *hit* refreshes —
+so a base a nightly build keeps reaching for outlives one fetched once. Two entries are never
+evicted, whatever the bounds say:
+
+* a base named by an `image_builds` row that has not reached a terminal state (read from the
+  database, so a daemon restart re-establishes the pins rather than losing them), and
+* a base this process is fetching right now.
+
+If the bounds cannot hold even after evicting everything else, nothing is evicted and the fetch is
+refused — deleting a usable base only to fail the build anyway would be the worst of both. `--no-cache`
+re-downloads and re-converts, and is bounded exactly the same way.
+
+Concurrent builds naming the same digest share one transfer. Everything an interrupted fetch could
+leave behind (`*.part`, `*.raw.part`, `*.json.part`, a raw disk with no sidecar, a sidecar with no
+raw disk) is swept when the daemon first touches the cache, and logged.
+
+Four metrics report the cache:
+
+| metric | type | meaning |
+| --- | --- | --- |
+| `runnervm_image_cache_bytes` | gauge | bytes the cache occupies on disk |
+| `runnervm_image_cache_entries` | gauge | cached bases |
+| `runnervm_image_cache_evictions_total{reason="bytes"\|"entries"\|"reserve"\|"sweep"}` | counter | evictions by the bound that forced them; `sweep` counts startup leftovers |
+
+`build.cache` is **not** `images.cache`: that one governs the content-addressed image store and its
+pin/reference rules, this one bounds a pure download cache keyed by the digest a recipe named.
 
 ### Guest agent resolution
 
@@ -340,7 +387,5 @@ state. `runnerctl build show <id>` reports the exact path.
   similar reputation for headless launchd contexts. `runnerctl doctor`'s `build_tools` check runs a
   real `hdiutil makehybrid` smoke test on every invocation specifically so this is caught on that
   host, ahead of time, rather than assumed either way.
-* **The base image cache is unbounded.** `<rootDir>/cache/base-images/` is never swept by
-  `image prune` or any retention policy — it only grows. Clear it by hand if disk space matters.
 * **x86_64 guests are not supported.** Apple Virtualization is arm64-only, same as every other
   RunnerVM guest.

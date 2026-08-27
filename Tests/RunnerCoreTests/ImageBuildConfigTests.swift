@@ -17,6 +17,7 @@ import Testing
     #expect(config.stepTimeout == d.stepTimeout)
     #expect(config.maxConcurrent == d.maxConcurrent)
     #expect(config.cacheDir == nil)
+    #expect(config.cache == BaseImageCachePolicy())
     #expect(config.guestAgentPath == nil)
     #expect(config.recipeFileName == d.recipeFileName)
     #expect(config.maxContextBytes == d.maxContextBytes)
@@ -110,5 +111,35 @@ import Testing
   @Test func defaultBuildConfigProducesNoIssues() {
     #expect(Fixtures.validConfiguration().validate(host: Fixtures.hostFacts)
       .filter { $0.path.hasPrefix("build.") }.isEmpty)
+  }
+
+  // MARK: - build.cache
+
+  @Test func theBaseImageCachePolicyDecodesLenientlyPerKey() throws {
+    let json = """
+      {"cache": {"maxEntries": 3}}
+      """
+    let config = try JSONDecoder().decode(ImageBuildConfig.self, from: Data(json.utf8))
+    #expect(config.cache.maxEntries == 3)
+    #expect(config.cache.maxBytes == nil)
+    #expect(config.cache.minimumHostFreeBytes == BaseImageCachePolicy().minimumHostFreeBytes)
+  }
+
+  @Test func theBaseImageCachePolicyDefaultsAreUnboundedButFloored() {
+    let d = BaseImageCachePolicy()
+    #expect(d.maxBytes == nil)
+    #expect(d.maxEntries == nil)
+    #expect(d.minimumHostFreeBytes == ByteSize.gibibytes(10).bytes)
+  }
+
+  /// "Set but useless" is an error; "absent" is how unbounded is spelled.
+  @Test func aZeroBaseImageCacheCeilingIsRejectedWhileAbsenceIsNot() {
+    #expect(!Fixtures.issues { _ in }.contains(code: "BUILD_CACHE_MAX_BYTES_INVALID"))
+    let issues = Fixtures.issues {
+      $0.build.cache = BaseImageCachePolicy(maxBytes: 0, maxEntries: 0)
+    }
+    #expect(issues.contains(code: "BUILD_CACHE_MAX_BYTES_INVALID"))
+    #expect(issues.contains(code: "BUILD_CACHE_MAX_ENTRIES_INVALID"))
+    #expect(issues.first(code: "BUILD_CACHE_MAX_ENTRIES_INVALID")?.path == "build.cache.maxEntries")
   }
 }

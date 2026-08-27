@@ -35,6 +35,11 @@ public enum RunnerVMMetrics {
   public static let imageBuildStepSeconds = "runnervm_image_build_step_seconds"
   public static let imageBuildsRecoveryPending = "runnervm_image_builds_recovery_pending"
 
+  // Builder base-image cache (`<rootDir>/cache/base-images`), bounded by `build.cache`.
+  public static let imageCacheBytes = "runnervm_image_cache_bytes"
+  public static let imageCacheEntries = "runnervm_image_cache_entries"
+  public static let imageCacheEvictionsTotal = "runnervm_image_cache_evictions_total"
+
   // Image runner-software freshness (spec §53).
   public static let imageRunnerVersionHealth = "runnervm_image_runner_version_health"
   public static let runnerLatestReleaseAgeSeconds = "runnervm_runner_latest_release_age_seconds"
@@ -66,6 +71,7 @@ public enum RunnerVMMetrics {
   public static let digestLabel = "digest"
   public static let healthLabel = "health"
   public static let instructionLabel = "instruction"
+  public static let reasonLabel = "reason"
 
   /// `runnervm_disk_pressure_state` is numeric so it can be alerted on: 0 ok, 1 warning,
   /// 2 critical (spec §17).
@@ -148,6 +154,16 @@ public enum RunnerVMMetrics {
       name: imageBuildsRecoveryPending, kind: .gauge,
       help: "Image builds left behind by a restart whose builder worker could not be proven dead. "
         + "Each one still holds its host capacity, base-image pin and directory."),
+    MetricDefinition(
+      name: imageCacheBytes, kind: .gauge,
+      help: "Bytes the builder's base-image cache currently occupies on disk."),
+    MetricDefinition(
+      name: imageCacheEntries, kind: .gauge,
+      help: "Base images currently cached for `FROM cloud-image:` builds."),
+    MetricDefinition(
+      name: imageCacheEvictionsTotal, kind: .counter,
+      help: "Base images removed from the cache, by the bound that forced it: bytes, entries, "
+        + "reserve, or sweep for leftovers of an interrupted fetch."),
     MetricDefinition(
       name: imageRunnerVersionHealth, kind: .gauge,
       help: "1 for the runner-software freshness bucket each local image currently falls in: "

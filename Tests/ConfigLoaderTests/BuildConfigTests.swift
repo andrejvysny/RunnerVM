@@ -119,6 +119,63 @@ struct BuildConfigTests {
     #expect(try JSONDecoder().decode(RunnerConfiguration.self, from: data).build == original.build)
   }
 
+  // MARK: - build.cache
+
+  @Test func theBaseImageCacheSectionDefaultsWhenAbsent() throws {
+    let config = try Self.load(Fixtures.minimalYAML)
+    #expect(config.build.cache == BaseImageCachePolicy())
+    #expect(config.build.cache.maxBytes == nil)
+    #expect(config.build.cache.maxEntries == nil)
+    #expect(config.build.cache.minimumHostFreeBytes == ByteSize.gibibytes(10).bytes)
+  }
+
+  @Test func theBaseImageCacheSectionRoundTripsThroughYAML() throws {
+    let config = try Self.load("""
+      \(Self.scopeOnly)
+      build:
+        cache:
+          maxBytes: 40GiB
+          minimumHostFreeBytes: 25GiB
+          maxEntries: 6
+      """)
+    #expect(config.build.cache.maxBytes == ByteSize.gibibytes(40).bytes)
+    #expect(config.build.cache.minimumHostFreeBytes == ByteSize.gibibytes(25).bytes)
+    #expect(config.build.cache.maxEntries == 6)
+    // The rest of `build:` is untouched by the new subsection.
+    #expect(config.build.cpuCount == ImageBuildConfig().cpuCount)
+  }
+
+  @Test func aBaseImageCacheTypoIsRejectedRatherThanIgnored() throws {
+    #expect(throws: (any Error).self) {
+      _ = try Self.load("""
+        \(Self.scopeOnly)
+        build:
+          cache:
+            maxSize: 40GiB
+        """)
+    }
+  }
+
+  @Test func aZeroBaseImageCacheCeilingFailsValidation() throws {
+    let yaml = """
+      \(Self.scopeOnly)
+      build:
+        cache:
+          maxBytes: 0B
+          maxEntries: 0
+      """
+    let error = #expect(throws: ConfigLoadError.self) {
+      try ConfigLoader.loadAndValidate(yaml: yaml, host: Fixtures.hostFacts)
+    }
+    let loadError = try #require(error)
+    guard case let .validationFailed(issues) = loadError else {
+      Issue.record("unexpected error \(loadError)")
+      return
+    }
+    #expect(issues.contains(code: "BUILD_CACHE_MAX_BYTES_INVALID"))
+    #expect(issues.contains(code: "BUILD_CACHE_MAX_ENTRIES_INVALID"))
+  }
+
   // MARK: - images.limits
 
   @Test func imagesLimitsDefaultsWhenAbsent() throws {

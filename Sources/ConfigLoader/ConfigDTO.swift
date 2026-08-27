@@ -144,6 +144,13 @@ struct ConfigDTO: Decodable {
   }
 
   struct Build: Decodable {
+    /// Base-image cache bounds. Separate from `images.cache`, which is the image store's policy.
+    struct Cache: Decodable {
+      var maxBytes: ByteSize?
+      var minimumHostFreeBytes: ByteSize?
+      var maxEntries: Int?
+    }
+
     var cpu: Int?
     var memory: ByteSize?
     var disk: ByteSize?
@@ -156,6 +163,7 @@ struct ConfigDTO: Decodable {
     var maxContextSize: ByteSize?
     var maxLogSize: ByteSize?
     var maxSteps: Int?
+    var cache: Cache?
   }
 
   struct Logging: Decodable {

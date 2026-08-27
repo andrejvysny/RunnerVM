@@ -91,6 +91,9 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
   let logger: Logger
 
   var configuration: RunnerConfiguration?
+  /// Built lazily and kept: the cache owns an LRU index and a one-transfer-per-digest map, both of
+  /// which a per-build instance would throw away. Dropped whenever the configuration changes.
+  var baseCache: BaseImageCache?
   var tasks: [ImageBuildID: Task<Void, Never>] = [:]
   var runs: [ImageBuildID: BuildRun] = [:]
   /// Set by `stop`: refuses new builds while the daemon is going down, without needing the host
@@ -131,6 +134,7 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
 
   public func updateConfiguration(_ config: RunnerConfiguration?) {
     configuration = config
+    baseCache = nil
   }
 
   var buildConfig: ImageBuildConfig { configuration?.build ?? ImageBuildConfig() }
@@ -294,8 +298,30 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
 
   func baseFetcher() -> any BaseImageFetcher {
     if let injected = tuning.baseImages { return injected }
-    let directory = buildConfig.cacheDir.map { URL(fileURLWithPath: $0) } ?? paths.baseImageCacheDir
-    return BaseImageCache(directory: directory, reserveBytes: reserveDiskBytes)
+    if let baseCache { return baseCache }
+    let builds = self.builds
+    let cache = BaseImageCache(
+      directory: baseCacheDirectory, policy: buildConfig.cache, reserveBytes: reserveDiskBytes,
+      pinned: { await Self.pinnedBaseKeys(builds) }, metrics: metrics, now: tuning.now,
+      logger: logger)
+    baseCache = cache
+    return cache
+  }
+
+  var baseCacheDirectory: URL {
+    buildConfig.cacheDir.map { URL(fileURLWithPath: $0) } ?? paths.baseImageCacheDir
+  }
+
+  /// Every base a build row that has not reached a terminal state still depends on. Derived from
+  /// the repository rather than tracked in memory, so a daemon restart re-establishes the pins
+  /// instead of leaving a resumed build's base evictable.
+  static func pinnedBaseKeys(_ builds: any ImageBuildRepository) async -> Set<String> {
+    guard let rows = try? await builds.list(states: nil) else { return [] }
+    return Set(
+      rows.lazy
+        .filter { !$0.state.isTerminal }
+        .compactMap(\.baseSHA256)
+        .map(BaseImageCache.normalize))
   }
 
   /// A draining or offline host admits no new work of any kind; a daemon already tearing down

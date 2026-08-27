@@ -288,6 +288,7 @@ extension ImageBuildConfig {
     if maxSteps < 1 {
       issues.append(.error("BUILD_MAX_STEPS_INVALID", "build.maxSteps", "must be at least 1"))
     }
+    issues += cache.validate()
     return issues
   }
 
@@ -300,6 +301,28 @@ extension ImageBuildConfig {
       issues.append(.error(
         "BUILD_STEP_TIMEOUT_TOO_LONG", "build.stepTimeout",
         "must not exceed \(Self.maxStepTimeout); the guest agent clamps exec timeouts there"
+      ))
+    }
+    return issues
+  }
+}
+
+extension BaseImageCachePolicy {
+  /// A zero ceiling would evict every base the moment it landed and turn every build into a
+  /// re-download, so "set but useless" is rejected rather than silently accepted; `nil` (absent)
+  /// is the way to say "unbounded".
+  func validate() -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if let maxBytes, maxBytes == 0 {
+      issues.append(.error(
+        "BUILD_CACHE_MAX_BYTES_INVALID", "build.cache.maxBytes",
+        "must be greater than 0; omit the key for an unbounded cache"
+      ))
+    }
+    if let maxEntries, maxEntries < 1 {
+      issues.append(.error(
+        "BUILD_CACHE_MAX_ENTRIES_INVALID", "build.cache.maxEntries",
+        "must be at least 1; omit the key for an unbounded cache"
       ))
     }
     return issues

@@ -105,11 +105,14 @@ extension ImageBuilder {
     return total
   }
 
+  /// Both files, not just the disk: a raw with no sidecar is a leftover the cache sweeps rather
+  /// than a hit, so a reservation that assumed otherwise would under-book the download.
   private func baseImageCached(sha256: String) -> Bool {
-    let directory = buildConfig.cacheDir.map { URL(fileURLWithPath: $0) } ?? paths.baseImageCacheDir
     let key = BaseImageCache.normalize(sha256)
-    return FileManager.default.fileExists(
-      atPath: directory.appending(path: "base-\(key).raw").path(percentEncoded: false))
+    return ["raw", "json"].allSatisfy {
+      FileManager.default.fileExists(
+        atPath: baseCacheDirectory.appending(path: "base-\(key).\($0)").path(percentEncoded: false))
+    }
   }
 
   /// `RUNNER_SUDO` is the one build argument the *seed* consumes rather than the recipe, so it is

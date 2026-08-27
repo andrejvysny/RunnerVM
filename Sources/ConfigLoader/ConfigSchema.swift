@@ -63,6 +63,9 @@ enum ConfigSchema {
       "stepTimeout": .scalar, "maxConcurrent": .scalar, "cacheDir": .scalar,
       "guestAgentPath": .scalar, "recipeFileName": .scalar, "maxContextSize": .scalar,
       "maxLogSize": .scalar, "maxSteps": .scalar,
+      "cache": .object([
+        "maxBytes": .scalar, "minimumHostFreeBytes": .scalar, "maxEntries": .scalar,
+      ]),
     ]),
     "logging": .object([
       "file": .object(["enabled": .scalar, "maxSize": .scalar, "maxFiles": .scalar]),
