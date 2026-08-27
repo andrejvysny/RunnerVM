@@ -106,3 +106,63 @@ func exampleWithSecondProfile() throws -> RunnerConfiguration {
   config.profiles.append(secondExampleProfile)
   return config
 }
+
+/// Holds a real `fcntl` write lock on a file until `release()` (or the process exits).
+///
+/// A separate process is unavoidable: POSIX record locks are per-process, so a lock taken inside
+/// the test runner is invisible to `WorkerLock.holderPID` running in the same runner. Copied from
+/// `VirtualizationCoreTests.WorkerLockTests` rather than shared, because test targets cannot import
+/// each other.
+///
+/// `start` returns `nil` when the host has no `/usr/bin/python3`, which lets a test skip instead of
+/// failing on a machine without it.
+final class LockHolder: @unchecked Sendable {
+  private let process: Process
+  private let stdin: FileHandle
+
+  private static let script = """
+    import fcntl, sys
+    handle = open(sys.argv[1], 'a+b')
+    fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    sys.stdout.write('locked\\n')
+    sys.stdout.flush()
+    sys.stdin.read()
+    """
+
+  private init(process: Process, stdin: FileHandle) {
+    self.process = process
+    self.stdin = stdin
+  }
+
+  /// Blocks until the child announces on stdout that it holds the lock, so no caller ever sleeps.
+  static func start(_ url: URL) throws -> LockHolder? {
+    let python = "/usr/bin/python3"
+    guard FileManager.default.isExecutableFile(atPath: python) else { return nil }
+    try FileManager.default.createDirectory(
+      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: python)
+    process.arguments = ["-c", script, url.path(percentEncoded: false)]
+    let output = Pipe()
+    let input = Pipe()
+    process.standardOutput = output
+    process.standardInput = input
+    try process.run()
+    var seen = Data()
+    while !seen.contains(UInt8(ascii: "\n")) {
+      let chunk = output.fileHandleForReading.availableData
+      guard !chunk.isEmpty else { return nil }
+      seen.append(chunk)
+    }
+    return LockHolder(process: process, stdin: input.fileHandleForWriting)
+  }
+
+  var isRunning: Bool { process.isRunning }
+
+  /// Closing stdin ends the child's `stdin.read()`, which drops the lock as the process exits.
+  func release() {
+    guard process.isRunning else { return }
+    stdin.closeFile()
+    process.waitUntilExit()
+  }
+}

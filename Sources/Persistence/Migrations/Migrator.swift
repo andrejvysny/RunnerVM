@@ -40,6 +40,15 @@ enum Migrator {
       )
     }
 
+    migrator.registerMigration("v3") { db in
+      try db.execute(sql: schemaV3SQL)
+      // Same discipline as "v1"/"v2": the literal `3`, forever.
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        arguments: [3, DatabaseDate.now]
+      )
+    }
+
     do {
       try migrator.migrate(writer)
     } catch let error as PersistenceError {
@@ -206,5 +215,13 @@ enum Migrator {
       name TEXT PRIMARY KEY,
       digest TEXT NOT NULL REFERENCES images(digest),
       updated_at TEXT NOT NULL);
+    """
+
+  /// Verbatim contents of `docs/db_schema_v3.sql`: the delta over v2 only. `ADD COLUMN` never
+  /// re-validates an existing `CHECK` constraint, so this applies cleanly to any v2 database
+  /// whatever `image_builds.state` values it already holds.
+  private static let schemaV3SQL = """
+    -- RunnerVM SQLite schema v3: restart-recovery bookkeeping for orphaned image builds.
+    ALTER TABLE image_builds ADD COLUMN recovery_since TEXT;
     """
 }

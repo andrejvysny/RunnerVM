@@ -22,25 +22,25 @@ import Testing
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2])
+    #expect(versions == [1, 2, 3])
   }
 
   /// `PersistenceSchema.currentVersion` is the source of truth `Migrator` and
-  /// `Orchestration.RunnerVMBuild.schemaVersion` both read; the "v1"/"v2" migrations themselves
-  /// insert the literal `1`/`2` so a later bump to `currentVersion` cannot make a fresh database's
+  /// `Orchestration.RunnerVMBuild.schemaVersion` both read; the "v1"/"v2"/"v3" migrations themselves
+  /// insert the literal `1`/`2`/`3` so a later bump to `currentVersion` cannot make a fresh database's
   /// existing migrations record the wrong version (see the comment on each migration).
   @Test func recordedVersionsMatchPersistenceSchemaExactly() async throws {
     let db = try TestDatabase.make()
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2])
+    #expect(versions == [1, 2, 3])
     #expect(versions.last == PersistenceSchema.currentVersion)
   }
 
   /// A database created before v2 existed (only the v1 SQL, with the v1 migration's literal row)
-  /// upgrades cleanly to v2 on next open, preserving whatever v1 rows it already had.
-  @Test func upgradesAV1OnlyDatabaseToV2PreservingRows() async throws {
+  /// upgrades cleanly to the current schema on next open, preserving the v1 rows it had.
+  @Test func upgradesAV1OnlyDatabaseToTheCurrentSchemaPreservingRows() async throws {
     let path = FileManager.default.temporaryDirectory
       .appendingPathComponent("runnervm-migration-v1-upgrade-\(UUID().uuidString).sqlite")
     defer {
@@ -78,11 +78,125 @@ import Testing
         try String.fetchSet(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table'")
       )
     }
-    #expect(versions == [1, 2])
+    #expect(versions == [1, 2, 3])
     #expect(hosts == ["test-host"])
     #expect(tableNames.contains("image_builds"))
     #expect(tableNames.contains("image_aliases"))
   }
+
+  /// A database a pre-v3 build left at v2 upgrades in place: `ALTER TABLE ... ADD COLUMN` keeps
+  /// every `image_builds` row it already had, and the new `recovery_since` reads back NULL, which
+  /// is exactly "this build is not pending recovery".
+  @Test func upgradesAV2DatabaseToV3PreservingImageBuildRows() async throws {
+    let path = FileManager.default.temporaryDirectory
+      .appendingPathComponent("runnervm-migration-v2-upgrade-\(UUID().uuidString).sqlite")
+    defer {
+      for suffix in ["", "-wal", "-shm", "-journal"] {
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: path.path + suffix))
+      }
+    }
+
+    var config = GRDB.Configuration()
+    config.foreignKeysEnabled = true
+    let pool = try DatabasePool(path: path.path, configuration: config)
+    try Self.migrateToV2(pool)
+    try pool.close()
+
+    let upgraded = try RunnerDatabase.open(at: path)
+    let (versions, builds, notPending, columns) = try await upgraded.read { db in
+      (
+        try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version"),
+        try String.fetchAll(db, sql: "SELECT id FROM image_builds"),
+        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM image_builds WHERE recovery_since IS NULL"),
+        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('image_builds')")
+      )
+    }
+    #expect(versions == [1, 2, 3])
+    #expect(builds == ["build-from-v2"])
+    #expect(columns.contains("recovery_since"))
+    #expect(notPending == 1)
+  }
+
+  /// Runs "v1" and "v2" under production's own migration names, so reopening the file with
+  /// `RunnerDatabase.open` runs only "v3" -- the shape a real pre-v3 daemon left behind.
+  private static func migrateToV2(_ pool: DatabasePool) throws {
+    var migrator = DatabaseMigrator()
+    migrator.eraseDatabaseOnSchemaChange = false
+    migrator.registerMigration("v1") { db in
+      try db.execute(sql: v1OnlySQL)
+      try db.execute(sql: "INSERT INTO host (id, mode, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                     arguments: ["test-host", "normal", DatabaseDate.now, DatabaseDate.now])
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        arguments: [1, DatabaseDate.now])
+    }
+    migrator.registerMigration("v2") { db in
+      try db.execute(sql: v2OnlySQL)
+      try db.execute(sql: insertV2BuildSQL, arguments: ["build-from-v2", "test-host", "provisioning"])
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        arguments: [2, DatabaseDate.now])
+    }
+    try migrator.migrate(pool)
+  }
+
+  /// Every `NOT NULL` column v2's `image_builds` declares, and nothing v3 adds.
+  private static let insertV2BuildSQL = """
+    INSERT INTO image_builds (
+      id, host_id, state, recipe_path, recipe_sha256, context_path, args_json, from_kind,
+      from_reference, cpu_count, memory_bytes, disk_bytes, disk_reservation_bytes, timeout_ms,
+      build_path, log_path, total_steps, current_step, created_at, updated_at)
+    VALUES (?, ?, ?, '/tmp/Runnerfile', 'sha256:0', '/tmp', '{}', 'image', 'test-linux',
+      2, 1073741824, 67108864, 67108864, 60000, '/tmp/build', '/tmp/build.log', 0, 0,
+      datetime('now'), datetime('now'))
+    """
+
+  /// Verbatim `docs/db_schema_v2.sql`, duplicated for the same reason `v1OnlySQL` is: this test
+  /// must exercise what an *actual* pre-v3 database file looked like.
+  private static let v2OnlySQL = """
+    CREATE TABLE image_builds (
+      id TEXT PRIMARY KEY,
+      host_id TEXT NOT NULL REFERENCES host(id),
+      name TEXT,
+      state TEXT NOT NULL CHECK (state IN ('queued','resolving','staging','booting','provisioning','sealing','succeeded','failed','cancelled')),
+      operation_id TEXT REFERENCES operations(id),
+      push_reference TEXT,
+      push_operation_id TEXT REFERENCES operations(id),
+      recipe_path TEXT NOT NULL,
+      recipe_sha256 TEXT NOT NULL,
+      context_path TEXT NOT NULL,
+      context_sha256 TEXT,
+      args_json TEXT NOT NULL DEFAULT '{}',
+      from_kind TEXT NOT NULL CHECK (from_kind IN ('image','cloudImage','registry')),
+      from_reference TEXT NOT NULL,
+      base_digest TEXT,
+      base_sha256 TEXT,
+      cpu_count INTEGER NOT NULL,
+      memory_bytes INTEGER NOT NULL,
+      disk_bytes INTEGER NOT NULL,
+      disk_reservation_bytes INTEGER NOT NULL,
+      timeout_ms INTEGER NOT NULL,
+      build_path TEXT NOT NULL,
+      log_path TEXT NOT NULL,
+      worker_pid INTEGER,
+      worker_nonce TEXT,
+      total_steps INTEGER NOT NULL DEFAULT 0,
+      current_step INTEGER NOT NULL DEFAULT 0,
+      current_instruction TEXT,
+      image_digest TEXT,
+      failure_code TEXT,
+      failure_message TEXT,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      updated_at TEXT NOT NULL);
+    CREATE INDEX image_builds_state ON image_builds(state);
+    CREATE INDEX image_builds_created ON image_builds(created_at);
+    CREATE TABLE image_aliases (
+      name TEXT PRIMARY KEY,
+      digest TEXT NOT NULL REFERENCES images(digest),
+      updated_at TEXT NOT NULL);
+    """
 
   /// Verbatim `docs/db_schema_v1.sql`, duplicated here (rather than reused from `Migrator`) so this
   /// test exercises what an *actual* pre-v2 database file looked like, independent of whatever the
@@ -204,6 +318,6 @@ import Testing
     let versions = try await second.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2])
+    #expect(versions == [1, 2, 3])
   }
 }

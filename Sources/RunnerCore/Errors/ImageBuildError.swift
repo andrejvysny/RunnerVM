@@ -23,6 +23,12 @@ public enum ImageBuildError: RunnerError {
   case sealFailed(reason: String)
   case cancelled
   case interrupted
+  /// Restart recovery could not prove the builder worker dead before the recovery deadline, so the
+  /// row was abandoned: the pin is released but the build directory is left to the live process.
+  case recoveryAbandoned
+  /// A `build cancel` on a row this daemon does not own, whose builder worker could not be proven
+  /// dead. Releasing anything here would race a VM that is still writing (B8).
+  case buildWorkerUnverifiable(buildId: String, reason: String)
   case notFound(id: String)
   case nameRequired
   case atMaxConcurrent(limit: Int)
@@ -58,6 +64,8 @@ public enum ImageBuildError: RunnerError {
     case .sealFailed: "BUILD_SEAL_FAILED"
     case .cancelled: "BUILD_CANCELLED"
     case .interrupted: "BUILD_INTERRUPTED"
+    case .recoveryAbandoned: "BUILD_RECOVERY_ABANDONED"
+    case .buildWorkerUnverifiable: "BUILD_WORKER_UNVERIFIABLE"
     case .notFound: "BUILD_NOT_FOUND"
     case .nameRequired: "BUILD_NAME_REQUIRED"
     case .atMaxConcurrent: "BUILD_AT_MAX_CONCURRENT"
@@ -99,6 +107,12 @@ public enum ImageBuildError: RunnerError {
     case let .sealFailed(reason): "sealing the built image failed: \(reason)"
     case .cancelled: "build was cancelled"
     case .interrupted: "build was interrupted (daemon restarted mid-build)"
+    case .recoveryAbandoned:
+      "build abandoned: its builder worker could not be proven dead before the recovery deadline; "
+        + "the build directory was left in place for the live process"
+    case let .buildWorkerUnverifiable(buildId, reason):
+      "build \(buildId) still has a builder worker that cannot be proven dead (\(reason)); "
+        + "nothing was released -- check `runnerd`'s log and the build's vmworker before retrying"
     case let .notFound(id): "build \(id) not found"
     case .nameRequired: "a build name is required to push or alias the result"
     case let .atMaxConcurrent(limit): "at most \(limit) build(s) may run concurrently"
@@ -118,7 +132,7 @@ public enum ImageBuildError: RunnerError {
   public var retryable: Bool {
     switch self {
     case .agentUnreachable, .probeFailed, .atMaxConcurrent, .insufficientDisk, .timeout,
-         .stepTimeout, .interrupted:
+         .stepTimeout, .interrupted, .recoveryAbandoned, .buildWorkerUnverifiable:
       true
     case .recipeUnreadable, .contextUnreadable, .contextTooLarge, .contextUnsafeEntry,
          .baseUnverified, .baseDigestMismatch, .baseNotPartitioned, .baseFormatUnsupported,

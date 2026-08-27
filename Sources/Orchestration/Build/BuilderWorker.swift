@@ -199,15 +199,22 @@ public actor BuilderWorker {
     return ((try? WorkerLock.holderPID(at: lock)) ?? nil) == nil
   }
 
-  /// Restart recovery (B8): shut down a worker left behind by a previous daemon, but only after
-  /// `worker.hello` proves it is *this* build's worker. An unverifiable holder is logged and left
-  /// running, and its directory is left alone -- deleting files under an unknown live process is
-  /// exactly the failure mode fencing exists to prevent.
-  public static func terminateOrphan(
+  /// Restart recovery (B8): find out what happened to a worker left behind by a previous daemon,
+  /// without ever signalling it. The released `fcntl` lock is the only proof of death this daemon
+  /// accepts -- a pid can be recycled, a lock cannot -- so a holder whose identity `worker.hello`
+  /// cannot establish is logged, left running, and reported as `.unverifiable`: deleting files
+  /// under an unknown live process is exactly the failure mode fencing exists to prevent.
+  ///
+  /// `exitWait` is short by design. This runs inside the serial reconcile tick, and a worker that
+  /// has not released its lock within it is handled by keeping the build pending, never by
+  /// blocking the tick until it does.
+  public static func probeOrphan(
     lock: URL, socket: URL, expectedBuildId: ImageBuildID, expectedNonce: String?,
-    gracefulTimeoutMs: Int64 = 30_000, logger: Logger
-  ) async -> Bool {
-    guard ((try? WorkerLock.holderPID(at: lock)) ?? nil) != nil else { return true }
+    gracefulTimeoutMs: Int64 = 30_000,
+    exitWait: (interval: Duration, attempts: Int) = (.milliseconds(100), 50),
+    logger: Logger
+  ) async -> OrphanVerdict {
+    guard ((try? WorkerLock.holderPID(at: lock)) ?? nil) != nil else { return .noHolder }
     guard FileManager.default.fileExists(atPath: socket.path(percentEncoded: false)),
           let client = try? await RPCClient.connect(protocol: .worker, socketPath: socket),
           let hello = try? await hello(client: client, deadline: .seconds(10))
@@ -215,7 +222,7 @@ public actor BuilderWorker {
       logger.warning(
         "build worker identity could not be established; leaving it alone",
         metadata: ["build_id": .string(expectedBuildId.rawValue)])
-      return false
+      return .unverifiable(reason: "no verifiable socket")
     }
     defer { Task { await client.close() } }
     guard hello.instanceId.rawValue == expectedBuildId.rawValue,
@@ -227,13 +234,15 @@ public actor BuilderWorker {
           "build_id": .string(expectedBuildId.rawValue),
           "reported": .string(hello.instanceId.rawValue),
         ])
-      return false
+      return .unverifiable(reason: "foreign worker")
     }
     let request = ShutdownRequest(reason: .stop, gracefulTimeoutMs: gracefulTimeoutMs)
     _ = try? await client.call(
       method: WorkerMethod.shutdown.rawValue, payload: try? WorkerCoding.payload(request),
       deadline: .seconds(30))
-    return await waitForExit(lock: lock)
+    let released = await waitForExit(
+      lock: lock, interval: exitWait.interval, attempts: exitWait.attempts)
+    return released ? .exited : .stillRunning(shutdownSent: true)
   }
 
   private static func hello(client: RPCClient, deadline: Duration) async throws -> HelloResponse {
@@ -255,5 +264,42 @@ public actor BuilderWorker {
 
   static func randomNonce() -> String {
     (0..<16).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
+  }
+}
+
+/// What `BuilderWorker.probeOrphan` learned about a builder worker nobody in this process owns.
+///
+/// Only `.noHolder` and `.exited` are proof the VM is gone. Everything the build reserved -- host
+/// capacity, the base-image pin, the build directory -- stays committed for the other two, because
+/// releasing any of it while a vmworker may still be writing is how a torn image gets published.
+public enum OrphanVerdict: Sendable, Equatable {
+  /// Nobody holds the build's `worker.lock`: the worker is gone.
+  case noHolder
+  /// The worker was verified, asked to shut down, and released its lock within the bounded wait.
+  case exited
+  /// The lock is still held after the bounded wait. `shutdownSent` records whether this daemon
+  /// managed to ask it to stop -- it never signals the process either way.
+  case stillRunning(shutdownSent: Bool)
+  /// A lock holder that could not be tied to this build: no socket to speak to, or a `worker.hello`
+  /// naming another build or incarnation.
+  case unverifiable(reason: String)
+
+  /// The kernel released the lock, which is the only death proof runnerd accepts.
+  public var isProvenDead: Bool {
+    switch self {
+    case .noHolder, .exited: true
+    case .stillRunning, .unverifiable: false
+    }
+  }
+
+  /// One short phrase for the pending log line and the `build cancel` refusal.
+  public var reason: String {
+    switch self {
+    case .noHolder: "no lock holder"
+    case .exited: "exited after shutdown"
+    case let .stillRunning(shutdownSent):
+      shutdownSent ? "still holding its lock after shutdown" : "still holding its lock"
+    case let .unverifiable(reason): reason
+    }
   }
 }

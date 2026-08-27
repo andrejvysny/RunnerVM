@@ -33,6 +33,7 @@ public enum RunnerVMMetrics {
   public static let imageBuildsTotal = "runnervm_image_builds_total"
   public static let imageBuildSeconds = "runnervm_image_build_seconds"
   public static let imageBuildStepSeconds = "runnervm_image_build_step_seconds"
+  public static let imageBuildsRecoveryPending = "runnervm_image_builds_recovery_pending"
 
   // Image runner-software freshness (spec §53).
   public static let imageRunnerVersionHealth = "runnervm_image_runner_version_health"
@@ -143,6 +144,10 @@ public enum RunnerVMMetrics {
     MetricDefinition(
       name: imageBuildStepSeconds, kind: .histogram,
       help: "Seconds one image build step took, by recipe instruction."),
+    MetricDefinition(
+      name: imageBuildsRecoveryPending, kind: .gauge,
+      help: "Image builds left behind by a restart whose builder worker could not be proven dead. "
+        + "Each one still holds its host capacity, base-image pin and directory."),
     MetricDefinition(
       name: imageRunnerVersionHealth, kind: .gauge,
       help: "1 for the runner-software freshness bucket each local image currently falls in: "

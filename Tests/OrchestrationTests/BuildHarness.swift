@@ -42,7 +42,12 @@ struct BuildHarness {
     return configuration
   }
 
-  init(configuration: RunnerConfiguration = BuildHarness.configuration()) async throws {
+  /// `customize` gets the last word on `Tuning`, so a test can shorten a bounded wait or freeze
+  /// the clock without every other harness knob having to be restated.
+  init(
+    configuration: RunnerConfiguration = BuildHarness.configuration(),
+    customize: ((inout ImageBuilder.Tuning) -> Void)? = nil
+  ) async throws {
     base = try await M2Harness(configuration: configuration)
     buildRows = GRDBImageBuildRepository(db: base.database)
     operations = GRDBOperationRepository(db: base.database)
@@ -68,6 +73,8 @@ struct BuildHarness {
     tuning.processRunner = processes
     tuning.baseImages = baseImages
     tuning.releases = releases
+    tuning.recoveryExitWait = (.milliseconds(20), 100)
+    customize?(&tuning)
 
     builder = ImageBuilder(
       paths: base.paths, hostId: base.hostId, builds: buildRows, imageRows: base.imageRows,
@@ -181,7 +188,7 @@ struct BuildHarness {
   @discardableResult
   func seedBuildRow(
     state: ImageBuildState, name: String? = nil, imageDigest: ImageDigest? = nil,
-    withDirectory: Bool = true
+    withDirectory: Bool = true, workerNonce: String? = nil
   ) async throws -> ImageBuildID {
     let id = ImageBuildID.generate()
     if withDirectory {
@@ -195,7 +202,7 @@ struct BuildHarness {
         fromKind: .image, fromReference: M2Harness.linuxImageName, cpuCount: 2,
         memoryBytes: 1 << 30, diskBytes: 64 << 20, diskReservationBytes: 64 << 20,
         timeoutMs: 60_000, buildPath: paths.buildDir(id).path(percentEncoded: false),
-        logPath: paths.buildLogFile(id).path(percentEncoded: false),
+        logPath: paths.buildLogFile(id).path(percentEncoded: false), workerNonce: workerNonce,
         imageDigest: imageDigest, createdAt: .now, updatedAt: .now))
     return id
   }
@@ -209,9 +216,10 @@ struct BuildHarness {
 /// cancelled and awaited before the temp tree goes away, so nothing is still writing into it.
 func withBuildHarness(
   configuration: RunnerConfiguration = BuildHarness.configuration(),
+  customize: ((inout ImageBuilder.Tuning) -> Void)? = nil,
   _ body: (BuildHarness) async throws -> Void
 ) async throws {
-  let harness = try await BuildHarness(configuration: configuration)
+  let harness = try await BuildHarness(configuration: configuration, customize: customize)
   do {
     try await body(harness)
   } catch {

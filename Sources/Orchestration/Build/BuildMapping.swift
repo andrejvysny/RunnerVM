@@ -41,6 +41,7 @@ enum BuildMapping {
       createdAt: RFC3339.string(from: record.createdAt.date),
       startedAt: record.startedAt.map { RFC3339.string(from: $0.date) },
       finishedAt: record.finishedAt.map { RFC3339.string(from: $0.date) },
+      recoverySince: record.recoverySince.map { RFC3339.string(from: $0.date) },
       updatedAt: RFC3339.string(from: record.updatedAt.date))
   }
 

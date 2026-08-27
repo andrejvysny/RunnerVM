@@ -155,8 +155,27 @@ behind it (a crash, or a `start` whose task never began) and:
   before the crash, the **registration is replayed** — the build is marked `succeeded` without
   re-running anything (the guest disk itself is gone, so re-sealing is impossible, but the image
   content it already produced is not lost);
-* otherwise the build is marked `failed` with `BUILD_INTERRUPTED`, its base-image pin is released,
-  and its worker/directory are cleaned up.
+* otherwise, **and only once the builder VM is proven dead**, the build is marked `failed` with
+  `BUILD_INTERRUPTED`, its base-image pin is released, and its worker/directory are cleaned up.
+
+Proof of death is a released `worker.lock`, never a pid: recovery asks the lock's holder to shut
+down over `worker.hello`/`worker.shutdown` (after verifying it really is *this* build's worker) and
+waits a few seconds for the kernel to drop the lock. A holder that answers for another build, has
+no socket to answer on, or is still holding the lock afterwards leaves the build **pending**:
+`recovery_since` is stamped on the row, one `image build recovery pending` warning is logged, and
+the build keeps its state, its host capacity, its base-image pin and its directory — because
+another VM must not be admitted against capacity a live one is using, and its disk must not be
+deleted underneath it. `runnerctl build show` prints `Recovery pending since`, and
+`runnervm_image_builds_recovery_pending` counts them.
+
+Pending is bounded. After `recoveryDeadline` (15 min, comfortably past vmworker's own ~630 s
+lease + orphan-idle self-termination) the row is abandoned with `BUILD_RECOVERY_ABANDONED` and its
+pin released, so a wedged worker cannot hold a build slot forever. The directory still stays put:
+whatever holds the lock may still be writing into it, and the orphan-directory sweep removes it
+once the row is purged and the lock is free.
+
+`build cancel` on such a row follows the same rule — it answers `BUILD_WORKER_UNVERIFIABLE` and
+releases nothing rather than pretending the VM is gone.
 
 Either way, `system.drain`/`system.shutdown` treat a running build exactly like a running instance
 (`HostModeControl.activeWork()`): a drain waits for it to finish before advertising a clean stop.

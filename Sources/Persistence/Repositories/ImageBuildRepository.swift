@@ -32,6 +32,11 @@ public protocol ImageBuildRepository: Sendable {
 
   func setWorker(id: ImageBuildID, pid: Int32?, nonce: String?) async throws
   func setImageDigest(id: ImageBuildID, _ digest: ImageDigest) async throws
+
+  /// Stamps (or clears, with `nil`) the instant restart recovery first found this build's builder
+  /// worker alive-or-unverifiable. Deliberately not part of `transition`: a pending build keeps
+  /// its state, so there is no edge to ride along with.
+  func setRecoverySince(id: ImageBuildID, _ since: DatabaseDate?) async throws
   func setPushOperation(id: ImageBuildID, _ operationId: OperationID) async throws
 
   /// Hard-deletes terminal build rows older than `olderThan`. Returns the number of rows removed.
@@ -127,6 +132,16 @@ public final class GRDBImageBuildRepository: ImageBuildRepository, Sendable {
         throw PersistenceError.notFound(entity: "image_builds", id: id.rawValue)
       }
       record.imageDigest = digest
+      try DatabaseErrorMapper.run(entity: "image_builds") { try record.update(db) }
+    }
+  }
+
+  public func setRecoverySince(id: ImageBuildID, _ since: DatabaseDate?) async throws {
+    try await db.write { db in
+      guard var record = try ImageBuildRecord.fetchOne(db, key: id) else {
+        throw PersistenceError.notFound(entity: "image_builds", id: id.rawValue)
+      }
+      record.recoverySince = since
       try DatabaseErrorMapper.run(entity: "image_builds") { try record.update(db) }
     }
   }

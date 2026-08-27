@@ -193,7 +193,9 @@ database already migrated to schema v2 (the in-daemon image builder's `image_bui
 tables, first shipped alongside `runnerctl image build`) refuses to open under an older runnerd
 binary whose own `currentSchemaVersion` is still 1 (`DB_SCHEMA_VERSION_UNSUPPORTED`). Once step 3
 above has run with a v2-or-later `runnerd`, rolling back to a pre-image-builder binary on the same
-`<state-dir>` is not supported — restore a database backup taken before the upgrade instead.
+`<state-dir>` is not supported — restore a database backup taken before the upgrade instead. Schema
+v3 (`image_builds.recovery_since`, for builds whose builder VM could not be proven dead) follows the
+same rule; it is a nullable `ADD COLUMN`, so upgrading to it preserves every existing row.
 
 ## Security notes (spec §129)
 

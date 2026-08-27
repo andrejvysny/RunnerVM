@@ -29,6 +29,17 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     public var probeTimeout: Duration = .seconds(300)
     public var workerExitPollInterval: Duration = .milliseconds(100)
     public var workerExitPollAttempts = 600
+    /// How long restart recovery waits for an orphaned builder worker to release its `fcntl` lock
+    /// after asking it to shut down. Far shorter than `workerExitPoll*`: `recover()` runs inside
+    /// the serial reconcile tick, and a worker that outlives this is kept pending, not waited on.
+    public var recoveryExitWait: (interval: Duration, attempts: Int) = (.milliseconds(100), 50)
+    /// How long a build whose builder worker cannot be proven dead may keep its host capacity, its
+    /// base-image pin and its directory before the row is abandoned.
+    ///
+    /// Must exceed the worker lease TTL (30 s) plus vmworker's own `orphanIdleMs` backstop (600 s):
+    /// an orphaned vmworker self-terminates after ~630 s, and this deadline exists only for the
+    /// case where even that did not happen. 15 min leaves margin over it.
+    public var recoveryDeadline: Duration = .seconds(900)
     public var pumpPollInterval: Duration = .milliseconds(200)
     public var worker = BuilderWorkerDefaults()
     /// Assumed size of a cloud base before it has been downloaded, for the disk reservation (N3).
@@ -184,6 +195,10 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
 
   /// Cancels the owned `Task`; the stage ladder unwinds through the same teardown a failure takes,
   /// so the VM, the pin and the directory are cleaned up exactly once.
+  ///
+  /// A row this process does not own is only cancellable once its builder worker is proven dead;
+  /// otherwise it answers `BUILD_WORKER_UNVERIFIABLE` rather than silently freeing capacity a live
+  /// VM is still using.
   public func cancel(id: String) async throws -> BuildCancelResponse {
     let buildId = ImageBuildID(rawValue: id)
     let record = try await require(buildId)
@@ -194,9 +209,17 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
       task.cancel()
       return BuildCancelResponse(buildId: id, state: record.state.rawValue)
     }
-    // No owning task: a row this process never started (or already forgot). Move it itself, or
-    // nothing ever would.
+    // No owning task: a row this process never started (or already forgot). Nothing else will ever
+    // move it -- but nothing may be released either until the builder VM behind it is proven gone,
+    // so this takes exactly the same verdict restart recovery does.
+    let verdict = await probeOrphan(record)
+    guard verdict.isProvenDead else {
+      throw ImageBuildError.buildWorkerUnverifiable(buildId: id, reason: verdict.reason)
+    }
+    discard(record.id)
+    try await images.release(build: record.id)
     try await terminate(record, state: .cancelled, error: ImageBuildError.cancelled)
+    try? await builds.setRecoverySince(id: record.id, nil)
     return BuildCancelResponse(buildId: id, state: ImageBuildState.cancelled.rawValue)
   }
 

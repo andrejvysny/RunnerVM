@@ -124,7 +124,7 @@ struct ImageBuilderAdmissionTests {
       try await harness.base.imageRows.pin(
         ownerType: .build, ownerId: id.rawValue, digest: parent.record.digest)
 
-      #expect(await harness.builder.recover() == 1)
+      #expect(await harness.builder.recover().terminalized == 1)
 
       let row = try await harness.row(id.rawValue)
       #expect(row.state == .failed)
@@ -151,7 +151,7 @@ struct ImageBuilderAdmissionTests {
       let id = try await harness.seedBuildRow(
         state: .sealing, name: "replayed", imageDigest: sealed.digest)
 
-      #expect(await harness.builder.recover() == 1)
+      #expect(await harness.builder.recover().terminalized == 1)
 
       let row = try await harness.row(id.rawValue)
       #expect(row.state == .succeeded)

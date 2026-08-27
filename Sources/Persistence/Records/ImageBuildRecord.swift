@@ -1,7 +1,8 @@
 import GRDB
 import RunnerCore
 
-/// Mirrors the `image_builds` table (`docs/db_schema_v2.sql`).
+/// Mirrors the `image_builds` table (`docs/db_schema_v2.sql`, plus the `recovery_since`
+/// column `docs/db_schema_v3.sql` adds).
 public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Hashable {
   public var id: ImageBuildID
   public var hostId: HostID
@@ -38,6 +39,10 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
   public var createdAt: DatabaseDate
   public var startedAt: DatabaseDate?
   public var finishedAt: DatabaseDate?
+  /// When restart recovery first found this build's builder worker alive-or-unverifiable. `nil`
+  /// means "not pending": the build is owned by a live task, or its worker was proven dead. It is
+  /// what bounds how long a build nobody can prove dead keeps its capacity, pin and directory.
+  public var recoverySince: DatabaseDate?
   public var updatedAt: DatabaseDate
 
   public init(
@@ -50,7 +55,8 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     logPath: String, workerPid: Int32? = nil, workerNonce: String? = nil, totalSteps: Int = 0,
     currentStep: Int = 0, currentInstruction: String? = nil, imageDigest: ImageDigest? = nil,
     failureCode: String? = nil, failureMessage: String? = nil, createdAt: DatabaseDate,
-    startedAt: DatabaseDate? = nil, finishedAt: DatabaseDate? = nil, updatedAt: DatabaseDate
+    startedAt: DatabaseDate? = nil, finishedAt: DatabaseDate? = nil,
+    recoverySince: DatabaseDate? = nil, updatedAt: DatabaseDate
   ) {
     self.id = id
     self.hostId = hostId
@@ -86,6 +92,7 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     self.createdAt = createdAt
     self.startedAt = startedAt
     self.finishedAt = finishedAt
+    self.recoverySince = recoverySince
     self.updatedAt = updatedAt
   }
 
@@ -124,6 +131,7 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     case createdAt = "created_at"
     case startedAt = "started_at"
     case finishedAt = "finished_at"
+    case recoverySince = "recovery_since"
     case updatedAt = "updated_at"
   }
 }

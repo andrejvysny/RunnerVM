@@ -115,6 +115,10 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
   public var createdAt: String
   public var startedAt: String?
   public var finishedAt: String?
+  /// RFC-3339 instant restart recovery first found this build's builder worker alive-or-
+  /// unverifiable; `nil` when the build is not pending. While set, the build still holds its host
+  /// capacity, its base-image pin and its directory. Absent on daemons predating schema v3.
+  public var recoverySince: String?
   public var updatedAt: String
 
   public init(
@@ -126,7 +130,8 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     buildPath: String, logPath: String, workerPid: Int32? = nil, totalSteps: Int = 0,
     currentStep: Int = 0, currentInstruction: String? = nil, imageDigest: String? = nil,
     failureCode: String? = nil, failureMessage: String? = nil, createdAt: String,
-    startedAt: String? = nil, finishedAt: String? = nil, updatedAt: String
+    startedAt: String? = nil, finishedAt: String? = nil, recoverySince: String? = nil,
+    updatedAt: String
   ) {
     self.buildId = buildId
     self.name = name
@@ -159,6 +164,7 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     self.createdAt = createdAt
     self.startedAt = startedAt
     self.finishedAt = finishedAt
+    self.recoverySince = recoverySince
     self.updatedAt = updatedAt
   }
 }

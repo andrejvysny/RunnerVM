@@ -107,7 +107,7 @@ extension BuildCommand {
   }
 
   static func fields(_ build: BuildInfoDTO) -> [(String, String)] {
-    [
+    var rows: [(String, String)] = [
       ("id", build.buildId),
       ("name", Format.optional(build.name)),
       ("state", build.state),
@@ -136,6 +136,12 @@ extension BuildCommand {
       ("finished", Format.optional(build.finishedAt)),
       ("updated", build.updatedAt),
     ]
+    // Only when set, so its presence is the signal: this build's VM could not be proven dead, and
+    // it is still holding host capacity because of it.
+    if let since = build.recoverySince {
+      rows.append(("Recovery pending since", since))
+    }
+    return rows
   }
 
   private static func step(_ build: BuildInfoDTO) -> String {
