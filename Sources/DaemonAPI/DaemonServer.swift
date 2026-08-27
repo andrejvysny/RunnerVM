@@ -89,6 +89,7 @@ public actor DaemonServer {
     await request(.authLogin) { try await service.authLogin($0) }
     await request(.debugRunJIT) { try await service.debugRunJIT($0) }
     await request(.debugDemandSet) { try await service.debugDemandSet($0) }
+    await request(.debugScaleSetReconnect) { try await service.debugScaleSetReconnect($0) }
     await registerExec()
   }
 

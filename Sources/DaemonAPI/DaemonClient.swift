@@ -247,6 +247,10 @@ public actor DaemonClient {
     try await call(.debugRunJIT, DebugRunJITRequest(profile: profile))
   }
 
+  public func debugScaleSetReconnect(profile: String) async throws -> DebugScaleSetReconnectResponse {
+    try await call(.debugScaleSetReconnect, DebugScaleSetReconnectRequest(profile: profile))
+  }
+
   /// Escape hatch for catalogued methods with no typed wrapper yet; answers NOT_IMPLEMENTED.
   public func callRaw(_ method: DaemonMethod, payload: JSONValue? = nil) async throws -> JSONValue {
     do {

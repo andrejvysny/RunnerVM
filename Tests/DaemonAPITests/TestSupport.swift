@@ -282,6 +282,17 @@ actor FakeDaemonService: DaemonService {
     return DebugDemandSetResponse(profile: request.profile, assignedJobs: request.assignedJobs)
   }
 
+  var lastReconnect: DebugScaleSetReconnectRequest?
+
+  func reconnectRequest() -> DebugScaleSetReconnectRequest? { lastReconnect }
+
+  func debugScaleSetReconnect(
+    _ request: DebugScaleSetReconnectRequest
+  ) async throws -> DebugScaleSetReconnectResponse {
+    lastReconnect = request
+    return DebugScaleSetReconnectResponse(profile: request.profile)
+  }
+
   func instanceList() async throws -> InstanceListResponse {
     InstanceListResponse(instances: instances)
   }

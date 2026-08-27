@@ -204,7 +204,14 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
 - [ ] WP6 ARG = non-secret docs/help/refusal; `docs/design/build-secrets.md`
 - [ ] WP11 clone timeout deprecation warning, cancellation-aware BuilderWorker loops, GitHub request metric, provenance audit
 - [ ] WP8 builder fault-injection harness (in-process freeze + live kill -9 script)
-- [ ] WP7 builder→GitHub→GHCR live E2E script + run
-- [ ] WP10 live GitHub lifecycle matrix (new scenarios, fake-based API fault tests) + run
+- [ ] WP7 builder→GitHub→GHCR live E2E script + run — scripting done (`scripts/live-builder-e2e.sh`,
+  factored `scripts/lib/live-common.sh` shared with `live-github-e2e.sh`); live run still pending
+- [ ] WP10 live GitHub lifecycle matrix (new scenarios, fake-based API fault tests) + run —
+  scripting/tests done: `live-github-e2e.sh` scenarios `restart-while-runner-starts`,
+  `restart-during-job-sigkill` (`--kill-cmd`), `scaleset-reconnect` (new `debug.scaleSetReconnect`
+  RPC); `assert_no_leftovers` now also converges on `runnerctl status` capacity; 4 new
+  `Tests/OrchestrationTests/GitHubFaultTests.swift` fault-injection tests (getMessage
+  timeout/rate-limit, scale-set JIT 5xx, guest-startup failure). Live run against a real org/repo
+  and hardware SIGKILL still pending.
 - [ ] WP9 doctor/qualify checks + LaunchDaemon qualification on dev Mac (reboots by user)
 - [ ] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md

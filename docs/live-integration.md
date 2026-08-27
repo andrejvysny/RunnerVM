@@ -9,6 +9,11 @@ setup and scenario reference for running it.
 Companion files:
 
 - [`scripts/live-github-e2e.sh`](../scripts/live-github-e2e.sh) — the driver (`--help` for flags).
+- [`scripts/live-builder-e2e.sh`](../scripts/live-builder-e2e.sh) — a separate, single-pipeline
+  driver for the builder → GitHub → GHCR path (image build, a real job against it, then a push /
+  delete / pull-by-digest / redispatch round trip). See "Live builder integration testing" below.
+- [`scripts/lib/live-common.sh`](../scripts/lib/live-common.sh) — logging, `runnerctl` wrapper,
+  polling and JSON-report helpers shared by both drivers.
 - [`docs/e2e/test-repo-workflow.yml`](e2e/test-repo-workflow.yml) — copy to the test repo as
   `.github/workflows/e2e.yml`.
 - [`.github/workflows/github-integration.yml`](../.github/workflows/github-integration.yml) —
@@ -110,14 +115,29 @@ Run `success` alone first on a fresh setup — it is the cheapest signal that th
 | `cancel-before-assignment` | Draining the host, dispatching, then cancelling while the run is still queued leaves no VM or runner session behind. | 1-2 min |
 | `cancel-during-job` | Cancelling a `long` job after it reaches `jobRunning` tears the VM and runner session down. | 1-3 min |
 | `restart-while-booting` | Restarting `runnerd` while an instance is `startingWorker`/`startingVM`/`waitingForAgent` does not stop the job from completing (spike S2 already proved the worker survives a daemon restart; this proves the job-level path does too). | 2-6 min |
+| `restart-while-runner-starts` | Restarting `runnerd` while the runner is being configured/started for the job (`configuringRunner`/`runnerStarting`, later than `restart-while-booting`'s window, earlier than `restart-during-job`'s) does not stop the job from completing, and no duplicate runner session appears for it. | 2-6 min |
 | `restart-during-job` | Same, but the restart happens after the runner reaches `jobRunning`: the job still completes and no duplicate runner session appears for it. | 2-6 min |
+| `restart-during-job-sigkill` | Same as `restart-during-job`, but `runnerd` is SIGKILLed instead of restarted gracefully. Asserts the vmworker/VM are left completely untouched (its `workerPid` is unchanged), the GitHub run shows exactly one attempt and one job (no GitHub-side retry masked a RunnerVM-side duplicate), and the runner registration/VM/host capacity all converge afterward. Own timeouts (`RUNNERVM_E2E_SIGKILL_TIMEOUT`, default 240s) — an unclean death has strictly more to recover than a graceful restart. | 2-8 min |
 | `redelivery` | Best-effort (see below): restarting `runnerd` immediately after dispatch does not produce a second VM/runner for the same job. | 1-3 min |
+| `scaleset-reconnect` | Forces the scale set's message session to drop and reconnect mid-job via the debug RPC `debug.scaleSetReconnect` (`Proto/daemon_api.md`); the job still completes exactly once on a new session generation, and no duplicate VM appears. | 1-4 min |
 | `long-job` | A job that sleeps `--long-minutes` (default 65) actually runs that long without the VM being torn down partway through, and completes successfully. | `--long-minutes` + ~15 min |
 | `concurrent` | `--concurrency` (default 4) `quick` jobs dispatched together never push the peak VM count for the profile above its advertised capacity. | 2-10 min |
 | `queue-overflow` | 2x the advertised capacity dispatched together: GitHub never assigns more than the advertised number at once (`X-ScaleSetMaxCapacity` honoured), and everything eventually completes. | 5-20 min |
 
 Every scenario, on failure, leaves whatever GitHub/VM state it was in — inspect with
 `runnerctl vm list`, `runnerctl runner list`, `gh run list -R <repo>` before rerunning.
+
+`restart-during-job-sigkill` needs a way to actually deliver the SIGKILL: by default the script
+resolves `runnerd`'s pid from `runnerctl status`'s `daemon.pid`, falling back to `pgrep -f
+runnerd`, and signals it directly, which only works when the script runs on the same host as
+`runnerd` under a user allowed to signal it. `--kill-cmd '<shell command>'` overrides pid discovery
+entirely (mirroring `--restart-cmd`) for a remote or sandboxed setup; it always runs before the
+normal restart step, never instead of it.
+
+Every scenario also compares `runnerctl status`'s per-profile `busy`/`idle`/`demand`/`starting`
+against a baseline captured at the scenario's own start, as part of its normal leftover check —
+not just that the VM/session lists emptied out, but that the daemon's own capacity accounting
+actually came back to where it was.
 
 ## Reading the report
 
@@ -158,17 +178,21 @@ report when filing a follow-up.
   and can only assert the eventual outcome (one VM, job still completes), not that a redelivery
   actually happened. Treat a `pass` here as "no observed duplicate," not "redelivery was
   exercised."
-- **`restart-while-booting` can race a warm pool.** If the profile's `warmPool.minIdle` keeps an
-  idle instance around, the dispatched job may be served by that instance instead of a freshly
-  booting one, and the scenario fails its own precondition (`wait_for_instance_state` times out)
-  without RunnerVM being at fault. Run this scenario against a profile with
-  `warmPool.minIdle: 0`, or accept the occasional false negative.
-- **`restart-during-job`'s duplicate-runner check is a heuristic**, not a real correlation: the
-  daemon has no `scale_set_id`/job-id column on `runner_sessions` (TODO.md M6 follow-up), so the
-  script counts sessions for the profile with a non-null `githubRunnerId` created after the
-  scenario's own dispatch time. It is a reasonable proxy for one scenario running in isolation,
-  not a guarantee under concurrent scenario runs (don't run scenarios in parallel against the
-  same profile).
+- **`restart-while-booting` and `restart-while-runner-starts` can race a warm pool.** If the
+  profile's `warmPool.minIdle` keeps an idle instance around, the dispatched job may be served by
+  that instance instead of a freshly booting one, and the scenario fails its own precondition
+  (`wait_for_instance_state` times out) without RunnerVM being at fault. Run these scenarios
+  against a profile with `warmPool.minIdle: 0`, or accept the occasional false negative.
+- **`restart-during-job`, `restart-while-runner-starts` and `restart-during-job-sigkill`'s
+  duplicate-runner check is a heuristic**, not a real correlation: the daemon has no
+  `scale_set_id`/job-id column on `runner_sessions` (TODO.md M6 follow-up), so the script counts
+  sessions for the profile with a non-null `githubRunnerId` created after the scenario's own
+  dispatch time. It is a reasonable proxy for one scenario running in isolation, not a guarantee
+  under concurrent scenario runs (don't run scenarios in parallel against the same profile).
+- **`restart-during-job-sigkill`'s pid discovery is best-effort off-host.** `runnerctl status`'s
+  `daemon.pid` and the `pgrep -f runnerd` fallback both assume the script runs on the same host as
+  `runnerd`; from a self-hosted Actions job on that same Mac mini (`github-integration.yml`) this
+  is exactly the case, but a driver running elsewhere needs `--kill-cmd`.
 - **GitHub-side leftover checks are best-effort.** `assert_no_leftovers` also queries
   `orgs/<owner>/actions/runners` and `repos/<repo>/actions/runners`, matching runner names by
   the `rvm-<profile-shortName>-` prefix RunnerVM uses
@@ -181,3 +205,53 @@ report when filing a follow-up.
   against `runnerctl image list`'s `canonicalReference`/`name` and `state`; if a profile's
   `image:` is a registry reference that hasn't been pulled locally yet, pull it first
   (`runnerctl image pull <ref>`) — the script will not do this for you.
+
+## Live builder integration testing
+
+`scripts/live-builder-e2e.sh` is a separate driver for the image-builder → GitHub → GHCR path:
+one fixed pipeline rather than `live-github-e2e.sh`'s independently selectable scenarios, since
+each step's output (the built image's name and digest) feeds the next.
+
+```sh
+export RUNNERVM_E2E_OWNER=my-test-org
+export RUNNERVM_E2E_REPO=my-test-org/rvm-e2e
+export RUNNERVM_GITHUB_TOKEN=ghp_xxx
+
+# Prove the control flow first -- no daemon, no PAT validity, no GitHub or registry calls needed:
+scripts/live-builder-e2e.sh --dry-run --recipe images/recipes/ubuntu-24 --profile ubuntu-24 \
+  --registry ghcr.io/my-test-org/runnervm-e2e
+
+# The real run:
+scripts/live-builder-e2e.sh --recipe images/recipes/ubuntu-24 --profile ubuntu-24 \
+  --registry ghcr.io/my-test-org/runnervm-e2e --config path/to/e2e-config.yaml
+
+# Skip the OCI leg (push/delete/pull-by-digest/redispatch) if no registry credentials are set up:
+scripts/live-builder-e2e.sh --recipe images/recipes/ubuntu-24 --profile ubuntu-24 --skip-oci
+```
+
+1. `runnerctl image build <recipe> --name e2e-<timestamp> --wait` builds a real image in-daemon.
+2. `runnerctl image inspect` asserts `guestAgent == true` and captures the digest; the matching
+   `runnerctl build show` record asserts `recipeSHA256` is present (that field lives on the build
+   record, not on the persisted image's own provenance summary).
+3. **Precondition, not an action**: `--profile`'s applied `image:` must already equal the alias
+   just built. The script never edits `runnerd`'s configuration itself — `--config <path>` applies
+   a document you supply (`runnerctl config apply`); without one, the profile must already point
+   at `e2e-<timestamp>`, which nothing before this run could have known in advance, so a first run
+   normally needs `--config`.
+4. Dispatches [`runnervm-selftest.yml`](../.github/workflows/runnervm-selftest.yml) (`profile`
+   input) against the freshly built image, waits for success, and asserts the runner
+   registration/VM/session/capacity all converge back to baseline — the same
+   `assert_no_leftovers`/`capture_capacity_baseline` helpers `live-github-e2e.sh` uses, shared via
+   `scripts/lib/live-common.sh`.
+5. The OCI leg (`--skip-oci` to omit): pushes to `--registry`, deletes the local image, pulls it
+   back by the immutable `@sha256:<digest>` the push reported (never a mutable tag), asserts the
+   round-tripped image matches (same digest, `guestAgent == true`), then dispatches the workflow a
+   second time. **A RunnerVM OCI push/pull does not round-trip the local name alias** — the pulled
+   image is named after the resolved reference, not the alias it had before `image delete`, so the
+   script re-checks (and, with `--config`, re-applies) the profile precondition from step 3 before
+   the second dispatch rather than assuming the same alias still resolves.
+
+Same conventions as `live-github-e2e.sh`: `--json-report` (default
+`<state-dir>/logs/builder-e2e-report-<timestamp>.json`), the report shape, `RUNNERVM_E2E_*`
+timeout overrides (`RUN_TIMEOUT`, `LEFTOVER_TIMEOUT`, `POLL_INTERVAL`), and `RUNNERCTL`/`--socket`
+for the daemon connection.

@@ -38,6 +38,19 @@ extension DaemonServiceImpl {
       profile: request.profile, assignedJobs: max(0, request.assignedJobs))
   }
 
+  func debugScaleSetReconnect(
+    _ request: DebugScaleSetReconnectRequest
+  ) async throws -> DebugScaleSetReconnectResponse {
+    guard let orchestrator else {
+      throw DaemonServiceError.unavailable(reason: "the orchestrator is not running")
+    }
+    let id = try await profileID(named: request.profile)
+    try await orchestrator.forceScaleSetReconnect(profile: id)
+    logger.notice(
+      "scale set reconnect forced", metadata: ["profile": .string(request.profile)])
+    return DebugScaleSetReconnectResponse(profile: request.profile)
+  }
+
   static func summary(_ report: DemandProviderReport, profile: String) -> ScaleSetSummary {
     ScaleSetSummary(
       profile: profile,

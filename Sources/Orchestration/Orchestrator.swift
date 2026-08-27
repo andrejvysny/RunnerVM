@@ -195,6 +195,12 @@ public actor Orchestrator {
     await tick()
   }
 
+  /// `debug.scaleSetReconnect`. Demand itself does not change, so no `tick()` follows — the next
+  /// scheduled or manual one will see whatever the freshly reconnected session reports.
+  public func forceScaleSetReconnect(profile: RunnerProfileID) async throws {
+    try await demand.forceReconnect(profile: profile)
+  }
+
   // MARK: - Events
 
   /// Statistics moved, so the plan may have. Correlation events are recorded but do not schedule:

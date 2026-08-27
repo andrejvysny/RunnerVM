@@ -102,7 +102,7 @@ struct Debug: ParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "debug",
     abstract: "Exercise the runner path without waiting for GitHub demand.",
-    subcommands: [RunJIT.self, Demand.self])
+    subcommands: [RunJIT.self, Demand.self, ScaleSet.self])
 
   @OptionGroup var options: GlobalOptions
 }

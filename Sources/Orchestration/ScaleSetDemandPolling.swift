@@ -156,6 +156,53 @@ extension ScaleSetDemandProvider {
     return acquired
   }
 
+  // MARK: - Forced reconnect (debug.scaleSetReconnect)
+
+  /// Drops the current message session for `profileId` and forces a fresh one on the next poll,
+  /// bumping to a new generation exactly as an unexpected close would (spec §45, §49). Used by the
+  /// live E2E `scaleset-reconnect` scenario to prove the daemon recovers cleanly while a job is
+  /// still queued.
+  ///
+  /// The old poll task is cancelled and awaited rather than left to notice the dropped session on
+  /// its own: `pollLoop` is usually suspended inside `getMessage`, and cancelling the task is what
+  /// interrupts that in-flight call (`ActionsMessageSession.poll` goes through `URLSession`'s async
+  /// API, which observes structured-concurrency cancellation). A cancelled `pollLoop` returns
+  /// immediately without reconnecting, so a fresh task is what actually re-establishes the session.
+  public func forceReconnect(profile profileId: RunnerProfileID) async throws {
+    guard states[profileId] != nil else {
+      throw OrchestrationError.scaleSetNotRegistered(profile: profileId.rawValue)
+    }
+    guard let scope = await currentScope(for: profileId) else {
+      throw OrchestrationError.scaleSetNotRegistered(profile: profileId.rawValue)
+    }
+    if let session = sessions[profileId] {
+      sessions[profileId] = nil
+      try? await session.close()
+    }
+    states[profileId]?.sessionState = "closed"
+    if let task = tasks[profileId] {
+      task.cancel()
+      _ = await task.value
+    }
+    // A `stop()` (or a second, concurrent `forceReconnect`) may have run while the above was
+    // suspended; never resurrect a task for a profile that is no longer tracked.
+    guard running, states[profileId] != nil else { return }
+    tasks[profileId] = Task { [weak self] in await self?.pollLoop(profileId, scope: scope) }
+  }
+
+  /// Re-derives the scope `pollLoop` needs to reopen a session. `ProfileState` does not carry it
+  /// (only `register` sees it, once, at registration time), so a forced reconnect looks it up the
+  /// same way `refresh`/`register` do.
+  private func currentScope(for profileId: RunnerProfileID) async -> GitHubScope? {
+    guard let rows = try? await profiles.list(), let scopeRows = try? await scopes.list(),
+          let row = rows.first(where: { $0.id == profileId })
+    else { return nil }
+    let scopesById = Dictionary(
+      scopeRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    guard let scopeRow = scopesById[row.scopeId] else { return nil }
+    return try? GitHubMapping.scope(scopeRow)
+  }
+
   // MARK: - Replay (spec §49 "recover from a daemon crash")
 
   /// Rebuilds the duplicate-detection set from every inbox row this scale set ever wrote, and

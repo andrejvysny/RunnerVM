@@ -85,6 +85,11 @@ public protocol DaemonService: Sendable {
   func debugRunJIT(_ request: DebugRunJITRequest) async throws -> DebugRunJITResponse
   /// Overrides local demand. Rejected unless the daemon runs the manual demand provider.
   func debugDemandSet(_ request: DebugDemandSetRequest) async throws -> DebugDemandSetResponse
+  /// Drops the profile's message session and forces a fresh one. Rejected unless the profile's
+  /// demand comes from a registered GitHub scale set.
+  func debugScaleSetReconnect(
+    _ request: DebugScaleSetReconnectRequest
+  ) async throws -> DebugScaleSetReconnectResponse
 }
 
 /// Errors a `DaemonService` implementation raises that map onto daemon-specific wire codes.

@@ -96,3 +96,18 @@ public struct DebugDemandSetResponse: Codable, Sendable, Hashable {
     self.assignedJobs = assignedJobs
   }
 }
+
+/// `debug.scaleSetReconnect` — drops the profile's current message session and forces a fresh one
+/// with a new generation, exactly as an unexpected connection drop would. Accepted only while the
+/// profile's demand comes from a registered GitHub scale set.
+public struct DebugScaleSetReconnectRequest: Codable, Sendable, Hashable {
+  public var profile: String
+
+  public init(profile: String) { self.profile = profile }
+}
+
+public struct DebugScaleSetReconnectResponse: Codable, Sendable, Hashable {
+  public var profile: String
+
+  public init(profile: String) { self.profile = profile }
+}

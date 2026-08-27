@@ -28,6 +28,8 @@ public enum OrchestrationError: RunnerError {
   case runnerSessionActive(instance: String, session: String)
   /// `debug.demandSet` against a daemon whose demand comes from GitHub statistics.
   case demandNotManual
+  /// `debug.scaleSetReconnect` against a daemon whose demand does not come from a scale set.
+  case demandNotScaleSet
   /// A scale-set operation was asked for before the profile had a registered scale set.
   case scaleSetNotRegistered(profile: String)
 
@@ -52,6 +54,7 @@ public enum OrchestrationError: RunnerError {
     case .runnerSessionUnknown: "RUNNER_SESSION_NOT_FOUND"
     case .runnerSessionActive: "RUNNER_SESSION_ALREADY_ACTIVE"
     case .demandNotManual: "DEMAND_NOT_MANUAL"
+    case .demandNotScaleSet: "DEMAND_NOT_SCALE_SET"
     case .scaleSetNotRegistered: "SCALE_SET_NOT_REGISTERED"
     }
   }
@@ -96,6 +99,8 @@ public enum OrchestrationError: RunnerError {
     case .demandNotManual:
       "demand is driven by GitHub scale-set statistics; " +
         "set github.demand: manual in the configuration and restart runnerd to set it by hand"
+    case .demandNotScaleSet:
+      "demand is not driven by a GitHub scale set; there is no message session to reconnect"
     case let .scaleSetNotRegistered(profile):
       "profile '\(profile)' has no registered GitHub scale set yet"
     }

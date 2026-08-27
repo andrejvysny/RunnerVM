@@ -54,9 +54,9 @@ jobs:
       - name: actionlint
         run: actionlint
       - name: shellcheck
-        run: shellcheck scripts/*.sh scripts/tests/*.sh
+        run: shellcheck scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
       - name: bash -n
-        run: for f in scripts/*.sh scripts/tests/*.sh; do bash -n "$f"; done
+        run: for f in scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh; do bash -n "$f"; done
       - name: image-builder unit test
         run: bash scripts/tests/build-ubuntu-image-test.sh
       - name: install script unit test

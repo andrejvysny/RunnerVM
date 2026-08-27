@@ -103,6 +103,11 @@ public protocol DemandProvider: Sendable {
   /// `debug.demandSet`. Only the manual provider accepts it — with a scale set in front, demand is
   /// GitHub's statistics and nothing else.
   func setDemand(profile: RunnerProfileID, assignedJobs: Int) async throws
+
+  /// `debug.scaleSetReconnect`: drops the current message session and forces the provider to
+  /// re-establish it with a new generation, exactly as an unexpected connection drop would. Only
+  /// the scale-set provider accepts it — the manual provider has no message session to drop.
+  func forceReconnect(profile: RunnerProfileID) async throws
 }
 
 public extension DemandProvider {
@@ -110,6 +115,10 @@ public extension DemandProvider {
 
   func setDemand(profile: RunnerProfileID, assignedJobs: Int) async throws {
     throw OrchestrationError.demandNotManual
+  }
+
+  func forceReconnect(profile: RunnerProfileID) async throws {
+    throw OrchestrationError.demandNotScaleSet
   }
 }
 

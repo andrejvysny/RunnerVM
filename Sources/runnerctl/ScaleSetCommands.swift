@@ -98,3 +98,46 @@ extension Debug.Demand {
     }
   }
 }
+
+extension Debug {
+  /// Nested under `debug` (`runnerctl debug scaleset reconnect <profile>`), distinct from the
+  /// top-level `ScaleSet` (`runnerctl scaleset list`) above.
+  struct ScaleSet: ParsableCommand {
+    static let configuration = CommandConfiguration(
+      commandName: "scaleset",
+      abstract: "Exercise the scale-set message session without waiting for GitHub to drop it.",
+      subcommands: [Reconnect.self])
+
+    @OptionGroup var options: GlobalOptions
+  }
+}
+
+extension Debug.ScaleSet {
+  struct Reconnect: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+      commandName: "reconnect",
+      abstract: "Drop a profile's scale-set message session and force a fresh one.",
+      discussion: """
+        Closes the current long-poll session for the profile and forces runnerd to re-establish \
+        it with a new generation, exactly as an unexpected connection drop would. Only accepted \
+        while the profile's demand comes from a registered GitHub scale set \
+        (github.demand: scaleSet, the default); `runnerctl scaleset list` shows the new session \
+        and generation once the reconnect lands.
+        """)
+
+    @OptionGroup var options: GlobalOptions
+
+    @Argument(help: "Profile name.")
+    var profile: String
+
+    func run() async throws {
+      let response = try await options.withDaemon {
+        try await $0.debugScaleSetReconnect(profile: profile)
+      }
+      switch options.output {
+      case .json: try JSONOut.print(response)
+      case .human: print("\(response.profile)  reconnect requested")
+      }
+    }
+  }
+}

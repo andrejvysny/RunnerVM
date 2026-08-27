@@ -61,6 +61,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   case githubTest = "github.test"
   case debugRunJIT = "debug.runJit"
   case debugDemandSet = "debug.demandSet"
+  case debugScaleSetReconnect = "debug.scaleSetReconnect"
 
   case operationGet = "operation.get"
   case operationList = "operation.list"
@@ -74,7 +75,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
          .configApply, .imageDelete, .imagePrune, .imagePull, .imagePush,
          .registryLogin, .registryLogout,
          .instanceStop, .instanceDelete, .instanceTaint, .authLogin, .authLogout,
-         .debugDemandSet, .buildCancel:
+         .debugDemandSet, .debugScaleSetReconnect, .buildCancel:
       return .idempotentMutation
     case .imageImport, .instanceCreate, .instanceExec, .debugRunJIT, .imageBuild:
       return .singleShot
@@ -102,6 +103,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .instanceExec, .instanceMetrics, .instanceSSHInfo,
     .runnerList, .runnerGet, .scaleSetList,
     .authStatus, .authLogin, .authLogout, .githubTest, .debugRunJIT, .debugDemandSet,
+    .debugScaleSetReconnect,
     .operationGet, .operationList,
   ]
 
