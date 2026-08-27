@@ -83,7 +83,7 @@ public enum BuildContextPacker {
     var sizes: [(String, UInt64)] = []
     var total: UInt64 = 0
     for case let url as URL in walker {
-      let relative = Self.relativePath(of: url, under: root)
+      let relative = try Self.relativePath(of: url, under: root)
       guard !relative.isEmpty else { continue }
       let values = try url.resourceValues(forKeys: keys)
       if values.isDirectory == true {
@@ -131,14 +131,27 @@ public enum BuildContextPacker {
 
   /// `.producesRelativePathURLs` gives a `relativePath`, but a caller that passed an absolute
   /// `root` still sees absolute URLs on some paths; strip the prefix either way.
-  private static func relativePath(of url: URL, under root: URL) -> String {
-    if !url.relativePath.isEmpty, url.relativePath != url.path(percentEncoded: false) {
-      return url.relativePath
+  ///
+  /// Foundation versions disagree about what `path` returns for a relative URL (older ones give
+  /// the absolute path, newer ones only the relative part), so the decision keys on `baseURL`
+  /// rather than on comparing the two strings. Anything that still does not sit under the root
+  /// is refused instead of being flattened to its file name, which would silently collapse
+  /// nested `COPY` sources.
+  private static func relativePath(of url: URL, under root: URL) throws -> String {
+    let slashes = CharacterSet(charactersIn: "/")
+    if url.baseURL != nil {
+      let relative = url.relativePath.trimmingCharacters(in: slashes)
+      if !relative.isEmpty { return relative }
     }
-    let base = root.path(percentEncoded: false)
-    let full = url.path(percentEncoded: false)
-    guard full.hasPrefix(base) else { return url.lastPathComponent }
-    return String(full.dropFirst(base.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    let base = root.standardizedFileURL.path(percentEncoded: false)
+      .trimmingCharacters(in: slashes)
+    let full = url.absoluteURL.standardizedFileURL.path(percentEncoded: false)
+      .trimmingCharacters(in: slashes)
+    guard full == base || full.hasPrefix(base + "/") else {
+      throw ImageBuildError.contextUnsafeEntry(
+        path: full, reason: "resolves outside the build context \(base)")
+    }
+    return String(full.dropFirst(base.count)).trimmingCharacters(in: slashes)
   }
 }
 
