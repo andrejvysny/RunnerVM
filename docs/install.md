@@ -217,3 +217,20 @@ above has run with a v2-or-later `runnerd`, rolling back to a pre-image-builder 
   contents — GitHub credentials, job logs, runner `_diag` bundles — readable by every other user on
   the Mac. `scripts/install.sh --group staff` requires `--allow-staff-group` for exactly this
   reason; see "Dedicated service account and auto-login" above.
+- **`lifecycle: ephemeral` is the production default and the only isolated mode.** A reusable
+  profile (`lifecycle: reusable`) keeps one guest across consecutive jobs. Between jobs the guest
+  agent restores the runner's HOME from a pristine snapshot and clears `_work`, `_diag`, the
+  runner's temp files and (optionally) docker state — but a job that can `sudo` can write
+  anywhere else on the disk, and nothing resets that. Treat a reusable profile as single-tenant:
+  every job that can land on it is trusted with whatever the previous job left behind. `config
+  validate` refuses `lifecycle: reusable` with `PROFILE_REUSABLE_UNACKNOWLEDGED` until the profile
+  says so explicitly:
+
+  ```yaml
+  lifecycle: reusable
+  reuse:
+    acknowledgeSharedHost: true   # jobs on this profile trust each other
+  ```
+
+  Even then it warns (`PROFILE_REUSABLE_SINGLE_TENANT`). Do not point a reusable profile at a
+  public repository or at workflows from more than one trust domain.

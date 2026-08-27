@@ -109,6 +109,9 @@ extension RunnerProfileConfig {
 
   func validateLifecycle(path: String) -> [ConfigurationIssue] {
     var issues: [ConfigurationIssue] = []
+    if lifecycle == .reusable {
+      issues.append(contentsOf: validateReusableIsolation(path: path))
+    }
     guard let reuse else {
       return issues
     }
@@ -135,6 +138,26 @@ extension RunnerProfileConfig {
       ))
     }
     return issues
+  }
+
+  /// A reusable VM is not an isolation boundary between jobs: cleanup resets HOME, `_work` and
+  /// temp space, but anything a job wrote elsewhere (via `sudo`, docker, system paths) survives
+  /// into the next job. Ephemeral is the production default; reusable is refused unless the
+  /// operator states that every job on the profile trusts the previous one.
+  private func validateReusableIsolation(path: String) -> [ConfigurationIssue] {
+    guard effectiveReuse?.acknowledgeSharedHost == true else {
+      return [.error(
+        "PROFILE_REUSABLE_UNACKNOWLEDGED", "\(path).reuse.acknowledgeSharedHost",
+        "lifecycle: reusable shares one guest between consecutive jobs; set "
+          + "reuse.acknowledgeSharedHost: true to confirm every job on this profile is trusted "
+          + "with the previous job's host, or use lifecycle: ephemeral"
+      )]
+    }
+    return [.warning(
+      "PROFILE_REUSABLE_SINGLE_TENANT", "\(path).lifecycle",
+      "reusable VMs are single-tenant: jobs on this profile share a guest and are not isolated "
+        + "from each other beyond the HOME/_work/temp reset between jobs"
+    )]
   }
 
   func validateTimeouts(path: String) -> [ConfigurationIssue] {

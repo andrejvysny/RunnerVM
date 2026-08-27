@@ -61,15 +61,22 @@ public struct ReusePolicy: Codable, Sendable, Hashable {
   /// Spec §72: how many times an idle/cleaning reusable VM whose worker died may be restarted
   /// from its own disk before it is recycled instead.
   public var maxRestarts: Int
+  /// A reusable VM is one guest shared by consecutive jobs. Cleanup resets the runner's HOME,
+  /// work directory and temp space between jobs, but a job that can `sudo` can write anywhere
+  /// else on the disk, so the mode is only sound when every job that lands on the profile is
+  /// trusted with the previous job's host. The operator has to say so explicitly; without this,
+  /// `lifecycle: reusable` is refused at validation.
+  public var acknowledgeSharedHost: Bool
 
   public init(
     maxJobs: Int = 10, maxAge: DurationValue = .hours(4), recycleOnFailure: Bool = true,
-    maxRestarts: Int = 1
+    maxRestarts: Int = 1, acknowledgeSharedHost: Bool = false
   ) {
     self.maxJobs = maxJobs
     self.maxAge = maxAge
     self.recycleOnFailure = recycleOnFailure
     self.maxRestarts = maxRestarts
+    self.acknowledgeSharedHost = acknowledgeSharedHost
   }
 
   public static let `default` = ReusePolicy()
@@ -77,18 +84,22 @@ public struct ReusePolicy: Codable, Sendable, Hashable {
 
 extension ReusePolicy {
   private enum CodingKeys: String, CodingKey {
-    case maxJobs, maxAge, recycleOnFailure, maxRestarts
+    case maxJobs, maxAge, recycleOnFailure, maxRestarts, acknowledgeSharedHost
   }
 
-  /// `maxRestarts` defaults so a `runner_profiles.config_json` row written before this field
-  /// existed still decodes (spec §72 back-compat).
+  /// `maxRestarts` and `acknowledgeSharedHost` default so a `runner_profiles.config_json` row
+  /// written before these fields existed still decodes (spec §72 back-compat). The
+  /// acknowledgement defaults to `false` on purpose: an old row is re-validated on the next
+  /// `config apply`, which is where the operator is asked to opt in.
   public init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     self.init(
       maxJobs: try c.decode(Int.self, forKey: .maxJobs),
       maxAge: try c.decode(DurationValue.self, forKey: .maxAge),
       recycleOnFailure: try c.decode(Bool.self, forKey: .recycleOnFailure),
-      maxRestarts: try c.decodeIfPresent(Int.self, forKey: .maxRestarts) ?? 1
+      maxRestarts: try c.decodeIfPresent(Int.self, forKey: .maxRestarts) ?? 1,
+      acknowledgeSharedHost: try c.decodeIfPresent(Bool.self, forKey: .acknowledgeSharedHost)
+        ?? false
     )
   }
 }

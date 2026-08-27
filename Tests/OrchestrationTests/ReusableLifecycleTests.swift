@@ -29,7 +29,7 @@ import Testing
       allowPublicRepositories: allowPublicRepositories,
       reuse: ReusePolicy(
         maxJobs: maxJobs, maxAge: maxAge, recycleOnFailure: recycleOnFailure,
-        maxRestarts: maxRestarts))
+        maxRestarts: maxRestarts, acknowledgeSharedHost: true))
   }
 
   // MARK: - Happy path

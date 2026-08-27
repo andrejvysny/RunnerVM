@@ -169,6 +169,23 @@ import Testing
     #expect(!issues.hasErrors)
   }
 
+  /// A reusable VM shares one guest between jobs; the operator has to say that is acceptable.
+  @Test func refusesReusableWithoutTheSharedHostAcknowledgement() throws {
+    let unacknowledged = Self.issues { $0.lifecycle = .reusable }
+    #expect(try #require(unacknowledged.first(code: "PROFILE_REUSABLE_UNACKNOWLEDGED")).severity == .error)
+    #expect(unacknowledged.hasErrors)
+
+    let acknowledged = Self.issues {
+      $0.lifecycle = .reusable
+      $0.reuse = ReusePolicy(acknowledgeSharedHost: true)
+    }
+    #expect(!acknowledged.contains(code: "PROFILE_REUSABLE_UNACKNOWLEDGED"))
+    #expect(!acknowledged.hasErrors)
+    #expect(try #require(acknowledged.first(code: "PROFILE_REUSABLE_SINGLE_TENANT")).severity == .warning)
+
+    #expect(!Self.issues { $0.lifecycle = .ephemeral }.contains(code: "PROFILE_REUSABLE_SINGLE_TENANT"))
+  }
+
   @Test func rejectsDegenerateReuseBounds() {
     #expect(Self.issues {
       $0.lifecycle = .reusable

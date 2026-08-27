@@ -140,7 +140,8 @@ enum ConfigMapper {
       maxJobs: dto.maxJobs ?? d.maxJobs,
       maxAge: dto.maxAge ?? d.maxAge,
       recycleOnFailure: dto.recycleOnFailure ?? d.recycleOnFailure,
-      maxRestarts: dto.maxRestarts ?? d.maxRestarts
+      maxRestarts: dto.maxRestarts ?? d.maxRestarts,
+      acknowledgeSharedHost: dto.acknowledgeSharedHost ?? d.acknowledgeSharedHost
     )
   }
 

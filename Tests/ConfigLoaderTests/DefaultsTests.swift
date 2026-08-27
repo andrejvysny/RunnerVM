@@ -92,6 +92,27 @@ struct DefaultsTests {
     #expect(profile.reuse?.maxRestarts == 3)
   }
 
+  @Test func reuseAcknowledgeSharedHostIsReadAndDefaultsToFalse() throws {
+    func load(_ reuse: String) throws -> ReusePolicy? {
+      let yaml = """
+      version: 1
+      github:
+        scopes:
+          - {name: engineering, type: organization, owner: acme}
+      profiles:
+        - name: ubuntu-24
+          scope: engineering
+          image: ghcr.io/acme/runners/ubuntu-24:stable
+          lifecycle: reusable
+          reuse:
+            \(reuse)
+      """
+      return try ConfigLoader.load(yaml: yaml).profile(named: "ubuntu-24")?.reuse
+    }
+    #expect(try load("acknowledgeSharedHost: true")?.acknowledgeSharedHost == true)
+    #expect(try load("maxJobs: 5")?.acknowledgeSharedHost == false)
+  }
+
   @Test func reuseOmittingMaxRestartsDefaultsToOne() throws {
     let yaml = """
     version: 1

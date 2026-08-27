@@ -78,6 +78,7 @@ struct ConfigDTO: Decodable {
       var maxAge: DurationValue?
       var recycleOnFailure: Bool?
       var maxRestarts: Int?
+      var acknowledgeSharedHost: Bool?
     }
 
     struct Timeouts: Decodable {

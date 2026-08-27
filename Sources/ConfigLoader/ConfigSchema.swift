@@ -28,6 +28,7 @@ enum ConfigSchema {
     "ssh": .object(["enabled": .scalar]),
     "reuse": .object([
       "maxJobs": .scalar, "maxAge": .scalar, "recycleOnFailure": .scalar, "maxRestarts": .scalar,
+      "acknowledgeSharedHost": .scalar,
     ]),
     "timeouts": timeouts,
   ])
