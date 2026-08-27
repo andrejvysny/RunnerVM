@@ -153,7 +153,9 @@ public actor ScaleSetDemandProvider: DemandProvider {
         generation: generation,
         snapshot: DemandSnapshot(
           assignedJobs: Int(info.statistics?.totalAssignedJobs ?? 0), statistics: info.statistics,
-          updatedAt: now(), healthy: true),
+          updatedAt: now(), healthy: true,
+          // Registration statistics may trail the session's view; the first poll confirms them.
+          confirmed: false),
         applied: applied)
       registrationFailures[row.id] = nil
       logger.info(

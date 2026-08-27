@@ -56,6 +56,33 @@ import Testing
     }
   }
 
+  /// Seen live: right after a restart the registration reply said `assignedJobs: 0`, the first
+  /// pass cancelled the idle VM as surplus, and half a second later the message session reported
+  /// the job that VM had been booted for. An unconfirmed figure may start VMs, never take one away.
+  @Test func anUnconfirmedDemandFigureNeverCancelsAnInstance() async throws {
+    let config = M2Harness.configuration(maxInstances: 2)
+    try await withHarness(configuration: config) { harness in
+      try await harness.importLinuxImage()
+      let profile = try await harness.profileID("linux")
+      let manual = ManualDemandProvider()
+      await manual.set(profile: profile, assignedJobs: 1)
+      let demand = ConfirmationGatedDemand(manual)
+      let orchestrator = await harness.orchestrator(demand: demand, configuration: config)
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      let started = try #require(try await harness.instanceRows.list(profile: profile, states: nil).first)
+
+      await manual.set(profile: profile, assignedJobs: 0)
+      await demand.setConfirmed(false)
+      await orchestrator.tick()
+      #expect(try await harness.record(started.id).state != .deleted)
+
+      await demand.setConfirmed(true)
+      await orchestrator.tick()
+      #expect(try await harness.record(started.id).state == .deleted)
+    }
+  }
+
   @Test func idleInstanceWithDemandGetsAScaleSetJITSession() async throws {
     try await withHarness { harness in
       harness.stubGitHub()
@@ -180,4 +207,32 @@ import Testing
       await agent.stop()
     }
   }
+}
+
+/// Wraps `ManualDemandProvider` and lets a test flip `DemandSnapshot.confirmed`, which is what a
+/// scale-set registration reply looks like before its message session has spoken.
+actor ConfirmationGatedDemand: DemandProvider {
+  private let inner: ManualDemandProvider
+  private var confirmed = true
+
+  init(_ inner: ManualDemandProvider) { self.inner = inner }
+
+  func setConfirmed(_ value: Bool) { confirmed = value }
+
+  func start() async throws { try await inner.start() }
+  func stop() async { await inner.stop() }
+  var events: AsyncStream<DemandEvent> { get async { await inner.events } }
+
+  func snapshot(profile: RunnerProfileID) async -> DemandSnapshot {
+    var snapshot = await inner.snapshot(profile: profile)
+    snapshot.confirmed = confirmed
+    return snapshot
+  }
+
+  func advertise(profile: RunnerProfileID, capacity: Int) async {
+    await inner.advertise(profile: profile, capacity: capacity)
+  }
+
+  func refresh() async { await inner.refresh() }
+  func report() async -> [DemandProviderReport] { await inner.report() }
 }

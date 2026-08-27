@@ -15,15 +15,21 @@ public struct DemandSnapshot: Sendable, Equatable {
   /// False while the provider cannot talk to GitHub for this profile. The scheduler keeps the
   /// last known demand rather than scaling to zero on a transient outage (spec §135).
   public var healthy: Bool
+  /// False while `assignedJobs` comes from the registration reply rather than from the message
+  /// session. Those statistics can lag GitHub's own assignment by seconds, and a daemon that has
+  /// just restarted must not cancel a booted VM as "surplus" on their say-so (seen live: the VM
+  /// was reaped 0.5 s before the session reported the job it had been started for).
+  public var confirmed: Bool
 
   public init(
     assignedJobs: Int = 0, statistics: ScaleSetStatistics? = nil, updatedAt: Date = Date(),
-    healthy: Bool = true
+    healthy: Bool = true, confirmed: Bool = true
   ) {
     self.assignedJobs = assignedJobs
     self.statistics = statistics
     self.updatedAt = updatedAt
     self.healthy = healthy
+    self.confirmed = confirmed
   }
 }
 

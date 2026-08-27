@@ -15,6 +15,8 @@ struct SchedulingPass: Sendable {
     var assignedJobs: Int
     /// `plan.toStart` after the in-flight creations and the hold-down are taken off.
     var startable: Int
+    /// `DemandSnapshot.confirmed`: only a confirmed demand figure may take a VM away.
+    var demandConfirmed: Bool
   }
 
   var config: RunnerConfiguration
@@ -101,7 +103,7 @@ extension Orchestrator {
     return SchedulingPass.ProfileEntry(
       id: row.id, name: row.name, config: profile, plan: plan,
       request: ResourceRequest(profile: profile), assignedJobs: snapshot.assignedJobs,
-      startable: startable)
+      startable: startable, demandConfirmed: snapshot.confirmed)
   }
 
   // MARK: - Starts (spec §106, §136)
@@ -176,6 +178,17 @@ extension Orchestrator {
 
   private func cancelInstances(_ pass: SchedulingPass) async {
     for entry in pass.profiles {
+      // Fail safe on a figure the message session has not confirmed yet (right after a restart):
+      // starting is cheap to undo, cancelling a VM that is about to receive its job is not.
+      guard entry.demandConfirmed else {
+        if !entry.plan.toCancel.isEmpty {
+          logger.info(
+            "deferring cancellation until the scale set confirms demand",
+            metadata: ["profile": .string(entry.name),
+                       "candidates": .stringConvertible(entry.plan.toCancel.count)])
+        }
+        continue
+      }
       for id in entry.plan.toCancel {
         await cancel(id, profile: entry.name, reason: "demand dropped")
       }
@@ -187,9 +200,9 @@ extension Orchestrator {
   private func reapExpiredIdle(_ pass: SchedulingPass) async {
     for entry in pass.profiles {
       let ttl = entry.config.warmPool.idleTTL
-      guard ttl.isPositive, entry.assignedJobs <= (pass.activeSessions[entry.id] ?? 0) else {
-        continue
-      }
+      guard ttl.isPositive, entry.demandConfirmed,
+            entry.assignedJobs <= (pass.activeSessions[entry.id] ?? 0)
+      else { continue }
       for record in pass.instances
       where record.profileId == entry.id && record.state == .idle && !pass.bound.contains(record.id) {
         let since = record.agentReadyAt?.date ?? record.createdAt.date

@@ -726,7 +726,10 @@ scenario_restart-during-job-sigkill() {
     || { warn "could not query run_attempt for run $run_id"; return 1; }
   [ "$run_attempt" = "1" ] \
     || { warn "run $run_id shows run_attempt=$run_attempt; expected exactly 1"; return 1; }
-  job_count=$(gh api "repos/$REPO/actions/runs/$run_id/jobs" --jq '.total_count' 2>/dev/null) \
+  # e2e.yml declares four jobs and skips three of them via `if:`; skipped jobs still count in
+  # `total_count`, so only the ones that actually ran are a duplicate-execution signal.
+  job_count=$(gh api "repos/$REPO/actions/runs/$run_id/jobs" \
+    --jq '[.jobs[] | select(.conclusion != "skipped")] | length' 2>/dev/null) \
     || { warn "could not query job count for run $run_id"; return 1; }
   [ "$job_count" = "1" ] \
     || { warn "run $run_id has $job_count job(s); expected exactly 1"; return 1; }
@@ -760,7 +763,15 @@ scenario_redelivery() {
   vms=$(rc vm list --all 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
     '[.instances[] | select(.profile==$p and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
     || { warn "could not query vm list to check for a duplicate instance"; return 1; }
-  [ "$vms" -le 1 ] || { warn "saw $vms instance(s) for one job; possible duplicate from redelivery"; return 1; }
+  # The hard assertion is "the job ran once": at most one runner session with a registration.
+  # A second *instance* is only a warning -- a VM booted before the restart can legitimately be
+  # replaced by one booted after it -- and is reported so the boot count stays visible.
+  [ "$vms" -le 1 ] || warn "saw $vms instance(s) for one job (one may have been replaced across the restart)"
+  sessions=$(rc runner list 2>/dev/null | jq --arg p "$PROFILE" --argjson before "$before" \
+    '[.sessions[] | select(.profile==$p and .githubRunnerId!=null
+       and ((.createdAt | sub("\\.[0-9]+"; "") | fromdateiso8601) >= $before))] | length' 2>/dev/null) \
+    || { warn "could not query runner list to check for a duplicate runner"; return 1; }
+  [ "$sessions" -le 1 ] || { warn "found $sessions runner session(s) for one job; expected at most 1"; return 1; }
   assert_no_leftovers "$PROFILE" "$LEFTOVER_TIMEOUT" "$baseline" || return 1
   return 0
 }
