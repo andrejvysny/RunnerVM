@@ -169,7 +169,8 @@ one before it registered under.
 
 ```bash
 # 1. bootstrap the family root: fetches + verifies the Ubuntu cloud disk, resolves the runner
-#    version, installs baseline packages + the runner + the guest agent (~15-20 min, network-bound)
+#    version, installs baseline packages + the runner + the guest agent (~4 min cold cache on an
+#    M-series Mac, measured 2026-08-27; network-bound)
 runnerctl image build images/recipes/ubuntu-24-minimal --name ubuntu-24-minimal
 
 # 2. adds Docker Engine on top

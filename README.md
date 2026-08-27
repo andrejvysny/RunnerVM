@@ -25,19 +25,33 @@ account) see [`docs/install.md`](docs/install.md).
 
 ## Status
 
+See [`docs/status.md`](docs/status.md) for the full capability matrix and
+[`CHANGELOG.md`](CHANGELOG.md) for what landed when.
+
 - Supported guest: Linux/arm64 only. macOS guests are not implemented; `runnerctl config
   validate` (and `config apply`) reject `os: macos` with `GUEST_OS_UNSUPPORTED`.
-- Live end-to-end proven on GitHub.com (Linux/arm64 ephemeral runner, full job) — see
-  [docs/verification.md](docs/verification.md). macOS guests: see [docs/macos-guests.md](docs/macos-guests.md).
+- Live end-to-end proven on GitHub.com (Linux/arm64 ephemeral runner, full job; autoscaling with
+  parallel jobs) — see [docs/verification.md](docs/verification.md).
+- Images: build them on the host with `runnerctl image build` and the shipped `Runnerfile` recipes
+  ([docs/image-build.md](docs/image-build.md); bootstrap ~4 min, derived ~1 min, verified live),
+  pull RunnerVM images from any OCI registry, or import tart images read-only
+  (`runnerctl image pull ghcr.io/cirruslabs/ubuntu:latest` — inspect/re-publish only, no guest agent).
 - Recommended production lifecycle: `ephemeral` — one job per VM, then destroy. `reusable`
   exists but ephemeral is the mode this project is validated against.
-- In-daemon image builder (`runnerctl image build`, [docs/image-build.md](docs/image-build.md)) is
-  implemented and unit-tested; a live bootstrap→derived→job build chain is the open verification
-  item (`TODO.md` P7).
+- CI is green on `master` (Swift 6.1.2 / macOS 15, Go, shellcheck).
+
+## Building images
+
+```sh
+runnerctl image build images/recipes/ubuntu-24-minimal --name ubuntu-24-minimal   # from the Ubuntu cloud image
+runnerctl image build images/recipes/ubuntu-24 --name ubuntu-24                   # FROM ubuntu-24-minimal, adds Docker
+runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22             # your own Runnerfile
+```
 
 ## Documentation
 
 - [`RunnerVM — GitHub Actions VM Orchestrator.md`](<RunnerVM — GitHub Actions VM Orchestrator.md>) — the full architecture/implementation spec.
+- [`docs/status.md`](docs/status.md) — current capability matrix, limitations, next steps; [`CHANGELOG.md`](CHANGELOG.md).
 - [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
