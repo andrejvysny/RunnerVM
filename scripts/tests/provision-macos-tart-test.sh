@@ -509,5 +509,124 @@ else
     expect_contains "$out" "STAGE must be all or harden" "an unknown STAGE fails before doing anything"
 fi
 
+# --------------------------------------------------------------------------
+# 9. --attach: argument handling (real subprocess -- these paths exit before any host check)
+# --------------------------------------------------------------------------
+if out="$("$SCRIPT" --attach 127.0.0.1 --agent-binary /nonexistent 2>&1)"; then
+    no "--attach without --result fails" "exited 0"
+else
+    rc=$?
+    expect_eq "$rc" "2" "--attach without --result exits 2"
+    expect_contains "$out" "requires --result" "--attach without --result names the missing flag"
+fi
+
+NEVER_RESULT="$TWORK/attach-never-result.json"
+if out="$("$SCRIPT" --attach 127.0.0.1 --result "$NEVER_RESULT" 2>&1)"; then
+    no "--attach without --agent-binary fails" "exited 0"
+else
+    rc=$?
+    expect_eq "$rc" "2" "--attach without --agent-binary exits 2"
+    expect_contains "$out" "requires --agent-binary" \
+        "--attach without --agent-binary names the missing flag"
+fi
+if [ -f "$NEVER_RESULT" ]; then
+    no "no result file for an argument-shape error" "$NEVER_RESULT exists"
+else
+    ok "no result file for an argument-shape error"
+fi
+
+# --------------------------------------------------------------------------
+# 10. required_tools(): attach mode drops tart, classic mode keeps it (pure; script is
+#     already sourced above, so this calls the real helper check_preconditions loops over)
+# --------------------------------------------------------------------------
+ATTACH_IP=""
+if required_tools | grep -qx tart; then
+    ok "classic mode's required-tools list includes tart"
+else
+    no "classic mode's required-tools list includes tart" "$(required_tools)"
+fi
+
+ATTACH_IP="127.0.0.1"
+if required_tools | grep -qx tart; then
+    no "attach mode's required-tools list excludes tart" "$(required_tools)"
+else
+    ok "attach mode's required-tools list excludes tart"
+fi
+expect_contains "$(required_tools)" "jq" "attach mode still requires jq"
+expect_contains "$(required_tools)" "nc" "attach mode still requires nc"
+
+# check_preconditions itself must not refuse a bogus --source in attach mode: the vm_exists
+# check is classic-mode-only, so a --source that names no real tart VM must not matter here.
+SOURCE="definitely-not-a-real-tart-vm"
+SSH_KEY=""
+SSH_PASSWORD="admin"
+DEBUG_SSH=0
+if out="$(check_preconditions 2>&1)"; then
+    ok "check_preconditions in attach mode ignores an unresolvable --source"
+else
+    no "check_preconditions in attach mode ignores an unresolvable --source" "$out"
+fi
+ATTACH_IP=""
+
+# --------------------------------------------------------------------------
+# 11. --attach: a missing --agent-binary file fails before any network call (resolve_guest_agent
+#     runs, and dies, before resolve_runner ever touches GitHub)
+# --------------------------------------------------------------------------
+MISSING_AGENT_RESULT="$TWORK/attach-missing-agent-result.json"
+rm -f "$MISSING_AGENT_RESULT"
+if out="$("$SCRIPT" --attach 127.0.0.1 --result "$MISSING_AGENT_RESULT" \
+    --agent-binary "$TWORK/no-such-agent-binary" --ssh-password admin 2>&1)"; then
+    no "a missing --agent-binary file fails" "exited 0"
+else
+    expect_contains "$out" "guest agent binary not found" \
+        "a missing --agent-binary file fails before any network"
+fi
+if [ -f "$MISSING_AGENT_RESULT" ]; then
+    expect_eq "$(jq -r .ok "$MISSING_AGENT_RESULT")" "false" \
+        "a missing-agent-binary failure still writes --result"
+else
+    no "a missing-agent-binary failure still writes --result" "$MISSING_AGENT_RESULT missing"
+fi
+
+# --------------------------------------------------------------------------
+# 12. --attach: the result JSON's failure shape, driven through a real (but network-free)
+#     failure -- an existing --agent-binary, but a bogus RVM_RELEASE_JSON_FILE with no matching
+#     release asset, so resolve_runner's select_runner_digest dies with no digest to trust.
+# --------------------------------------------------------------------------
+ATTACH_AGENT="$TWORK/attach-agent-binary"
+: >"$ATTACH_AGENT"
+BOGUS_RELEASE="$TWORK/attach-bogus-release.json"
+cat >"$BOGUS_RELEASE" <<'JSON'
+{"tag_name": "v9.9.9", "assets": []}
+JSON
+ATTACH_FAILURE_RESULT="$TWORK/attach-failure-result.json"
+rm -f "$ATTACH_FAILURE_RESULT"
+if out="$(RVM_RELEASE_JSON_FILE="$BOGUS_RELEASE" "$SCRIPT" --attach 127.0.0.1 \
+    --result "$ATTACH_FAILURE_RESULT" --agent-binary "$ATTACH_AGENT" \
+    --runner-version 9.9.9 --ssh-password admin 2>&1)"; then
+    no "an unresolvable runner digest fails the attach run" "exited 0: $out"
+else
+    ok "an unresolvable runner digest fails the attach run"
+fi
+if [ -f "$ATTACH_FAILURE_RESULT" ]; then
+    ok "--result is written on failure"
+    json_err=""
+    if json_err="$(python3 -c "
+import json
+with open('$ATTACH_FAILURE_RESULT') as f:
+    data = json.load(f)
+assert set(data.keys()) == {'ok', 'error', 'ssh'}, sorted(data.keys())
+assert data['ok'] is False, data['ok']
+assert isinstance(data['error'], str) and data['error'], data['error']
+assert data['ssh'] is True, data['ssh']
+" 2>&1)"; then
+        ok "the failure result is valid JSON with the documented failure shape"
+    else
+        no "the failure result is valid JSON with the documented failure shape" "$json_err"
+    fi
+else
+    no "--result is written on failure" "$ATTACH_FAILURE_RESULT missing"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

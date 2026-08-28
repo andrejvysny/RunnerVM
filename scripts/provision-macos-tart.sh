@@ -40,6 +40,17 @@ GUEST_SCRIPT_SHA256=""
 HARDEN_REPORT=""
 GRACEFUL_SHUTDOWN=0
 
+# --attach: drive the hardened SSH provisioning against a VM the caller (the daemon) already
+# booted itself, with no tart involved anywhere -- see run_attach() below.
+ATTACH_IP=""
+RESULT_PATH=""
+RESULT_WRITTEN=0
+RESULT_AGENT_VERSION=""
+WORK_DIR_ARG=""
+CALLER_OWNS_WORK=0
+HARDEN_DONE=0
+LAST_ERROR=""
+
 TART_HOME="${TART_HOME:-$HOME/.tart}"
 STAGE_DIR="/tmp/rvm-provision"
 GUEST_SCRIPT_REMOTE="/tmp/rvm-provision.sh"
@@ -95,6 +106,17 @@ Output:
                            (default: ~/Library/Caches/runnervm/macos-provision).
   --import <name>          Run `runnerctl image import` afterwards under this image name.
 
+Attach mode: no tart anywhere. SSH into a VM the caller already booted (e.g. the daemon's own
+Virtualization.framework guest), run the same hardened provisioning over SSH, and write a
+machine-readable result instead of sealing a metadata.json. --agent-binary is required (no
+`make -C GuestAgent` fallback) and --runner-sudo/--ssh-*/--debug-ssh keep their meaning above.
+  --attach <ip>            Guest IP to provision instead of cloning/booting a tart VM.
+  --result <path.json>     Where to write {"ok":bool,...} -- always written, success or failure.
+  --work <dir>             Use this directory instead of a self-managed mktemp one (0700; not
+                           deleted on exit -- the caller owns and cleans it up).
+  --debug-ssh              (attach mode) skip the seal-time lockdown; the guest stays reachable
+                           over SSH and the result records "ssh": true.
+
 Environment: TART_HOME, RUNNERCTL, RVM_IP_TIMEOUT, RVM_SSH_TIMEOUT, RVM_PROVISION_TIMEOUT,
 RVM_SHUTDOWN_TIMEOUT, RVM_RELEASE_JSON_FILE (test seam for the GitHub release JSON).
 USAGE
@@ -102,7 +124,14 @@ USAGE
 
 log()  { printf '[macos-provision %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[macos-provision] warning: %s\n' "$*" >&2; }
-die()  { printf '[macos-provision] error: %s\n' "$*" >&2; exit 1; }
+# LAST_ERROR is the one-line reason write_result_json puts in a failure result (attach mode only);
+# folded to one line so a die() message written across several lines for terminal readability
+# still lands as a single JSON string value.
+die()  {
+    LAST_ERROR="$(printf '%s' "$*" | tr '\n' ' ')"
+    printf '[macos-provision] error: %s\n' "$*" >&2
+    exit 1
+}
 
 # Tart lifecycle + the expect/ssh transport. Sourced before the argument parsing below so a test
 # that sources this file gets both halves.
@@ -131,6 +160,9 @@ parse_args() {
         --keep-vm-running) KEEP_VM_RUNNING=1; shift ;;
         --debug-ssh) DEBUG_SSH=1; shift ;;
         --allow-dirty-seal) ALLOW_DIRTY_SEAL=1; shift ;;
+        --attach) ATTACH_IP="$2"; shift 2 ;;
+        --result) RESULT_PATH="$2"; shift 2 ;;
+        --work) WORK_DIR_ARG="$2"; shift 2 ;;
         -h | --help) usage; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
         esac
@@ -139,6 +171,18 @@ parse_args() {
     case "$RUNNER_SUDO" in yes | no) ;; *) die "--runner-sudo must be yes or no" ;; esac
     [ -n "$NAME" ] || die "--name must not be empty"
     [ -z "$RUNNER_SHA256" ] || expect_hex64 --runner-sha256 "$RUNNER_SHA256"
+    if [ -n "$ATTACH_IP" ]; then
+        if [ -z "$RESULT_PATH" ]; then
+            printf 'error: --attach requires --result <path.json>\n' >&2
+            usage >&2
+            exit 2
+        fi
+        if [ -z "$AGENT_BINARY" ]; then
+            printf 'error: --attach requires --agent-binary <path>\n' >&2
+            usage >&2
+            exit 2
+        fi
+    fi
 }
 
 expect_hex64() {
@@ -150,9 +194,22 @@ sha256_hex() { shasum -a 256 "$1" | awk '{print $1}'; }
 # Single-quote a value for a remote /bin/sh command line.
 shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+# "true"/"false" for a 0/1 flag, to hand jq --argjson a JSON boolean literal.
+bool_json() { if [ "$1" -eq 1 ]; then printf 'true'; else printf 'false'; fi; }
+
+# Attach mode drives an already-booted guest purely over SSH; it never shells out to tart, so tart
+# is not a required tool in that mode (and need not even be installed on the daemon's host).
+required_tools() {
+    if [ -n "$ATTACH_IP" ]; then
+        printf '%s\n' jq shasum curl awk ssh scp nc
+    else
+        printf '%s\n' tart jq shasum curl awk ssh scp nc
+    fi
+}
+
 check_preconditions() {
     local tool
-    for tool in tart jq shasum curl awk ssh scp nc; do
+    for tool in $(required_tools); do
         command -v "$tool" >/dev/null 2>&1 || die "required tool not on PATH: $tool"
     done
     if [ -n "$SSH_KEY" ]; then
@@ -161,12 +218,25 @@ check_preconditions() {
         command -v expect >/dev/null 2>&1 || die \
             "password auth needs /usr/bin/expect (macOS ships no sshpass); pass --ssh-key instead"
     fi
-    PLIST_SOURCE="$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist"
-    [ -f "$PLIST_SOURCE" ] || die "LaunchDaemon plist missing from the tree"
+    # Candidate chain, because a packaged daemon host has no source tree: an explicit
+    # override, then the plist staged next to the agent binary by build-package.sh
+    # (share/runnervm/guest-agent/launchd/), then this checkout.
+    PLIST_SOURCE=""
+    for candidate in \
+        "${RUNNERVM_GUEST_AGENT_PLIST:-}" \
+        "${AGENT_BINARY:+$(dirname "$AGENT_BINARY")/../launchd/com.runnervm.guest-agent.plist}" \
+        "$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist"; do
+        [ -n "$candidate" ] && [ -f "$candidate" ] || continue
+        PLIST_SOURCE="$candidate"
+        break
+    done
+    [ -n "$PLIST_SOURCE" ] || die "guest-agent LaunchDaemon plist not found (set RUNNERVM_GUEST_AGENT_PLIST)"
     if [ "$DEBUG_SSH" -eq 0 ] && [ -z "$SSH_KEY" ] && [ -z "$SSH_PASSWORD" ]; then
         die "the seal-time lockdown needs the build account's password to rotate and to prove the
 old one no longer authenticates; pass --ssh-password, or --debug-ssh to skip the lockdown"
     fi
+    # Attach mode has no --source to clone; the caller already booted the guest it names with --attach.
+    [ -n "$ATTACH_IP" ] && return 0
     vm_exists "$SOURCE" || die "source image not in \`tart list\`: $SOURCE
 run: tart pull $SOURCE"
 }
@@ -187,6 +257,15 @@ resolve_guest_agent() {
     # from one tree report the same guestAgentVersion.
     AGENT_VERSION="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
     log "guest agent: $AGENT_BINARY ($AGENT_VERSION, sha256 $(sha256_hex "$AGENT_BINARY" | cut -c1-16))"
+}
+
+# The guestAgentVersion the --result JSON reports (attach mode only). Distinct from AGENT_VERSION
+# above -- a git-describe of REPO_ROOT, meaningless on a packaged install with no source tree --
+# this instead runs the actual shipped binary, on the host, the same way install_agent in
+# scripts/lib/macos-guest-provision.sh proves the guest's copy can execute.
+resolve_result_agent_version() {
+    RESULT_AGENT_VERSION="$("$AGENT_BINARY" --version 2>/dev/null | head -1)" || RESULT_AGENT_VERSION=""
+    [ -n "$RESULT_AGENT_VERSION" ] || RESULT_AGENT_VERSION="unknown"
 }
 
 # The payload manifest. `actions/runner` already gets this treatment against GitHub's own release
@@ -488,6 +567,76 @@ authorized_keys cleared from $keys home directories"
 }
 
 # --------------------------------------------------------------------------
+# Attach mode: no tart, no seal -- drive the same hardened SSH provisioning against a VM the
+# caller (the daemon) already booted, and report the outcome as JSON instead of metadata.json.
+# --------------------------------------------------------------------------
+
+# Waits for a halt that the guest brings on itself at the end of the seal-time lockdown (same
+# `finish_harden` tail as the classic path). Attach mode has no tart PID to poll, so "down" is
+# inferred purely from TCP/22 no longer answering -- the VM's actual power state is the caller's
+# to observe (over Virtualization.framework, not this script).
+wait_for_port_closed() {
+    local deadline=$((SECONDS + SHUTDOWN_TIMEOUT))
+    GRACEFUL_SHUTDOWN=1
+    while nc -z -G 3 "$GUEST_IP" 22 >/dev/null 2>&1; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            warn "port 22 on $GUEST_IP is still answering after ${SHUTDOWN_TIMEOUT}s"
+            GRACEFUL_SHUTDOWN=0
+            break
+        fi
+        sleep 5
+    done
+    [ "$GRACEFUL_SHUTDOWN" -eq 1 ] && log "port 22 on $GUEST_IP is closed"
+}
+
+# Writes --result atomically (temp file + rename) in exactly the shape the daemon decodes, always
+# -- on the success path below and from cleanup() on any failure -- so a caller can rely on the
+# file existing the moment this process exits, whatever its exit code.
+write_result_json() {
+    local ok="$1" harden="$2" graceful="$3" ssh="$4" err="$5" tmp
+    [ -n "$RESULT_PATH" ] || return 0
+    mkdir -p "$(dirname "$RESULT_PATH")"
+    tmp="$RESULT_PATH.tmp.$$"
+    if [ "$ok" = "true" ]; then
+        jq -n --argjson ok true \
+            --arg runnerVersion "$RUNNER_VERSION" \
+            --arg guestAgentVersion "$RESULT_AGENT_VERSION" \
+            --argjson hardenProof "$harden" \
+            --argjson gracefulShutdown "$graceful" \
+            --argjson ssh "$ssh" \
+            '{ok: $ok, runnerVersion: $runnerVersion, guestAgentVersion: $guestAgentVersion,
+              hardenProof: $hardenProof, gracefulShutdown: $gracefulShutdown, ssh: $ssh}' >"$tmp"
+    else
+        jq -n --argjson ok false --arg error "$err" --argjson ssh "$ssh" \
+            '{ok: $ok, error: $error, ssh: $ssh}' >"$tmp"
+    fi
+    mv -f "$tmp" "$RESULT_PATH"
+    RESULT_WRITTEN=1
+}
+
+# Everything after wait_for_ssh in the classic flow, minus tart: stage the payload, provision,
+# then either leave SSH open (--debug-ssh) or run the seal-time lockdown and wait for the guest to
+# take itself down. HARDEN_DONE flips only once check_harden_report (inside run_guest_hardening)
+# has actually proven the lockdown, so a failure before that point still reports ssh: true.
+run_attach() {
+    GUEST_IP="$ATTACH_IP"
+    resolve_result_agent_version
+    log "waiting for ssh on $GUEST_IP (attach mode, no tart)"
+    wait_for_ssh
+    stage_payload
+    run_guest_provisioning
+    if [ "$DEBUG_SSH" -eq 1 ]; then
+        warn "--debug-ssh: leaving $GUEST_IP reachable over SSH; no lockdown was run"
+        write_result_json true false false true ""
+    else
+        run_guest_hardening
+        HARDEN_DONE=1
+        wait_for_port_closed
+        write_result_json true true "$(bool_json "$GRACEFUL_SHUTDOWN")" false ""
+    fi
+}
+
+# --------------------------------------------------------------------------
 # Sealing: metadata.json beside Tart's own disk.img/nvram.bin
 # --------------------------------------------------------------------------
 
@@ -613,21 +762,53 @@ cleanup() {
             kill "$TART_PID" 2>/dev/null || true
         fi
     fi
-    [ -z "$WORK" ] || rm -rf "$WORK"
+    # A caller-supplied --work dir is the daemon's own build dir: it cleans that up itself, so only
+    # a self-created mktemp one is removed here.
+    if [ -n "$WORK" ] && [ "$CALLER_OWNS_WORK" -ne 1 ]; then
+        rm -rf "$WORK"
+    fi
+    # --result must exist the moment this process exits, whatever the exit code. The success path
+    # (run_attach) already wrote it; anything that unwound before that -- a die(), or any other
+    # command failing under `set -e` -- lands here instead.
+    if [ -n "$ATTACH_IP" ] && [ "$RESULT_WRITTEN" -ne 1 ]; then
+        write_result_json false "" "" "$(bool_json "$((1 - HARDEN_DONE))")" \
+            "${LAST_ERROR:-provisioning failed (exit $rc)}"
+    fi
     return "$rc"
+}
+
+setup_work_dir() {
+    if [ -n "$WORK_DIR_ARG" ]; then
+        WORK="$WORK_DIR_ARG"
+        mkdir -p "$WORK"
+        CALLER_OWNS_WORK=1
+    else
+        WORK="$(mktemp -d "${TMPDIR:-/tmp}/rvm-macos-provision-XXXXXX")"
+    fi
+    chmod 700 "$WORK"
 }
 
 main() {
     parse_args "$@"
+    # Registered before check_preconditions, not after WORK exists: attach mode must write
+    # --result even when preconditions, agent-binary resolution, or actions/runner resolution
+    # (all before any VM contact) are what fails. cleanup() itself tolerates WORK/TART_PID unset.
+    trap cleanup EXIT
     check_preconditions
     resolve_guest_agent
     resolve_runner
     hash_payload
-    WORK="$(mktemp -d "${TMPDIR:-/tmp}/rvm-macos-provision-XXXXXX")"
-    chmod 700 "$WORK"
-    trap cleanup EXIT
+    setup_work_dir
     init_ssh_opts
     write_expect_helper
+    if [ -n "$ATTACH_IP" ]; then
+        run_attach
+    else
+        run_classic
+    fi
+}
+
+run_classic() {
     clone_vm
     start_vm
     stage_payload

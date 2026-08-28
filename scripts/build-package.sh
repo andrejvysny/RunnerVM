@@ -232,6 +232,11 @@ stage_payload() {
 
     cp "$GUEST_AGENT_LINUX_ARM64" "$share/guest-agent/linux-arm64/runnervm-guest-agent"
     cp "$GUEST_AGENT_DARWIN_ARM64" "$share/guest-agent/darwin-arm64/runnervm-guest-agent"
+    # The in-guest LaunchDaemon plist the macOS provisioning script stages into every image;
+    # provision-macos-tart.sh resolves it relative to the agent binary on packaged hosts.
+    mkdir -p "$share/guest-agent/launchd"
+    cp "$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist" \
+        "$share/guest-agent/launchd/com.runnervm.guest-agent.plist"
 
     cp "$REPO_ROOT/packaging/launchd/com.runnervm.runnerd.agent.plist" \
         "$REPO_ROOT/packaging/launchd/com.runnervm.runnerd.daemon.plist" \

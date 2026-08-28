@@ -192,6 +192,8 @@ expect_path_exists "staged: share/runnervm/guest-agent/linux-arm64/runnervm-gues
     "$USR_LOCAL/share/runnervm/guest-agent/linux-arm64/runnervm-guest-agent"
 expect_path_exists "staged: share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent" \
     "$USR_LOCAL/share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent"
+expect_path_exists "staged: share/runnervm/guest-agent/launchd/com.runnervm.guest-agent.plist" \
+    "$USR_LOCAL/share/runnervm/guest-agent/launchd/com.runnervm.guest-agent.plist"
 expect_path_exists "staged: share/runnervm/launchd/com.runnervm.runnerd.agent.plist" \
     "$USR_LOCAL/share/runnervm/launchd/com.runnervm.runnerd.agent.plist"
 expect_path_exists "staged: share/runnervm/launchd/com.runnervm.runnerd.daemon.plist" \
