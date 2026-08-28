@@ -45,7 +45,7 @@ avoids is a real one.
 
 ## Reports
 
-`docs/e2e/reports/` holds the raw JSON `scripts/live-github-e2e.sh` wrote for the same deployment:
+`docs/e2e/reports/` holds the raw JSON the drivers wrote during the same session, unedited:
 
 - `2026-08-28-blackpen-suite.json` — the 11-scenario run. `redelivery` is recorded `fail` and that
   result is **not** the daemon's: another host had taken the scale-set message session out from
@@ -53,7 +53,15 @@ avoids is a real one.
   edited, because the honest artifact is more useful than a tidy one.
 - `2026-08-28-blackpen-redelivery-rerun.json` — `redelivery` re-run on its own once the session was
   back: pass, 29 s.
+- `2026-08-28-macos-qualify-h2.json` — the first-ever run of `scripts/qualify-macos-image.sh` (the
+  H2 gate), against the hardened `macos-26` image, from the development Mac rather than the Mac
+  mini. `qualified: false`, one check failed: `cold_boot_to_idle — instance reached deleted`. Kept
+  because the *shape* of the failure is the finding: the clone booted normally and the other four
+  checks passed, but the script creates its instance with `vm create`, and an ephemeral instance
+  with no confirmed GitHub demand behind it is surplus, so the scheduler removed it after 11 s
+  (`instance.cancelled (demand dropped)`). The gate cannot pass as written — see
+  `docs/macos-guests.md`, "Image qualification".
 
-The cause of that interference is fixed (a disabled profile no longer keeps its scale-set session)
-and the rule it violated is now written down in `docs/install.md`, "One host per profile name, per
-scope".
+The cause of the `redelivery` interference is fixed (a disabled profile no longer keeps its
+scale-set session) and the rule it violated is now written down in `docs/install.md`, "One host per
+profile name, per scope".

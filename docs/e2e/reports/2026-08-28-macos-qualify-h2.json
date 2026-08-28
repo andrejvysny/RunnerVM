@@ -1,0 +1,46 @@
+{
+  "profile": "rvm-macos-26",
+  "imageDigest": "sha256:c4626467020bffe9b4752fc83ba428383626f1b758d2ddde8f0be057b857530b",
+  "instanceId": "b01093f0-5788-4359-ba62-e56a15568314",
+  "checksRun": 5,
+  "checksFailed": 1,
+  "qualified": false,
+  "checks": [
+    {
+      "name": "instance_created",
+      "status": "pass",
+      "detail": "b01093f0-5788-4359-ba62-e56a15568314",
+      "at": "2026-08-28T09:29:46Z"
+    },
+    {
+      "name": "cold_boot_to_idle",
+      "status": "fail",
+      "detail": "instance reached deleted:  ",
+      "at": "2026-08-28T09:29:57Z"
+    },
+    {
+      "name": "teardown_clean",
+      "status": "pass",
+      "detail": "final state=deleted",
+      "at": "2026-08-28T09:29:57Z"
+    },
+    {
+      "name": "no_live_instances",
+      "status": "pass",
+      "detail": "0 non-deleted instance(s)",
+      "at": "2026-08-28T09:29:57Z"
+    },
+    {
+      "name": "instance_directory_removed",
+      "status": "pass",
+      "detail": "/Users/andrejvysny/runnervm-dev/instances/b01093f0-5788-4359-ba62-e56a15568314",
+      "at": "2026-08-28T09:29:57Z"
+    },
+    {
+      "name": "image_digest_unchanged",
+      "status": "pass",
+      "detail": "before=sha256:c4626467020bffe9b4752fc83ba428383626f1b758d2ddde8f0be057b857530b after=sha256:c4626467020bffe9b4752fc83ba428383626f1b758d2ddde8f0be057b857530b",
+      "at": "2026-08-28T09:29:57Z"
+    }
+  ]
+}

@@ -197,7 +197,8 @@ GitHub demand behind it is surplus, so the scheduler scales it away before the g
 `waitingForAgent` in 6 s — and the run's other four checks (teardown, no live instances, instance
 directory removed, image digest unchanged) passed. The gate needs `github.demand: manual`, a pin on
 the instance it creates, or a host mode that suspends scale-to-zero while it runs. Until then the
-acceptance path for a macOS image is a real GitHub job, not this script.
+acceptance path for a macOS image is a real GitHub job, not this script. That run's report is
+[`docs/e2e/reports/2026-08-28-macos-qualify-h2.json`](e2e/reports/2026-08-28-macos-qualify-h2.json).
 
 ## Guest side
 
