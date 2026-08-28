@@ -32,6 +32,10 @@ jobs:
         run: swift build
       - name: Test
         run: swift test --parallel
+      - name: Build (release config)
+        # The runnervm Homebrew formula runs exactly this; catch release-config-only breakage
+        # (e.g. optimizer-only errors) before it silently breaks `brew install`.
+        run: swift build -c release --product runnerd --product runnerctl --product vmworker
       - name: Sign vmworker
         run: scripts/sign-dev.sh
       - name: Verify vmworker entitlement

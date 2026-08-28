@@ -57,6 +57,30 @@ Passing `--group staff` is refused unless `--allow-staff-group` is also given.
 Verify with `--dry-run` first; it performs no filesystem writes and prints every action, including
 the fully rendered launchd plist.
 
+## Installing via Homebrew
+
+```sh
+brew install andrejvysny/runnervm/runnervm
+```
+
+This builds and ad-hoc signs `runnerd`/`runnerctl`/`vmworker` and the Linux guest agent the same
+way `scripts/install.sh` does on its own (same entitlements file, same `codesign` invocation), and
+installs them into the Homebrew prefix (`runnerctl` on your `PATH`, `runnerd`/`vmworker` under
+`libexec`, everything else under `share/runnervm`). It does **not** perform any of the steps above
+that need root — Homebrew formulae must never call `sudo`. Finish with:
+
+```sh
+sudo "$(brew --prefix runnervm)/share/runnervm/scripts/install.sh" \
+    --prebuilt-dir "$(brew --prefix runnervm)" \
+    --launchd agent --config path/to/config.yaml
+```
+
+`--prebuilt-dir` points `install.sh` at the already-built keg instead of running `swift build`/
+`make -C GuestAgent build-linux` again; every other step (service account, state/runtime
+directories, launchd job) is identical to a from-source install. Upgrades: `brew upgrade runnervm`
+followed by the same `sudo ... install.sh --prebuilt-dir ...` command re-signs and re-installs the
+binaries in place (see "Upgrade procedure" below).
+
 ## Choosing a launchd variant (plan spike S3)
 
 `scripts/install.sh --launchd agent|daemon|none`. Full trade-off, provisioning steps and
@@ -194,7 +218,9 @@ pipelines.
 2. `sudo launchctl bootout gui/$(id -u _runnervm) /Library/LaunchAgents/com.runnervm.runnerd.agent.plist`
    (or `system` + the daemon plist path for the LaunchDaemon variant).
 3. Re-run `scripts/install.sh` with the same flags — it overwrites the binaries and re-signs
-   `vmworker` in place; state and runtime directories are untouched.
+   `vmworker` in place; state and runtime directories are untouched. Homebrew installs:
+   `brew upgrade runnervm` first, then re-run the `install.sh --prebuilt-dir ...` command from
+   "Installing via Homebrew" above.
 4. `runnerctl doctor` to confirm the new binary is signed and `vmworker probe` still succeeds.
 5. Reload the job (`launchctl bootstrap ...`, printed by `install.sh`), then `runnerctl system
    resume` to advertise capacity again.

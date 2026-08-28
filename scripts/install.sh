@@ -26,6 +26,7 @@ DRY_RUN=0
 UNINSTALL=0
 ALLOW_STAFF_GROUP=0
 SKIP_GUEST_AGENT=0
+PREBUILT_DIR=""
 : "${CODESIGN_IDENTITY:=-}"
 
 usage() {
@@ -47,6 +48,12 @@ usage: install.sh [options]
   --skip-guest-agent    Skip building/installing the Linux guest-agent binary the image builder's
                          boot seed installs. Only useful when Go is unavailable and a build isn't
                          needed on this host; `runnerctl image build` will fail without it.
+  --prebuilt-dir <dir>  Use already-built artifacts from <dir> instead of building from source:
+                         <dir>/bin/runnerctl, <dir>/libexec/{runnerd,vmworker},
+                         <dir>/share/runnervm/{Resources,recipes,guest-agent/...} -- the layout a
+                         Homebrew keg installs (see the runnervm formula). Skips `swift build` and
+                         `make -C GuestAgent build-linux` entirely; everything else (signing,
+                         service account, state dir, launchd) is unchanged.
   --dry-run             Print every action instead of performing it; no filesystem writes.
   --uninstall           Remove installed binaries and the launchd job; state is left in place.
   -h, --help             Show this help.
@@ -71,6 +78,7 @@ while [ $# -gt 0 ]; do
     --log-level) LOG_LEVEL="$2"; shift 2 ;;
     --allow-staff-group) ALLOW_STAFF_GROUP=1; shift ;;
     --skip-guest-agent) SKIP_GUEST_AGENT=1; shift ;;
+    --prebuilt-dir) PREBUILT_DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -89,6 +97,10 @@ esac
 [ -n "$SERVICE_USER" ] || { echo "--user must not be empty" >&2; exit 2; }
 if [ -n "$CONFIG_SRC" ] && [ ! -f "$CONFIG_SRC" ]; then
     echo "--config file not found: $CONFIG_SRC" >&2
+    exit 2
+fi
+if [ -n "$PREBUILT_DIR" ] && [ ! -d "$PREBUILT_DIR" ]; then
+    echo "--prebuilt-dir not found: $PREBUILT_DIR" >&2
     exit 2
 fi
 
@@ -121,9 +133,6 @@ BIN_DIR="$PREFIX/bin"
 CONFIG_DEST="$STATE_DIR/config.yaml"
 LOG_DIR="$STATE_DIR/logs"
 LOG_PATH="$LOG_DIR/runnerd.log"
-RUNNERD_BUILT="$REPO_ROOT/.build/release/runnerd"
-RUNNERCTL_BUILT="$REPO_ROOT/.build/release/runnerctl"
-VMWORKER_BUILT="$REPO_ROOT/.build/release/vmworker"
 RUNNERD_DEST="$LIBEXEC_DIR/runnerd"
 VMWORKER_DEST="$LIBEXEC_DIR/vmworker"
 RUNNERCTL_DEST="$BIN_DIR/runnerctl"
@@ -132,13 +141,32 @@ DAEMON_PLIST_DEST="/Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist"
 # Image builder assets (spec P6): the Linux guest agent the boot seed installs, the shipped
 # Runnerfile recipes, and the directories the builder itself expects under STATE_DIR
 # (RunnerPaths.buildsDir/baseImageCacheDir/buildLogsDir -- see Sources/RunnerCore/Configuration/Paths.swift).
-GUEST_AGENT_BUILT="$REPO_ROOT/GuestAgent/bin/linux-arm64/runnervm-guest-agent"
 GUEST_AGENT_DIR="$STATE_DIR/guest-agent/linux-arm64"
 GUEST_AGENT_DEST="$GUEST_AGENT_DIR/runnervm-guest-agent"
-GUEST_AGENT_UNIT_SRC="$REPO_ROOT/GuestAgent/packaging/systemd/runnervm-guest-agent.service"
 GUEST_AGENT_UNIT_DEST="$GUEST_AGENT_DIR/runnervm-guest-agent.service"
-RECIPES_SRC="$REPO_ROOT/images/recipes"
 RECIPES_DEST="$STATE_DIR/share/recipes"
+
+# Where the binaries/assets to install come from: either freshly built from this checkout
+# (default), or already built and staged by something else (a Homebrew keg -- see the runnervm
+# formula) and pointed at via --prebuilt-dir. Either way, everything past this point (signing,
+# service account, state dir, launchd) is identical.
+if [ -n "$PREBUILT_DIR" ]; then
+    RUNNERD_BUILT="$PREBUILT_DIR/libexec/runnerd"
+    RUNNERCTL_BUILT="$PREBUILT_DIR/bin/runnerctl"
+    VMWORKER_BUILT="$PREBUILT_DIR/libexec/vmworker"
+    ENTITLEMENTS_PATH="$PREBUILT_DIR/share/runnervm/Resources/vmworker.entitlements"
+    GUEST_AGENT_BUILT="$PREBUILT_DIR/share/runnervm/guest-agent/linux-arm64/runnervm-guest-agent"
+    GUEST_AGENT_UNIT_SRC="$PREBUILT_DIR/share/runnervm/guest-agent/systemd/runnervm-guest-agent.service"
+    RECIPES_SRC="$PREBUILT_DIR/share/runnervm/recipes"
+else
+    RUNNERD_BUILT="$REPO_ROOT/.build/release/runnerd"
+    RUNNERCTL_BUILT="$REPO_ROOT/.build/release/runnerctl"
+    VMWORKER_BUILT="$REPO_ROOT/.build/release/vmworker"
+    ENTITLEMENTS_PATH="$REPO_ROOT/Resources/vmworker.entitlements"
+    GUEST_AGENT_BUILT="$REPO_ROOT/GuestAgent/bin/linux-arm64/runnervm-guest-agent"
+    GUEST_AGENT_UNIT_SRC="$REPO_ROOT/GuestAgent/packaging/systemd/runnervm-guest-agent.service"
+    RECIPES_SRC="$REPO_ROOT/images/recipes"
+fi
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] warning: %s\n' "$*" >&2; }
@@ -179,7 +207,7 @@ privileged() {
 sign_and_verify_vmworker() {
     local bin="$1"
     codesign --force --sign "$CODESIGN_IDENTITY" \
-        --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$bin" \
+        --entitlements "$ENTITLEMENTS_PATH" "$bin" \
         || { echo "error: codesign failed for $bin" >&2; exit 1; }
     codesign --verify --strict "$bin" \
         || { echo "error: signature verification failed for $bin" >&2; exit 1; }
@@ -350,16 +378,20 @@ check_socket_path_lengths "$RUNTIME_DIR"
 # --------------------------------------------------------------------------
 # 3. Build release binaries
 # --------------------------------------------------------------------------
-step "swift build -c release (runnerd, runnerctl, vmworker)" \
-    env -C "$REPO_ROOT" swift build -c release \
-    --product runnerd --product runnerctl --product vmworker
+if [ -n "$PREBUILT_DIR" ]; then
+    log "using prebuilt artifacts from $PREBUILT_DIR (skipping swift build)"
+else
+    step "swift build -c release (runnerd, runnerctl, vmworker)" \
+        env -C "$REPO_ROOT" swift build -c release \
+        --product runnerd --product runnerctl --product vmworker
+fi
 
 # --------------------------------------------------------------------------
 # 4. Sign vmworker with the virtualization entitlement (spec §7.2)
 # --------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
-    printf '+ codesign --force --sign "%s" --entitlements Resources/vmworker.entitlements %s\n' \
-        "$CODESIGN_IDENTITY" "$VMWORKER_BUILT"
+    printf '+ codesign --force --sign "%s" --entitlements %s %s\n' \
+        "$CODESIGN_IDENTITY" "$ENTITLEMENTS_PATH" "$VMWORKER_BUILT"
     printf '+ codesign -d --entitlements :- %s | grep -q com.apple.security.virtualization\n' \
         "$VMWORKER_BUILT"
 else
@@ -381,8 +413,8 @@ privileged "install runnerctl -> $RUNNERCTL_DEST" install -m 0755 "$RUNNERCTL_BU
 # its entitlement, so this fails closed: a signing or verification failure aborts the install.
 # When the copy itself was deferred to a manual sudo step, the same commands are queued after it.
 if [ "$DRY_RUN" -eq 1 ]; then
-    printf '+ codesign --force --sign "%s" --entitlements Resources/vmworker.entitlements %s\n' \
-        "$CODESIGN_IDENTITY" "$VMWORKER_DEST"
+    printf '+ codesign --force --sign "%s" --entitlements %s %s\n' \
+        "$CODESIGN_IDENTITY" "$ENTITLEMENTS_PATH" "$VMWORKER_DEST"
     printf '+ codesign --verify --strict %s && %s probe --json\n' "$VMWORKER_DEST" "$VMWORKER_DEST"
 elif [ -f "$VMWORKER_DEST" ] && [ -w "$VMWORKER_DEST" ]; then
     sign_and_verify_vmworker "$VMWORKER_DEST"
@@ -390,7 +422,7 @@ elif [ -f "$VMWORKER_DEST" ] && [ -w "$VMWORKER_DEST" ]; then
 else
     MANUAL_STEPS+=(
         "$(quote_cmd codesign --force --sign "$CODESIGN_IDENTITY" \
-            --entitlements "$REPO_ROOT/Resources/vmworker.entitlements" "$VMWORKER_DEST")"
+            --entitlements "$ENTITLEMENTS_PATH" "$VMWORKER_DEST")"
         "$(quote_cmd codesign --verify --strict "$VMWORKER_DEST")"
         "$(quote_cmd "$VMWORKER_DEST" probe --json)"
     )
@@ -454,6 +486,13 @@ if [ "$SKIP_GUEST_AGENT" -eq 1 ]; then
     warn "--skip-guest-agent: not installing a guest agent; \`runnerctl image build\` will fail until one is placed at $GUEST_AGENT_DEST"
 elif [ -f "$GUEST_AGENT_BUILT" ]; then
     log "found prebuilt guest agent: $GUEST_AGENT_BUILT"
+elif [ -n "$PREBUILT_DIR" ]; then
+    # --prebuilt-dir has no GuestAgent source tree to build from -- the keg was expected to
+    # already carry this binary (the runnervm formula always builds it).
+    echo "error: guest agent not found at $GUEST_AGENT_BUILT (expected under --prebuilt-dir $PREBUILT_DIR)" >&2
+    echo "pass --skip-guest-agent to install without it (image builds will fail until one is" >&2
+    echo "placed at $GUEST_AGENT_DEST)." >&2
+    exit 1
 elif [ "$DRY_RUN" -eq 1 ]; then
     # Never actually build in a dry run: whether Go happens to be installed on the machine
     # running --dry-run has nothing to do with what a real install would do.

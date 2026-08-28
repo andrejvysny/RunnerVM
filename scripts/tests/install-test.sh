@@ -125,5 +125,67 @@ else
     ok "--skip-guest-agent installs nothing under guest-agent/"
 fi
 
+# --------------------------------------------------------------------------
+# 7. --prebuilt-dir: skips both build steps and sources artifacts from a Homebrew-keg-shaped
+#    layout (bin/runnerctl, libexec/{runnerd,vmworker}, share/runnervm/{Resources,recipes,
+#    guest-agent/...}) instead of $REPO_ROOT/.build -- see the runnervm Homebrew formula.
+# --------------------------------------------------------------------------
+make_fake_prebuilt() {
+    local dir="$1" with_agent="$2"
+    mkdir -p "$dir/bin" "$dir/libexec" "$dir/share/runnervm/Resources" \
+        "$dir/share/runnervm/recipes/dummy"
+    : >"$dir/bin/runnerctl"
+    : >"$dir/libexec/runnerd"
+    : >"$dir/libexec/vmworker"
+    cp "$REPO_ROOT/Resources/vmworker.entitlements" "$dir/share/runnervm/Resources/"
+    : >"$dir/share/runnervm/recipes/dummy/Runnerfile"
+    if [ "$with_agent" -eq 1 ]; then
+        mkdir -p "$dir/share/runnervm/guest-agent/linux-arm64" \
+            "$dir/share/runnervm/guest-agent/systemd"
+        : >"$dir/share/runnervm/guest-agent/linux-arm64/runnervm-guest-agent"
+        : >"$dir/share/runnervm/guest-agent/systemd/runnervm-guest-agent.service"
+    fi
+}
+
+PREBUILT_OK="$WORK/prebuilt-ok"
+make_fake_prebuilt "$PREBUILT_OK" 1
+out="$(dry_run prebuilt --prebuilt-dir "$PREBUILT_OK")"
+expect_contains "$out" "skipping swift build" \
+    "--prebuilt-dir skips the swift build step"
+case "$out" in
+*"make -C GuestAgent"*) no "--prebuilt-dir skips the guest-agent build step" "found: $out" ;;
+*) ok "--prebuilt-dir skips the guest-agent build step" ;;
+esac
+expect_contains "$out" "$PREBUILT_OK/libexec/vmworker" \
+    "--prebuilt-dir signs the keg's vmworker, not a freshly built one"
+expect_contains "$out" "$PREBUILT_OK/share/runnervm/Resources/vmworker.entitlements" \
+    "--prebuilt-dir signs with the keg's shipped entitlements file"
+expect_contains "$out" "$PREBUILT_OK/bin/runnerctl" \
+    "--prebuilt-dir installs the keg's runnerctl"
+
+PREBUILT_NO_AGENT="$WORK/prebuilt-no-agent"
+make_fake_prebuilt "$PREBUILT_NO_AGENT" 0
+if out="$(dry_run prebuilt-no-agent --prebuilt-dir "$PREBUILT_NO_AGENT")"; then
+    no "--prebuilt-dir without a guest agent present exits non-zero" "$out"
+else
+    ok "--prebuilt-dir without a guest agent present exits non-zero"
+    expect_contains "$out" "guest agent not found" \
+        "missing-guest-agent error names the problem"
+    expect_contains "$out" "skip-guest-agent" \
+        "missing-guest-agent error names the escape hatch"
+fi
+
+# --skip-guest-agent bypasses the missing-agent check even under --prebuilt-dir.
+out="$(dry_run prebuilt-skip-agent --prebuilt-dir "$PREBUILT_NO_AGENT" --skip-guest-agent)"
+expect_contains "$out" "skipping swift build" \
+    "--prebuilt-dir --skip-guest-agent still skips the swift build step"
+
+if out="$("$SCRIPT" --dry-run --prebuilt-dir "$WORK/does-not-exist" 2>&1)"; then
+    no "--prebuilt-dir pointing at a missing directory exits non-zero" "$out"
+else
+    ok "--prebuilt-dir pointing at a missing directory exits non-zero"
+    expect_contains "$out" "not found" "missing --prebuilt-dir error names the problem"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

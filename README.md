@@ -21,7 +21,8 @@ scripts/sign-dev.sh              # ad-hoc sign vmworker for local development
 ```
 
 For a production install (release binaries, launchd packaging, dedicated service
-account) see [`docs/install.md`](docs/install.md).
+account) see [`docs/install.md`](docs/install.md) — including installing via
+`brew install andrejvysny/runnervm/runnervm`.
 
 ## Status
 
@@ -55,7 +56,7 @@ runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22           
 - [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
-  [`docs/state_machines.md`](docs/state_machines.md).
+  [`docs/state_machines.md`](docs/state_machines.md), [`docs/release.md`](docs/release.md).
 - [`Proto/`](Proto) — the daemon/worker/guest wire protocols.
 
 ## Provenance
