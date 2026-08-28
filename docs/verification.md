@@ -2,6 +2,38 @@
 
 What has actually been exercised, and how. Updated 2026-08-28.
 
+## Milestone D local verification (2026-08-28, dev Mac)
+
+Everything below ran on the development Mac against the freshly built tree, before any release or
+tag exists. Hardware matrix items (fresh-Mac curl install, reboot loop, upgrade on a real
+install, managed macOS provisioning) remain open — `TODO.md`.
+
+- **Package**: `scripts/build-package.sh` produced `RunnerVM-macos-arm64.pkg` (22 MB), `shasum -c`
+  OK, `release-manifest.json` exactly the documented shape (version 0.2.0, signed false);
+  `pkgutil --expand-full` payload carried a strictly-verified `vmworker` with
+  `com.apple.security.virtualization`, `share/runnervm/VERSION` = `0.2.0`, and the guest-agent
+  LaunchDaemon plist under `share/runnervm/guest-agent/launchd/`.
+- **Schema v4 migration**: the dev state root (schema 3) migrated in place to 4 on first daemon
+  start; all four cached images listed afterwards.
+- **Pinned maintenance instances**: `vm create --pinned --ttl 10m` booted to `idle` under
+  `demand: manual` with zero GitHub demand and was NOT scaled away; capacity accounting held (a
+  later create was refused `SCHEDULER_INSUFFICIENT_MEMORY` while two pinned VMs sat idle).
+- **`system smoke-test` live, Linux** (`ubuntu-24`): create -> idle in **6 s** -> `uname -a` ->
+  delete -> leak checks green (state deleted, directory removed, no vmworker). 10 s total.
+- **`system smoke-test` live, macOS** (hardened `macos-26`): idle in **8-10 s**, `sw_vers`
+  26.6.2, TCP/22 closed on the guest address, clean teardown, no leaks. `guest.selfTest` reported
+  skipped — the image was sealed before the agent grew `agent.selfTest`; the check passes with a
+  rebuild recommendation instead of failing a working host.
+- **Defect found live and fixed**: the first `system smoke-test` run aborted `runnerctl`
+  (`swift_task_dealloc`: "freed pointer was not the last allocation"). Trigger: dispatching
+  `SmokeTest`'s async daemon calls through an `any SmokeTestDaemon` existential onto the
+  `DaemonClient` actor; in-process test fakes never hit it. Fix: `SmokeTest` is generic over its
+  daemon, with an SE-0352 opening shim (`runSmokeTest`) for existential call sites. The daemon
+  side was unaffected throughout (the crashed run's pinned VM booted to idle on its own and was
+  deleted normally).
+- Transient: two `system.status` calls during daemon startup/worker-recovery returned
+  `DAEMON_DISCONNECTED`, fine once ready — watch item, not reproduced afterwards.
+
 ## Live end-to-end (Linux/arm64) — PASS
 
 Proven on **`andrejvysny/github-managed-runners`** (public repo), host macOS 26.4 (Apple Silicon),

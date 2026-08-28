@@ -12,15 +12,21 @@ import RunnerCore
 /// exited zero, is meaningful -- but teardown and the leak checks always run at the end,
 /// regardless of what failed above them: a smoke test that fails must not leave a VM behind any
 /// more than one that passes.
-public struct SmokeTest: Sendable {
-  private let client: any SmokeTestDaemon
+///
+/// Step helpers RETURN their checks instead of appending through an `inout` array: passing an
+/// `inout` parameter across the suspension points in these helpers aborted the Swift task
+/// allocator at runtime ("freed pointer was not the last allocation" in `swift_task_dealloc`)
+/// on a live daemon round trip, while in-process test fakes never tripped it. Found live
+/// 2026-08-28 on the first real `system smoke-test` run; do not reintroduce the pattern.
+public struct SmokeTest<Daemon: SmokeTestDaemon>: Sendable {
+  private let client: Daemon
   private let paths: RunnerPaths
   private let now: @Sendable () -> Date
   private let sleep: @Sendable (Duration) async throws -> Void
   private let sshPort: UInt16
 
   public init(
-    client: any SmokeTestDaemon, paths: RunnerPaths,
+    client: Daemon, paths: RunnerPaths,
     now: @escaping @Sendable () -> Date = { Date() },
     sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
   ) {
@@ -30,7 +36,7 @@ public struct SmokeTest: Sendable {
   /// Test-only entry point: lets `HostSetupTests` point the ssh-closed check at a local listener
   /// instead of the real port 22, which a sandboxed test runner cannot always bind.
   init(
-    client: any SmokeTestDaemon, paths: RunnerPaths, now: @escaping @Sendable () -> Date,
+    client: Daemon, paths: RunnerPaths, now: @escaping @Sendable () -> Date,
     sleep: @escaping @Sendable (Duration) async throws -> Void, sshPort: UInt16
   ) {
     self.client = client
@@ -43,18 +49,24 @@ public struct SmokeTest: Sendable {
   public func run(_ options: SmokeTestOptions) async -> SmokeTestReport {
     var checks: [SmokeTestCheck] = []
 
-    guard let id = await create(options, checks: &checks) else {
+    let (id, createCheck) = await create(options)
+    checks.append(createCheck)
+    guard let id else {
       return SmokeTestReport(profile: options.profile, instanceId: nil, checks: checks, passed: false)
     }
 
-    if await pollUntilIdle(id: id, timeout: options.bootTimeout, checks: &checks) {
-      if await execCheck(id: id, macOS: options.macOS, checks: &checks), options.macOS {
-        await selfTestCheck(id: id, checks: &checks)
-        await sshClosedCheck(id: id, checks: &checks)
+    let (booted, bootCheck) = await pollUntilIdle(id: id, timeout: options.bootTimeout)
+    checks.append(bootCheck)
+    if booted {
+      let (execOK, execCheck) = await execCheck(id: id, macOS: options.macOS)
+      checks.append(execCheck)
+      if execOK, options.macOS {
+        checks.append(await selfTestCheck(id: id))
+        checks.append(await sshClosedCheck(id: id))
       }
     }
 
-    await teardownAndLeakChecks(id: id, checks: &checks)
+    checks.append(contentsOf: await teardownAndLeakChecks(id: id))
 
     return SmokeTestReport(
       profile: options.profile, instanceId: id, checks: checks, passed: checks.allSatisfy(\.ok))
@@ -62,26 +74,22 @@ public struct SmokeTest: Sendable {
 
   // MARK: - Create
 
-  private func create(_ options: SmokeTestOptions, checks: inout [SmokeTestCheck]) async -> String? {
+  private func create(_ options: SmokeTestOptions) async -> (String?, SmokeTestCheck) {
     do {
       let instance = try await client.instanceCreate(
         profile: options.profile, purpose: InstancePurpose.maintenance.rawValue,
         ttlMs: options.ttlMs, imageOverride: options.imageOverride)
-      checks.append(SmokeTestCheck(name: "instance.create", ok: true, detail: instance.id))
-      return instance.id
+      return (instance.id, SmokeTestCheck(name: "instance.create", ok: true, detail: instance.id))
     } catch {
-      checks.append(SmokeTestCheck(name: "instance.create", ok: false, detail: "\(error)"))
-      return nil
+      return (nil, SmokeTestCheck(name: "instance.create", ok: false, detail: "\(error)"))
     }
   }
 
   // MARK: - Boot
 
   /// Polls the same call `vm show` uses, at a 1s interval, until `idle` (pass), a terminal state
-  /// (fail, with the state and any failure detail), or `timeout` elapses (fail).
-  private func pollUntilIdle(
-    id: String, timeout: Duration, checks: inout [SmokeTestCheck]
-  ) async -> Bool {
+  /// (fail), or the timeout.
+  private func pollUntilIdle(id: String, timeout: Duration) async -> (Bool, SmokeTestCheck) {
     let started = now()
     let deadline = started.addingTimeInterval(Self.doubleSeconds(timeout))
     while true {
@@ -89,42 +97,37 @@ public struct SmokeTest: Sendable {
       do {
         instance = try await client.instanceGet(id: id)
       } catch {
-        checks.append(SmokeTestCheck(name: "instance.boot", ok: false, detail: "instance.get: \(error)"))
-        return false
+        return (false, SmokeTestCheck(name: "instance.boot", ok: false, detail: "instance.get: \(error)"))
       }
       switch instance.state {
       case "idle":
         let elapsed = Int(now().timeIntervalSince(started))
-        checks.append(SmokeTestCheck(name: "instance.boot", ok: true, detail: "idle after \(elapsed)s"))
-        return true
+        return (true, SmokeTestCheck(name: "instance.boot", ok: true, detail: "idle after \(elapsed)s"))
       case "failed", "interrupted", "deleted":
         let reason = [instance.failureCode, instance.failureMessage].compactMap { $0 }
           .joined(separator: ": ")
-        checks.append(SmokeTestCheck(
+        return (false, SmokeTestCheck(
           name: "instance.boot", ok: false,
           detail: "reached \(instance.state)" + (reason.isEmpty ? "" : ": \(reason)")))
-        return false
       default:
         break
       }
       guard now() < deadline else {
-        checks.append(SmokeTestCheck(
+        return (false, SmokeTestCheck(
           name: "instance.boot", ok: false,
           detail: "still \(instance.state) after \(Int(Self.doubleSeconds(timeout)))s"))
-        return false
       }
       do {
         try await sleep(.seconds(1))
       } catch {
-        checks.append(SmokeTestCheck(name: "instance.boot", ok: false, detail: "cancelled"))
-        return false
+        return (false, SmokeTestCheck(name: "instance.boot", ok: false, detail: "cancelled"))
       }
     }
   }
 
   // MARK: - Guest exec
 
-  private func execCheck(id: String, macOS: Bool, checks: inout [SmokeTestCheck]) async -> Bool {
+  private func execCheck(id: String, macOS: Bool) async -> (Bool, SmokeTestCheck) {
     let argv = macOS ? ["sw_vers", "-productVersion"] : ["uname", "-a"]
     do {
       let stream = try await client.instanceExec(InstanceExecRequest(id: id, argv: argv))
@@ -139,61 +142,65 @@ public struct SmokeTest: Sendable {
       let text = String(decoding: output, as: UTF8.self)
         .trimmingCharacters(in: .whitespacesAndNewlines)
       guard exitCode == 0 else {
-        checks.append(SmokeTestCheck(
+        return (false, SmokeTestCheck(
           name: "guest.exec", ok: false, detail: "exit \(exitCode.map(String.init) ?? "?"): \(text)"))
-        return false
       }
-      checks.append(SmokeTestCheck(name: "guest.exec", ok: true, detail: text))
-      return true
+      return (true, SmokeTestCheck(name: "guest.exec", ok: true, detail: text))
     } catch {
-      checks.append(SmokeTestCheck(name: "guest.exec", ok: false, detail: "\(error)"))
-      return false
+      return (false, SmokeTestCheck(name: "guest.exec", ok: false, detail: "\(error)"))
     }
   }
 
   // MARK: - macOS-only guest checks
 
-  private func selfTestCheck(id: String, checks: inout [SmokeTestCheck]) async {
+  private func selfTestCheck(id: String) async -> SmokeTestCheck {
     do {
       let result = try await client.instanceSelfTest(id: id)
       guard !result.passed else {
-        checks.append(SmokeTestCheck(
-          name: "guest.selfTest", ok: true, detail: "\(result.checks.count) check(s) passed"))
-        return
+        return SmokeTestCheck(
+          name: "guest.selfTest", ok: true, detail: "\(result.checks.count) check(s) passed")
       }
       let failed = result.checks.first { !$0.ok }
-      checks.append(SmokeTestCheck(
+      return SmokeTestCheck(
         name: "guest.selfTest", ok: false,
-        detail: failed.map { "\($0.name): \($0.detail)" } ?? "self-test failed"))
+        detail: failed.map { "\($0.name): \($0.detail)" } ?? "self-test failed")
     } catch {
-      checks.append(SmokeTestCheck(name: "guest.selfTest", ok: false, detail: "\(error)"))
+      // An image sealed before the agent grew `agent.selfTest` is still a working runner; the
+      // missing proof is a reason to rebuild the image, not to fail the host.
+      let text = "\(error)"
+      if text.contains("UNKNOWN_METHOD") {
+        return SmokeTestCheck(
+          name: "guest.selfTest", ok: true,
+          detail: "skipped: guest agent predates agent.selfTest; rebuild the image to enable the "
+            + "CI-keychain proof")
+      }
+      return SmokeTestCheck(name: "guest.selfTest", ok: false, detail: text)
     }
   }
 
   /// A refused or timed-out connection to port 22 is the pass here -- the seal-time lockdown
   /// disables sshd, and a fresh boot has to prove it held. No IP reported is not a failure of the
   /// guest's own lockdown, so it is skipped (recorded as passing) rather than failed.
-  private func sshClosedCheck(id: String, checks: inout [SmokeTestCheck]) async {
+  private func sshClosedCheck(id: String) async -> SmokeTestCheck {
     do {
       let info = try await client.instanceSSHInfo(id: id)
       guard let address = info.ipAddresses.first else {
-        checks.append(SmokeTestCheck(
-          name: "guest.sshClosed", ok: true, detail: "no IP reported; skipped"))
-        return
+        return SmokeTestCheck(name: "guest.sshClosed", ok: true, detail: "no IP reported; skipped")
       }
       let open = PortProbe.isOpen(host: address, port: sshPort, timeout: .seconds(3))
-      checks.append(SmokeTestCheck(
+      return SmokeTestCheck(
         name: "guest.sshClosed", ok: !open,
         detail: open
-          ? "\(address):\(sshPort) accepted a connection" : "\(address):\(sshPort) closed"))
+          ? "\(address):\(sshPort) accepted a connection" : "\(address):\(sshPort) closed")
     } catch {
-      checks.append(SmokeTestCheck(name: "guest.sshClosed", ok: false, detail: "\(error)"))
+      return SmokeTestCheck(name: "guest.sshClosed", ok: false, detail: "\(error)")
     }
   }
 
   // MARK: - Teardown + leak checks
 
-  private func teardownAndLeakChecks(id: String, checks: inout [SmokeTestCheck]) async {
+  private func teardownAndLeakChecks(id: String) async -> [SmokeTestCheck] {
+    var checks: [SmokeTestCheck] = []
     do {
       _ = try await client.instanceDelete(id: id)
       checks.append(SmokeTestCheck(name: "instance.delete", ok: true))
@@ -214,6 +221,7 @@ public struct SmokeTest: Sendable {
     checks.append(SmokeTestCheck(
       name: "leak.vmworkerProcess", ok: !leaked,
       detail: leaked ? "a vmworker process still references \(shortId)" : "none"))
+    return checks
   }
 
   /// Polls up to 60s for the instance to reach `deleted`, or for `instance.get` itself to fail

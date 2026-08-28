@@ -170,8 +170,8 @@ extension HostInstaller {
     let paths = RunnerPaths(
       rootDir: URL(fileURLWithPath: plan.stateDir, isDirectory: true),
       runtimeDir: URL(fileURLWithPath: plan.runtimeDir, isDirectory: true))
-    let smoke = SmokeTest(client: daemon, paths: paths)
-    let result = await smoke.run(SmokeTestOptions(profile: profile.name, macOS: true))
+    let result = await runSmokeTest(
+      client: daemon, paths: paths, options: SmokeTestOptions(profile: profile.name, macOS: true))
     let failed = result.checks.first { !$0.ok }
     report.record(
       SetupReport.Name.macOSSmokeTest, result.passed,

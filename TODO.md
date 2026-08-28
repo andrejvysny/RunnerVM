@@ -46,7 +46,7 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
       `setup --macos` provisions/sizes/activates the macOS profile for real (needs live validation)
 - [x] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/
       status/CHANGELOG/AGENTS/Proto
-- [ ] Hardware/live matrix (user Macs): blackpen pkg install + wizard + reboot loop + upgrade;
+- [ ] Hardware/live matrix (user Macs; dev-Mac slice DONE 2026-08-28: pkg verify, v4 migration, pinned VM, Linux+macOS smoke-test live — docs/verification.md): blackpen pkg install + wizard + reboot loop + upgrade;
       dev Mac managed macOS build/qualify/promote + keychain e2e; release v0.2.0 + curl e2e
 
 ## Mac mini deployment (2026-08-28) — follow-ups

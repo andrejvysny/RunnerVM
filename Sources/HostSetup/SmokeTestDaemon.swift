@@ -1,6 +1,7 @@
 import DaemonAPI
 import Foundation
 import GuestControl
+import RunnerCore
 
 /// Exactly the `DaemonClient` calls `SmokeTest` needs, and nothing else. `DaemonClient` is a
 /// concrete actor (`Sources/DaemonAPI/DaemonClient.swift`), so this protocol is the seam:
@@ -32,3 +33,13 @@ public protocol SmokeTestDaemon: Sendable {
 }
 
 extension DaemonClient: SmokeTestDaemon {}
+
+/// Opens an existential daemon into `SmokeTest`'s generic parameter (SE-0352 implicit opening).
+/// `HostInstaller` holds `any SetupDaemon`; `SmokeTest` is generic because dispatching the async
+/// actor calls through an `any` existential aborted the Swift task allocator at runtime on a live
+/// daemon (see the note on `SmokeTest`).
+public func runSmokeTest(
+  client: some SmokeTestDaemon, paths: RunnerPaths, options: SmokeTestOptions
+) async -> SmokeTestReport {
+  await SmokeTest(client: client, paths: paths).run(options)
+}
