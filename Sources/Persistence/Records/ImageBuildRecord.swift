@@ -2,7 +2,8 @@ import GRDB
 import RunnerCore
 
 /// Mirrors the `image_builds` table (`docs/db_schema_v2.sql`, plus the `recovery_since`
-/// column `docs/db_schema_v3.sql` adds).
+/// column `docs/db_schema_v3.sql` adds, plus the `kind`/`managed_name`/`source_digest` columns
+/// `docs/db_schema_v4.sql` adds).
 public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Hashable {
   public var id: ImageBuildID
   public var hostId: HostID
@@ -44,6 +45,9 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
   /// what bounds how long a build nobody can prove dead keeps its capacity, pin and directory.
   public var recoverySince: DatabaseDate?
   public var updatedAt: DatabaseDate
+  public var kind: ImageBuildKind
+  public var managedName: String?
+  public var sourceDigest: String?
 
   public init(
     id: ImageBuildID, hostId: HostID, name: String? = nil, state: ImageBuildState,
@@ -56,7 +60,8 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     currentStep: Int = 0, currentInstruction: String? = nil, imageDigest: ImageDigest? = nil,
     failureCode: String? = nil, failureMessage: String? = nil, createdAt: DatabaseDate,
     startedAt: DatabaseDate? = nil, finishedAt: DatabaseDate? = nil,
-    recoverySince: DatabaseDate? = nil, updatedAt: DatabaseDate
+    recoverySince: DatabaseDate? = nil, updatedAt: DatabaseDate, kind: ImageBuildKind = .runnerfile,
+    managedName: String? = nil, sourceDigest: String? = nil
   ) {
     self.id = id
     self.hostId = hostId
@@ -94,6 +99,9 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     self.finishedAt = finishedAt
     self.recoverySince = recoverySince
     self.updatedAt = updatedAt
+    self.kind = kind
+    self.managedName = managedName
+    self.sourceDigest = sourceDigest
   }
 
   public static let databaseTableName = "image_builds"
@@ -133,5 +141,8 @@ public struct ImageBuildRecord: Codable, FetchableRecord, PersistableRecord, Sen
     case finishedAt = "finished_at"
     case recoverySince = "recovery_since"
     case updatedAt = "updated_at"
+    case kind
+    case managedName = "managed_name"
+    case sourceDigest = "source_digest"
   }
 }

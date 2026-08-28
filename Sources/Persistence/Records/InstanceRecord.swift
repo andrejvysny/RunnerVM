@@ -40,6 +40,8 @@ public struct InstanceRecord: Codable, FetchableRecord, PersistableRecord, Senda
   public var lastSeenAt: DatabaseDate?
   public var failureCode: String?
   public var failureMessage: String?
+  public var purpose: InstancePurpose
+  public var pinnedUntil: DatabaseDate?
 
   public init(
     id: InstanceID, profileId: RunnerProfileID, imageDigest: ImageDigest, hostId: HostID, name: String,
@@ -51,7 +53,8 @@ public struct InstanceRecord: Codable, FetchableRecord, PersistableRecord, Senda
     retireAfterSession: Bool = false, hardDeadlineAt: DatabaseDate? = nil, instancePath: String,
     createdAt: DatabaseDate, startedAt: DatabaseDate? = nil, agentReadyAt: DatabaseDate? = nil,
     stoppedAt: DatabaseDate? = nil, deletedAt: DatabaseDate? = nil, lastSeenAt: DatabaseDate? = nil,
-    failureCode: String? = nil, failureMessage: String? = nil
+    failureCode: String? = nil, failureMessage: String? = nil, purpose: InstancePurpose = .runner,
+    pinnedUntil: DatabaseDate? = nil
   ) {
     self.id = id
     self.profileId = profileId
@@ -87,6 +90,8 @@ public struct InstanceRecord: Codable, FetchableRecord, PersistableRecord, Senda
     self.lastSeenAt = lastSeenAt
     self.failureCode = failureCode
     self.failureMessage = failureMessage
+    self.purpose = purpose
+    self.pinnedUntil = pinnedUntil
   }
 
   public static let databaseTableName = "instances"
@@ -122,5 +127,7 @@ public struct InstanceRecord: Codable, FetchableRecord, PersistableRecord, Senda
     case lastSeenAt = "last_seen_at"
     case failureCode = "failure_code"
     case failureMessage = "failure_message"
+    case purpose
+    case pinnedUntil = "pinned_until"
   }
 }

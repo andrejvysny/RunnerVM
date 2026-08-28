@@ -185,6 +185,33 @@ private enum BuildFixtures {
     #expect(try await repo.get(id: stillRunning.id) != nil)
   }
 
+  @Test func insertedBuildDefaultsToRunnerfileKindWithNoManagedLink() async throws {
+    let db = try await seededDB()
+    let repo = GRDBImageBuildRepository(db: db)
+    let build = BuildFixtures.build()
+    try await repo.insert(build)
+
+    let fetched = try #require(try await repo.get(id: build.id))
+    #expect(fetched.kind == .runnerfile)
+    #expect(fetched.managedName == nil)
+    #expect(fetched.sourceDigest == nil)
+  }
+
+  @Test func explicitMacosProvisionKindManagedNameAndSourceDigestRoundTrip() async throws {
+    let db = try await seededDB()
+    let repo = GRDBImageBuildRepository(db: db)
+    var build = BuildFixtures.build()
+    build.kind = .macosProvision
+    build.managedName = "macos-sequoia"
+    build.sourceDigest = "sha256:" + String(repeating: "c", count: 64)
+    try await repo.insert(build)
+
+    let fetched = try #require(try await repo.get(id: build.id))
+    #expect(fetched.kind == .macosProvision)
+    #expect(fetched.managedName == "macos-sequoia")
+    #expect(fetched.sourceDigest == "sha256:" + String(repeating: "c", count: 64))
+  }
+
   @Test func bogusStateIsRejectedByTheCheckConstraint() async throws {
     let db = try await seededDB()
     await #expect(throws: (any Error).self) {

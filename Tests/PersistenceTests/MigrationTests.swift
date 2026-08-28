@@ -7,7 +7,7 @@ import Testing
   private static let expectedTables: Set<String> = [
     "host", "github_scopes", "runner_profiles", "scale_sets", "scale_set_sessions",
     "scale_set_inbox", "images", "image_pins", "instances", "runner_sessions", "operations",
-    "job_summaries", "audit_events", "image_builds", "image_aliases",
+    "job_summaries", "audit_events", "image_builds", "image_aliases", "managed_images",
   ]
 
   @Test func createsEveryTableAndTheSchemaMigrationsRows() async throws {
@@ -22,19 +22,20 @@ import Testing
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3])
+    #expect(versions == [1, 2, 3, 4])
   }
 
   /// `PersistenceSchema.currentVersion` is the source of truth `Migrator` and
-  /// `Orchestration.RunnerVMBuild.schemaVersion` both read; the "v1"/"v2"/"v3" migrations themselves
-  /// insert the literal `1`/`2`/`3` so a later bump to `currentVersion` cannot make a fresh database's
-  /// existing migrations record the wrong version (see the comment on each migration).
+  /// `Orchestration.RunnerVMBuild.schemaVersion` both read; the "v1"/"v2"/"v3"/"v4" migrations
+  /// themselves insert the literal `1`/`2`/`3`/`4` so a later bump to `currentVersion` cannot make
+  /// a fresh database's existing migrations record the wrong version (see the comment on each
+  /// migration).
   @Test func recordedVersionsMatchPersistenceSchemaExactly() async throws {
     let db = try TestDatabase.make()
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3])
+    #expect(versions == [1, 2, 3, 4])
     #expect(versions.last == PersistenceSchema.currentVersion)
   }
 
@@ -78,16 +79,17 @@ import Testing
         try String.fetchSet(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table'")
       )
     }
-    #expect(versions == [1, 2, 3])
+    #expect(versions == [1, 2, 3, 4])
     #expect(hosts == ["test-host"])
     #expect(tableNames.contains("image_builds"))
     #expect(tableNames.contains("image_aliases"))
   }
 
-  /// A database a pre-v3 build left at v2 upgrades in place: `ALTER TABLE ... ADD COLUMN` keeps
-  /// every `image_builds` row it already had, and the new `recovery_since` reads back NULL, which
-  /// is exactly "this build is not pending recovery".
-  @Test func upgradesAV2DatabaseToV3PreservingImageBuildRows() async throws {
+  /// A database a pre-v3 build left at v2 upgrades in place, all the way through v4: `ALTER TABLE
+  /// ... ADD COLUMN` keeps every `image_builds` row it already had, the v3 `recovery_since` reads
+  /// back NULL ("not pending recovery"), and the v4 `kind` reads back its `DEFAULT 'runnerfile'`
+  /// for a row that predates the column entirely.
+  @Test func upgradesAV2DatabaseToTheCurrentSchemaPreservingImageBuildRows() async throws {
     let path = FileManager.default.temporaryDirectory
       .appendingPathComponent("runnervm-migration-v2-upgrade-\(UUID().uuidString).sqlite")
     defer {
@@ -103,18 +105,23 @@ import Testing
     try pool.close()
 
     let upgraded = try RunnerDatabase.open(at: path)
-    let (versions, builds, notPending, columns) = try await upgraded.read { db in
+    let (versions, builds, notPending, columns, kind) = try await upgraded.read { db in
       (
         try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version"),
         try String.fetchAll(db, sql: "SELECT id FROM image_builds"),
         try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM image_builds WHERE recovery_since IS NULL"),
-        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('image_builds')")
+        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('image_builds')"),
+        try String.fetchOne(db, sql: "SELECT kind FROM image_builds WHERE id = 'build-from-v2'")
       )
     }
-    #expect(versions == [1, 2, 3])
+    #expect(versions == [1, 2, 3, 4])
     #expect(builds == ["build-from-v2"])
     #expect(columns.contains("recovery_since"))
+    #expect(columns.contains("kind"))
+    #expect(columns.contains("managed_name"))
+    #expect(columns.contains("source_digest"))
     #expect(notPending == 1)
+    #expect(kind == "runnerfile")
   }
 
   /// Runs "v1" and "v2" under production's own migration names, so reopening the file with
@@ -318,6 +325,62 @@ import Testing
     let versions = try await second.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3])
+    #expect(versions == [1, 2, 3, 4])
+  }
+
+  /// `docs/db_schema_v4.sql`'s table and every column it adds, present on a fresh database.
+  @Test func v4TableAndColumnsExistOnAFreshDatabase() async throws {
+    let db = try TestDatabase.make()
+    let (managedImageColumns, instanceColumns, buildColumns) = try await db.read { db in
+      (
+        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('managed_images')"),
+        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('instances')"),
+        try String.fetchSet(db, sql: "SELECT name FROM pragma_table_info('image_builds')")
+      )
+    }
+    #expect(managedImageColumns == [
+      "name", "kind", "source_reference", "last_source_digest", "current_image_digest",
+      "candidate_image_digest", "previous_digests_json", "state", "last_checked_at",
+      "last_updated_at", "last_error", "auto_update", "updated_at",
+    ])
+    #expect(instanceColumns.contains("purpose"))
+    #expect(instanceColumns.contains("pinned_until"))
+    #expect(buildColumns.contains("kind"))
+    #expect(buildColumns.contains("managed_name"))
+    #expect(buildColumns.contains("source_digest"))
+  }
+
+  /// Re-running `Migrator.migrate` against an already-current database is a no-op: GRDB's own
+  /// `grdb_migrations` bookkeeping skips every already-applied step, so `schema_migrations` gains
+  /// no duplicate rows.
+  @Test func migratingAnAlreadyCurrentDatabaseIsANoOp() async throws {
+    let db = try TestDatabase.make()
+    try Migrator.migrate(db.pool)
+    try Migrator.migrate(db.pool)
+
+    let versions = try await db.read { db in
+      try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
+    }
+    #expect(versions == [1, 2, 3, 4])
+  }
+
+  /// A `schema_migrations` row past `PersistenceSchema.currentVersion` (a newer build already
+  /// migrated this database further) trips the trailing guard, not GRDB's own migrator -- this
+  /// build has no "v5" migration to even attempt.
+  @Test func versionNewerThanSupportedIsRejected() async throws {
+    let db = try TestDatabase.make()
+    try await db.write { db in
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        arguments: [5, DatabaseDate.now]
+      )
+    }
+
+    // Qualified: this file also `import GRDB`, which exports its own deprecated `PersistenceError`
+    // typealias (`= RecordError`) that collides with `Persistence.PersistenceError`'s -- see
+    // `Support/PersistenceErrorAlias.swift`.
+    #expect(throws: Persistence.PersistenceError.self) {
+      try Migrator.migrate(db.pool)
+    }
   }
 }

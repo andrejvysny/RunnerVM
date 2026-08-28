@@ -254,3 +254,58 @@ import Testing
     }
   }
 }
+
+@Suite struct ManagedImageStateTests {
+  static let expected: [ManagedImageState: Set<ManagedImageState>] = [
+    .idle: [.checking, .failed],
+    .checking: [.idle, .downloading, .building, .failed],
+    .downloading: [.qualifying, .failed],
+    .building: [.qualifying, .failed],
+    .qualifying: [.promoting, .failed],
+    .promoting: [.idle, .failed],
+    .failed: [.checking, .idle],
+  ]
+
+  @Test func everyStateHasAnExpectedRow() {
+    #expect(Set(Self.expected.keys) == Set(ManagedImageState.allCases))
+    #expect(ManagedImageState.allCases.count == 7)
+  }
+
+  @Test func everyOrderedPairMatchesTheTable() throws {
+    for from in ManagedImageState.allCases {
+      let allowed = try #require(Self.expected[from])
+      for to in ManagedImageState.allCases {
+        #expect(from.canTransition(to: to) == allowed.contains(to), "\(from) -> \(to)")
+      }
+    }
+  }
+
+  /// Unlike `ImageBuildState`, this machine has no terminal state: `failed` recovers rather than
+  /// ending the row's life, since a managed image is checked forever.
+  @Test func noStateIsTerminal() {
+    #expect(ManagedImageState.allCases.allSatisfy { !$0.isTerminal })
+  }
+
+  /// `failed` itself is excluded: `failed -> failed` would be a self-transition, which is always
+  /// illegal (see `selfTransitionsAreAlwaysIllegal`).
+  @Test func everyOtherStateCanFail() {
+    for state in ManagedImageState.allCases where state != .failed {
+      #expect(state.canTransition(to: .failed), "\(state) -> failed")
+    }
+  }
+
+  @Test func selfTransitionsAreAlwaysIllegal() {
+    for state in ManagedImageState.allCases {
+      #expect(!state.canTransition(to: state), "\(state)")
+    }
+  }
+
+  @Test func transitionedReturnsTargetOrThrows() throws {
+    #expect(try ManagedImageState.idle.transitioned(to: .checking) == .checking)
+    #expect(throws: StateTransitionError(
+      machine: "ManagedImageState", from: "idle", to: "qualifying"
+    )) {
+      _ = try ManagedImageState.idle.transitioned(to: .qualifying)
+    }
+  }
+}

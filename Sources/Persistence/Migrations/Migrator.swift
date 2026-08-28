@@ -49,6 +49,15 @@ enum Migrator {
       )
     }
 
+    migrator.registerMigration("v4") { db in
+      try db.execute(sql: schemaV4SQL)
+      // Same discipline as "v1"/"v2"/"v3": the literal `4`, forever.
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        arguments: [4, DatabaseDate.now]
+      )
+    }
+
     do {
       try migrator.migrate(writer)
     } catch let error as PersistenceError {
@@ -223,5 +232,31 @@ enum Migrator {
   private static let schemaV3SQL = """
     -- RunnerVM SQLite schema v3: restart-recovery bookkeeping for orphaned image builds.
     ALTER TABLE image_builds ADD COLUMN recovery_since TEXT;
+    """
+
+  /// Header + DDL of `docs/db_schema_v4.sql`, same discipline as `schemaV3SQL` (the docs file's
+  /// per-addition explanation is prose for readers, not re-typed here).
+  private static let schemaV4SQL = """
+    -- RunnerVM SQLite schema v4: managed images, maintenance instances, macOS provisioning builds.
+    CREATE TABLE managed_images (
+      name TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('registryTag','macosTart')),
+      source_reference TEXT NOT NULL,
+      last_source_digest TEXT,
+      current_image_digest TEXT,
+      candidate_image_digest TEXT,
+      previous_digests_json TEXT NOT NULL DEFAULT '[]',
+      state TEXT NOT NULL DEFAULT 'idle'
+        CHECK (state IN ('idle','checking','downloading','building','qualifying','promoting','failed')),
+      last_checked_at TEXT,
+      last_updated_at TEXT,
+      last_error TEXT,
+      auto_update INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL);
+    ALTER TABLE instances ADD COLUMN purpose TEXT NOT NULL DEFAULT 'runner';
+    ALTER TABLE instances ADD COLUMN pinned_until TEXT;
+    ALTER TABLE image_builds ADD COLUMN kind TEXT NOT NULL DEFAULT 'runnerfile';
+    ALTER TABLE image_builds ADD COLUMN managed_name TEXT;
+    ALTER TABLE image_builds ADD COLUMN source_digest TEXT;
     """
 }

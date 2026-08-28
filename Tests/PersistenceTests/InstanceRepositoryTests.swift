@@ -144,6 +144,30 @@ import Testing
     #expect(try #require(try await repo.get(id: instance.id)).lastSeenAt != nil)
   }
 
+  @Test func insertedInstanceDefaultsToRunnerPurposeAndNilPinnedUntil() async throws {
+    let db = try TestDatabase.make()
+    let instance = try await seedInstance(db: db)
+    let repo = GRDBInstanceRepository(db: db)
+    let fetched = try #require(try await repo.get(id: instance.id))
+    #expect(fetched.purpose == .runner)
+    #expect(fetched.pinnedUntil == nil)
+  }
+
+  @Test func explicitMaintenancePurposeAndPinnedUntilRoundTrip() async throws {
+    let db = try TestDatabase.make()
+    let (hostId, _, profileId, digest) = try await Fixtures.seedProfileChain(db: db)
+    var instance = Fixtures.instance(profileId: profileId, imageDigest: digest, hostId: hostId)
+    instance.purpose = .maintenance
+    let pinnedUntil = DatabaseDate(Date(timeIntervalSince1970: 1_700_000_000))
+    instance.pinnedUntil = pinnedUntil
+    let repo = GRDBInstanceRepository(db: db)
+    try await repo.insert(instance)
+
+    let fetched = try #require(try await repo.get(id: instance.id))
+    #expect(fetched.purpose == .maintenance)
+    #expect(fetched.pinnedUntil == pinnedUntil)
+  }
+
   @Test func listFiltersByProfileAndStates() async throws {
     let db = try TestDatabase.make()
     let (hostId, _, profileId, digest) = try await Fixtures.seedProfileChain(db: db)
