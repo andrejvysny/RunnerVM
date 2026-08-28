@@ -16,11 +16,20 @@ scale set, so scale-to-zero and autoscaling are GitHub's own mechanism, not a po
 
 ## Setting it up
 
-**[`SETUP.md`](SETUP.md) is the guide**: a fresh Mac to jobs running in VMs, for either an
-organization or a single repository — host preparation, the service account, PAT and GitHub App
-permissions, configuration, images, the first job, and making it survive a reboot. Start there.
+**From the first tagged release onward**, one command on a fresh Apple Silicon Mac:
 
-Two things it will tell you that are worth knowing up front:
+```sh
+curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/install.sh | sudo bash
+```
+
+Downloads the prebuilt pkg, verifies it, installs it, and hands off to a wizard
+(`runnerctl setup`) that creates the hidden `_runnervm` service account, picks headless
+(LaunchDaemon) or GUI (LaunchAgent) mode, takes your GitHub scope and PAT, pulls a Linux image, and
+finishes with `doctor` plus a smoke test. No release is tagged yet — see [Status](#status) below —
+so today this is [`SETUP.md`](SETUP.md)'s Part 1; Part 2 is the from-source path
+([`docs/developer-setup.md`](docs/developer-setup.md)) this repository is built and tested with.
+
+Two things worth knowing up front:
 
 - Concurrency is bounded by **disk**, not CPU or RAM. An instance reserves
   `max(profile.resources.disk, image.virtualBytes)`, and the shipped `ubuntu-24` image is 16 GiB,
@@ -37,13 +46,15 @@ scripts/sign-dev.sh              # ad-hoc sign vmworker for local development
 ```
 
 Reference for every install flag, the privilege model and the security notes:
-[`docs/install.md`](docs/install.md) — including installing via
-`brew install andrejvysny/runnervm/runnervm`.
+[`docs/install.md`](docs/install.md).
 
 ## Status
 
-See [`docs/status.md`](docs/status.md) for the full capability matrix and
-[`CHANGELOG.md`](CHANGELOG.md) for what landed when.
+**v0.2.0 is unreleased.** Every distribution feature below (pkg, bootstrap install, `runnerctl
+setup`, automatic image updates, native managed macOS provisioning, the per-VM CI keychain,
+`runnerctl upgrade`) is unit/integration-tested only — no tag is pushed, no GitHub release exists,
+and none of it has run on real hardware yet. See [`docs/status.md`](docs/status.md) for the full
+capability matrix and [`CHANGELOG.md`](CHANGELOG.md) for what landed when.
 
 - Supported guest: **Linux/arm64** — the mode the project is validated against. **macOS guests are
   experimental** (`os: macos`, ephemeral only): the runtime works and has run real GitHub jobs, but

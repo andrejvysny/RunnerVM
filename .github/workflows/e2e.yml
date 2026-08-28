@@ -20,7 +20,7 @@ on:
         description: "Job type"
         required: true
         type: choice
-        options: [quick, long, matrix]
+        options: [quick, long, matrix, keychain]
         default: quick
       count:
         description: "Matrix size (matrix job only; ignored otherwise)"
@@ -84,6 +84,70 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rvm-e2e"
           date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/rvm-e2e/marker"
           cat "$RUNNER_TEMP/rvm-e2e/marker"
+
+  # Real-job proof of the per-VM macOS CI keychain (D9, Proto/guest_agent.md): `--profile` must be a
+  # macOS RunnerVM profile. Mirrors the guest agent's own `agent.selfTest` ladder step for step, but
+  # as an actual workflow job on an actual runner instead of a self-check the agent runs on its own
+  # behalf — this is the piece `docs/macos-guests.md` "CI keychain" calls still hardware-pending.
+  keychain:
+    if: ${{ inputs.job == 'keychain' }}
+    runs-on: ${{ inputs.profile }}
+    timeout-minutes: 15
+    steps:
+      - name: Assert this is a macOS RunnerVM profile with a CI keychain
+        run: |
+          set -eu
+          if [ "$(uname -s)" != "Darwin" ]; then
+            echo "::error::keychain job requires a macOS RunnerVM profile; --profile resolved to a Linux guest" >&2
+            exit 1
+          fi
+          : "${RUNNERVM_CI_KEYCHAIN:?RUNNERVM_CI_KEYCHAIN is not set — the guest agent should have injected this before spawning the runner}"
+          : "${RUNNERVM_CI_KEYCHAIN_PASSWORD:?RUNNERVM_CI_KEYCHAIN_PASSWORD is not set}"
+          echo "keychain: $RUNNERVM_CI_KEYCHAIN"
+          security show-keychain-info "$RUNNERVM_CI_KEYCHAIN"
+
+      - name: Import a self-signed codesigning cert and sign a copy of a real binary
+        run: |
+          # Mirrors Proto/guest_agent.md's agent.selfTest ladder, one check per step, so a failure
+          # here points at the same step name a selfTest failure would report:
+          #   generate self-signed codesigning cert -> export PKCS#12 -> security import
+          #   (codesign pre-authorised) -> set key partition list -> codesign a copy of a real
+          #   binary -> verify the signature -> clean up.
+          set -eu
+          WORK="$RUNNER_TEMP/rvm-e2e-keychain"
+          mkdir -p "$WORK"
+          cd "$WORK"
+          IDENTITY="RunnerVM E2E Keychain Test"
+          P12_PASSWORD="rvm-e2e-$(date -u +%s)"
+
+          echo "--- generate self-signed codesigning cert ---"
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes \
+            -subj "/CN=$IDENTITY" -addext "extendedKeyUsage=codeSigning"
+
+          echo "--- export PKCS#12 ---"
+          openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem \
+            -passout "pass:$P12_PASSWORD" \
+            || openssl pkcs12 -export -legacy -out cert.p12 -inkey key.pem -in cert.pem \
+                 -passout "pass:$P12_PASSWORD"
+
+          echo "--- security import (codesign pre-authorised) ---"
+          security import cert.p12 -k "$RUNNERVM_CI_KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+
+          echo "--- set key partition list ---"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$RUNNERVM_CI_KEYCHAIN_PASSWORD" "$RUNNERVM_CI_KEYCHAIN"
+
+          echo "--- codesign a copy of a real binary ---"
+          cp /usr/bin/true "$WORK/true-copy"
+          codesign --keychain "$RUNNERVM_CI_KEYCHAIN" -s "$IDENTITY" "$WORK/true-copy"
+
+          echo "--- verify the signature ---"
+          codesign -v "$WORK/true-copy"
+
+          echo "--- clean up ---"
+          rm -f "$WORK"/key.pem "$WORK"/cert.pem "$WORK"/cert.p12 "$WORK"/true-copy
+
+          echo "keychain e2e: import + codesign + verify all passed"
 
   long:
     if: ${{ inputs.job == 'long' }}

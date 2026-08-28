@@ -39,58 +39,56 @@ operational context the script cannot see from software alone.
 Recap of `packaging/launchd/README.md` (read it for the full provisioning steps); this is the
 trade-off that matters for unattended operation specifically.
 
-- **LaunchAgent (recommended)**: a dedicated, non-admin, **auto-login** user runs `runnerd` in a
-  real GUI session. macOS 15+ Virtualization.framework needs an unlocked login keychain in the
-  session that creates the VM; a GUI session already has one, automatically, because that account
-  logged in. This is the path Tart/Cirrus Labs use for the same framework. **FileVault conflict**:
-  FileVault's pre-boot password prompt happens before any user session — including an auto-login
-  one — can start, so a *cold* boot still needs a human to unlock the disk before the auto-login
-  session (and therefore `runnerd`) can start. A *warm* reboot with the volume already unlocked
-  auto-logs in normally. `scripts/qualify-host.sh`'s `filevault_autologin` check reports this as
-  WARN by default; pass `--require-filevault-off` if your qualification bar is "must recover from
-  a cold boot with nobody present" (turn FileVault off), or `--allow-filevault` once you have
-  explicitly decided at-rest encryption matters more than that guarantee.
-- **LaunchDaemon (experimental)**: no GUI session, so no automatically-unlocked keychain. It only
-  works with explicit keychain provisioning wired into boot (`security unlock-keychain`, run
-  before `com.runnervm.runnerd` starts) — `scripts/install.sh` does not set this up; see
-  `packaging/launchd/README.md`'s LaunchDaemon section for the manual steps and their own
-  trade-offs (the unlock password has to live somewhere on disk). Treat this variant as unverified
-  on your hardware until it passes the full loop in §3 (10 controlled reboots).
-  `runnerctl doctor` runs a `login_keychain` check (`security show-keychain-info` on the invoking
-  account's `login.keychain-db`) that **fails** when the keychain is missing or locked — run
-  doctor as the service account for it to be meaningful. `scripts/qualify-host.sh` repeats the
-  same check as `daemon_keychain`.
+- **LaunchDaemon (recommended production default, the variant this document qualifies)**: a
+  dedicated, non-admin `_runnervm` account runs `runnerd` with no GUI session at all. The premise
+  that Virtualization.framework needs an unlocked login keychain in the creating session did not
+  survive measurement — see "Login-keychain evidence" below — so `runnerctl doctor` now **skips**
+  its login-keychain check entirely once it detects a LaunchDaemon, rather than reporting a
+  permanent, misleading FAIL. Skipping the check is not the same as qualifying the host: the reboot
+  loop in §3 is still what decides whether this variant recovers unattended, and it is **required**
+  before trusting a LaunchDaemon host in production.
+- **LaunchAgent (secondary — developer workstations, GUI sessions)**: a dedicated, non-admin,
+  **auto-login** user runs `runnerd` in a real GUI session, which already has an unlocked login
+  keychain because that account logged in. Choose this only when the job workload actually needs a
+  window server. **FileVault conflict**: FileVault's pre-boot password prompt happens before any
+  user session — including an auto-login one — can start, so a *cold* boot still needs a human to
+  unlock the disk before the auto-login session (and therefore `runnerd`) can start. A *warm*
+  reboot with the volume already unlocked auto-logs in normally. `scripts/qualify-host.sh`'s
+  `filevault_autologin` check reports this as WARN by default; pass `--require-filevault-off` if
+  your qualification bar is "must recover from a cold boot with nobody present" (turn FileVault
+  off), or `--allow-filevault` once you have explicitly decided at-rest encryption matters more
+  than that guarantee. `runnerctl doctor`'s login-keychain check still runs (warn, not fail) under
+  this variant.
 - **`none`**: `scripts/install.sh --launchd none` installs no launchd job at all — nothing to
   qualify here; skip straight to running `runnerd --foreground` under whatever external supervisor
   you use, and adapt §3 to that supervisor's own restart-on-boot behavior.
 
-### Counter-evidence for the keychain premise (2026-08-28, macOS 26.5.2, Apple M4)
+Whichever variant you pick, the reboot loop in §3 is the qualification gate, not this recap — do
+not skip it because a variant is now the documented default.
 
-The keychain argument above is the whole reason the LaunchAgent is recommended. On one host it did
-not reproduce. A `runnerd` started over SSH on a Mac mini with **no GUI login session at all** —
-nobody logged in, no auto-login user, `/dev/console` owned by `root`, the `blackpen` login keychain
-locked — booted every VM asked of it: two in-daemon image builds, ten GitHub jobs and eleven live
-E2E scenarios, all green. `vmworker probe` reported `virtualizationSupported: true` in the same
-session. Meanwhile `runnerctl doctor` reported
+### Login-keychain evidence (2026-08-28, macOS 26.5.2, Apple M4)
+
+The keychain argument above used to be the whole reason the LaunchAgent was recommended. On one
+host it did not reproduce. A `runnerd` started over SSH on a Mac mini with **no GUI login session
+at all** — nobody logged in, no auto-login user, `/dev/console` owned by `root`, the `blackpen`
+login keychain locked — booted every VM asked of it: two in-daemon image builds, ten GitHub jobs
+and eleven live E2E scenarios, all green. `vmworker probe` reported `virtualizationSupported: true`
+in the same session, while `runnerctl doctor` (before this fix) reported a permanent
 
 ```
 FAIL  Login keychain    login keychain for blackpen is locked (security exit 36); VM start needs
                         an unlocked login keychain for the account runnerd runs as
 ```
 
-so on that host the `login_keychain` check (and `qualify-host.sh`'s `daemon_keychain`) is a **false
-negative**: it fails while everything it is warning about works. Evidence:
-`docs/verification.md`, "Mac mini deployment".
+— a **false negative**: it failed while everything it was warning about worked. Evidence:
+`docs/verification.md`, "Mac mini deployment". `doctor` now skips this check under a detected
+LaunchDaemon instead of failing it; `scripts/qualify-host.sh`'s `daemon_keychain` check is unchanged
+and can still be read for the raw evidence.
 
 This is one host and one OS version, and — importantly — it says nothing about whether the job
-comes *back* after a reboot, which is what §3 measures and what actually decides the variant. So
-the LaunchDaemon stays experimental. But do not treat the keychain requirement as settled fact on
-macOS 26 without re-measuring it yourself: if it does not hold on your hardware either, the
-LaunchDaemon's remaining risk is just boot ordering, and it needs no auto-login user and no
-FileVault compromise.
-
-The project deliberately does not auto-select either variant — run the loop in §3 against your own
-hardware and macOS version and pick the one that actually recovers from a cold boot.
+comes *back* after a reboot, which is what §3 measures and is the actual qualification gate. Do not
+treat the keychain requirement as settled fact on macOS 26 without re-measuring it yourself, and do
+not treat the doctor skip as a substitute for running the loop below.
 
 ## 3. Qualification procedure
 

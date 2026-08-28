@@ -3,8 +3,8 @@
 ## Now
 
 - [ ] `scripts/live-builder-faults.sh`: per-phase image alias (or scope the "≤1 image" check to the phase's `imageDigest`), treat unobservable warm phases as skipped, rerun `--phase booting --phase provisioning --phase sealing`, record in `docs/verification.md`
-- [x] Confirm CI green for `a771905` — flake, rerun green (see M8.0)
-- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27). Now also blocked on `sudo` for the Mac mini — the plist is rendered at `/Users/blackpen/com.runnervm.runnerd.daemon.plist` and lint-clean, and the keychain objection to this variant did not reproduce on macOS 26.5.2 (see the deployment section below)
+- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27). Now also blocked on `sudo` for the Mac mini — the plist is rendered at `/Users/blackpen/com.runnervm.runnerd.daemon.plist` and lint-clean, and the keychain objection to this variant did not reproduce on macOS 26.5.2 (see the deployment section below). LaunchDaemon is now the documented production default (`packaging/launchd/README.md`), so this is no longer an open trade-off, just an unrun qualification.
+- [ ] **Milestone-D operator matrix** (2026-08-28 — code-complete per `## D` below, nothing below has run): push `master` and tag `v0.2.0`, cut the first GitHub release (pkg + sha256 + manifest + `install.sh`); first `ubuntu-24-base` publish to GHCR (`publish-images.yml` or the manual command in `docs/published-images.md`, plus the one-time make-public/connect-repo steps); reinstall on blackpen via the curl bootstrap + pkg, retiring the from-source Mac mini deployment (the LaunchDaemon reboot loop above becomes meaningful once it is *this* daemon under test); run a native managed macOS provisioning cycle (`images.managed`) end to end on the dev Mac.
 
 
 Plans: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (M0–M13) and
@@ -39,10 +39,11 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
       `SmokeTest` (reusable, tested against a fake daemon) + `doctor --deep`'s `smoke_test` +
       qualify-macos-image.sh `--pinned` + the seven (+`runnerd_pid`) helpers moved to
       lib/live-common.sh
-- [x] D9 guest CI keychain (Go + Swift selfTest wiring done; live e2e workflow pending docs sweep): `GuestAgent/internal/keychain`, startRunner fail-closed env,
-      `agent.selfTest`, capability, Proto + Swift DTOs, e2e keychain job
+- [x] D9 guest CI keychain (Go + Swift selfTest wiring + e2e keychain workflow job all landed; not
+      yet run on hardware): `GuestAgent/internal/keychain`, startRunner fail-closed env,
+      `agent.selfTest`, capability, Proto + Swift DTOs, `.github/workflows/e2e.yml` `keychain` job
 - [ ] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged)
-- [ ] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/
+- [x] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/
       status/CHANGELOG/AGENTS/Proto
 - [ ] Hardware/live matrix (user Macs): blackpen pkg install + wizard + reboot loop + upgrade;
       dev Mac managed macOS build/qualify/promote + keychain e2e; release v0.2.0 + curl e2e

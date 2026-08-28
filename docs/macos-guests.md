@@ -1,19 +1,32 @@
 # macOS guest runners (M8)
 
-**Status: runtime landed and proven once live (M8.0–M8.4), hardened (H1–H2), not yet qualified.**
-`os: macos` profiles validate, `vmworker` boots a macOS guest from a `VZMacPlatformConfiguration`,
-every instance has its own machine identifier, and on 2026-08-27 a Tart-derived macOS 26.6.2 image
-ran a real GitHub Actions job end to end on this host (23 s cold start, VM removed afterwards —
-evidence in `docs/verification.md` "M8"). The 2026-08-28 hardening pass closed the security and
-correctness gaps below, and the whole path was **re-proven on a freshly re-provisioned, hardened
-image the same day**: `macos-26` (`capabilities.ssh: false`, 46.6 GiB virtual / 30.6 GiB on disk)
-ran GitHub run 33159698945 in 7 s with a ~23 s cold start, `Darwin … RELEASE_ARM64_VMAPPLE`, the
-guest agent loaded, and a clean teardown — `docs/verification.md` "Mac mini deployment".
+**Status: runtime landed and proven once live (M8.0–M8.4), hardened (H1–H2), provisioning
+automated (D7), not yet qualified for H3–H5.** `os: macos` profiles validate, `vmworker` boots a
+macOS guest from a `VZMacPlatformConfiguration`, every instance has its own machine identifier, and
+on 2026-08-27 a Tart-derived macOS 26.6.2 image ran a real GitHub Actions job end to end on this
+host (23 s cold start, VM removed afterwards — evidence in `docs/verification.md` "M8"). The
+2026-08-28 hardening pass closed the security and correctness gaps below, and the whole path was
+**re-proven on a freshly re-provisioned, hardened image the same day**: `macos-26`
+(`capabilities.ssh: false`, 46.6 GiB virtual / 30.6 GiB on disk) ran GitHub run 33159698945 in 7 s
+with a ~23 s cold start, `Darwin … RELEASE_ARM64_VMAPPLE`, the guest agent loaded, and a clean
+teardown — `docs/verification.md` "Mac mini deployment".
+
+**The primary flow is now native managed provisioning (D7), not the standalone script.**
+`images.managed` (a `kind: macos-tart` entry, e.g. tracking
+`ghcr.io/cirruslabs/macos-tahoe-base:latest`) has the daemon itself pull the Tart base read-only,
+boot it under `vmworker` with no Tart binary and no Homebrew on the host, drive
+`scripts/provision-macos-tart.sh --attach` over SSH, and cold-boot-qualify a fresh-identity clone
+before promoting it — see "Managed provisioning" below and
+[`docs/design/distribution.md`](design/distribution.md) ("Managed image sources"). Running
+`scripts/provision-macos-tart.sh` by hand (with a locally installed `tart` CLI) remains the
+manual/dev path — useful for image development and for hosts that are not running the daemon's own
+update service. Everything else in this document (identity model, disk sizing, seal-time
+lockdown, concurrency cap) applies to an image regardless of which path produced it.
 
 Open: the H3–H5 live runs (two concurrent guests + third-job-waits, crash/restart recovery, the
-100-job soak), the H2 gate script itself (it cannot pass as written — see "Image qualification"
-below), and the native IPSW builder (M8.6). Track progress in `TODO.md` ("M8"). Treat macOS as
-**experimental** until H3–H5 are recorded.
+100-job soak) and the native IPSW builder (M8.6) — both hardware-pending, unit/integration-tested
+only where code exists. Track progress in `TODO.md` ("M8" and "D — Distribution hardening"). Treat
+macOS as **experimental** until H3–H5 are recorded.
 
 Sizing note for anyone planning a host: a macOS guest reserves the image's **entire** virtual disk
 (50 GB here) because it cannot resize its APFS container, so one guest needs roughly
@@ -49,7 +62,7 @@ two separate risk domains and are not combined.
 | Phase | What | Where |
 |-------|------|-------|
 | H1 | security + correctness — done | seal-time SSH lockdown · exact macOS disk contract · durable machine-ID write · no seal after a forced stop · LaunchDaemon fails closed · hosted-label collision is an error · second capacity fence · payload manifest |
-| H2 | image qualification — script done, run pending | `scripts/qualify-macos-image.sh` |
+| H2 | image qualification — now automated inside managed provisioning (D7); the standalone gate script is the operator-driven equivalent | `scripts/qualify-macos-image.sh`, `ImageUpdateService` build→qualify→promote |
 | H3 | concurrency — pending hardware | `scripts/live-macos-e2e.sh --scenario concurrency` |
 | H4 | recovery matrix — pending hardware | `scripts/live-macos-e2e.sh --scenario recovery` |
 | H5 | soak — pending hardware | `scripts/live-macos-e2e.sh --scenario soak` |
@@ -170,6 +183,15 @@ destroy. That misses everything that only appears on a fresh boot of a *clone*: 
 loaded once but does not start at boot, auxiliary storage the clone cannot use, a hardware model
 this host will not run, an SSH lockdown that did not survive the reboot.
 
+**This is now automated inside managed provisioning (D7):** every `images.managed` build→qualify→
+promote run boots a fresh-identity clone of what it just sealed and checks agent reachability,
+`sw_vers`, `agent.selfTest` (CI keychain import+codesign), and that port 22 is closed after the
+reboot, before promoting — a candidate that fails any of it fails the build rather than leaving a
+"succeeded" build nothing may use (`docs/design/distribution.md`, "Build → qualify → promote").
+
+The standalone script below is the operator-driven equivalent — the same gate, run by hand against
+an image that was not produced through `images.managed`:
+
 ```bash
 scripts/qualify-macos-image.sh --profile rvm-macos-26 --state-dir ~/runnervm-dev
 ```
@@ -214,12 +236,29 @@ Provisioning of the bootstrap image (M8.3) is done over SSH **once, at image-bui
   via `http.extraheader`, so no credential helper is ever needed, and a Keychain-backed helper on a
   headless guest blocks forever with no prompt to answer (a real incident on a manually managed
   macOS runner). Done at provisioning time, not per job;
-- **explicitly open**: a usable login keychain on a cold-booted, never-logged-in clone for tools
-  such as `codesign`/`notarytool`. Signing material must be injected per job (temporary keychain
-  created and destroyed inside the job) rather than baked into the image; whether that works
-  headless needs its own spike with a cold-boot test.
+- signing material is injected **per job**, never baked into the image — see "CI keychain" below.
 
 Xcode is image-level state (`macos-26-base`, `macos-26-xcode-26.x`, …), never installed per job.
+
+## CI keychain (D9)
+
+The spike above — whether per-job signing material can work on a cold-booted, never-logged-in
+clone with no login keychain — is answered: the Go guest agent builds a **fresh, empty, unlocked
+keychain per VM session**, `<runnerHome>/Library/Keychains/runnervm-ci.keychain-db`, immediately
+before the runner is spawned, and exposes it to the runner (and therefore every job step) as
+`RUNNERVM_CI_KEYCHAIN` (path) and `RUNNERVM_CI_KEYCHAIN_PASSWORD`. A job's workflow imports its own
+certificates into that keychain with `security import … -T /usr/bin/codesign` — RunnerVM never
+bakes a certificate into an image. Full protocol contract, including the fail-closed
+`KEYCHAIN_UNAVAILABLE` behavior and the host-safe-mode opt-out: [`Proto/guest_agent.md`](../Proto/guest_agent.md).
+
+`agent.selfTest` proves the chain actually signs (temporary keychain, self-signed cert via
+`openssl`, `security import`, sign and verify a copy of `/usr/bin/true`, then delete everything) —
+it is what the D7 managed-provisioning qualification gate and `runnerctl system smoke-test` both
+call. What is still open is a **real workflow** exercising the same steps end to end against a live
+runner — see the `keychain` job variant in `.github/workflows/e2e.yml` — which has not yet been run
+on hardware.
+
+## Native image builder (M8.6, later)
 
 ## Native image builder (M8.6, later)
 

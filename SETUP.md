@@ -3,13 +3,15 @@
 End-to-end: from a Mac you just unboxed to GitHub Actions jobs running in throwaway VMs on it,
 registered against either an **organization** or a single **repository**.
 
-Read this once before starting. Steps 1–9 are the install; step 10 makes it survive a reboot.
-Budget about an hour, most of it waiting for an image build.
-
-- Reference for every `install.sh` flag and the security model: [`docs/install.md`](docs/install.md)
+- Reference for every install flag, the privilege model and the security model: [`docs/install.md`](docs/install.md)
+- Building from source and running a local dev daemon: [`docs/developer-setup.md`](docs/developer-setup.md)
 - A real deployment's configuration, verbatim, with the reasoning behind each number:
   [`docs/examples/headless-mac-mini.yaml`](docs/examples/headless-mac-mini.yaml)
-- What has actually been proven, and what has not: [`docs/verification.md`](docs/verification.md)
+- What has actually been proven, and what has not: [`docs/verification.md`](docs/verification.md),
+  [`docs/status.md`](docs/status.md)
+
+> **v0.2.0 is unreleased.** Part 1 below — the curl one-liner and the wizard — is what a tagged
+> release ships. Until then, use [`docs/developer-setup.md`](docs/developer-setup.md) (Part 2).
 
 ---
 
@@ -34,13 +36,15 @@ Three ideas that explain most of the configuration:
 3. **`runnerd` never links Virtualization.framework.** Only `vmworker` does, one process per VM,
    carrying the `com.apple.security.virtualization` entitlement. This is why signing matters.
 
-### Decide three things now
+### Decide two things now
 
 | decision | options | how to choose |
 | --- | --- | --- |
 | **Scope** | organization / repository | An org scope serves every repo in the org and needs `admin:org`-grade credentials — a host-wide compromise if the Mac is breached. A repository scope is narrower and is the right default for a first host. |
 | **Credential** | PAT / GitHub App | A PAT is 5 minutes of setup. A GitHub App is better for an org (scoped, rotatable, auditable) and is worth it once you are past the first host. |
-| **Service model** | LaunchAgent / LaunchDaemon / foreground | See step 10. If you just want jobs running today, start in the foreground and come back to it. |
+
+Service model (headless LaunchDaemon vs. GUI LaunchAgent) is a wizard question, not something to
+decide up front — see "The wizard" below.
 
 ### Is your Mac big enough?
 
@@ -63,602 +67,224 @@ near as fast: 3 × 2 vCPU and 3 × 4 GiB against 10 CPUs and 32 GiB.
 
 > **macOS guests need far more.** A macOS guest cannot resize its APFS container, so
 > `resources.disk` must equal the image's disk *exactly* and the reservation is the whole thing —
-> about **80 GiB free** for one guest with a Tart-derived image. macOS is also still experimental;
-> see [`docs/macos-guests.md`](docs/macos-guests.md). The rest of this guide is Linux/arm64.
+> about **80 GiB free** for one guest with a Tart-derived image. macOS guests are also still
+> experimental; see [`docs/macos-guests.md`](docs/macos-guests.md).
 
 ---
 
-## 1. Prepare the host
+## Part 1 — One-command install (from the first tagged release)
 
-Apple Silicon, macOS 15 or later. On a fresh Mac:
+### 1. Get a GitHub credential first
+
+The wizard asks for one, so create it before you start.
+
+**Fine-grained PAT (recommended for a repository scope)** — GitHub → Settings → Developer
+settings → Personal access tokens → Fine-grained tokens:
+
+- **Resource owner**: the user or org that owns the repo
+- **Repository access**: *Only select repositories* → just the one
+- **Repository permissions**: Administration — **Read and write**; Actions — **Read and write**
+  (Read is enough unless you also run the E2E driver, which cancels runs); Metadata — Read-only
+
+**Classic PAT**: `repo` scope for a repository, `admin:org` for an organization. Both are broad —
+an `admin:org` token on a compromised Mac is an org-wide compromise, which is the argument for a
+GitHub App on any org.
+
+**GitHub App (recommended for an organization)**: an App owned by the org, installed on the org (or
+selected repos), with **Administration: Read and write**, **Actions: Read**, **Metadata: Read**.
+The wizard's non-interactive PAT flow does not cover App credentials yet — write
+`<state-dir>/state/github-app.json` by hand afterwards; see [`docs/install.md`](docs/install.md).
+
+### 2. Prepare the host
+
+Apple Silicon, macOS 15 or later. No Xcode, Swift, Go, or Homebrew needed — the pkg ships
+everything prebuilt.
 
 ```sh
-# Xcode Command Line Tools — provides swift and codesign
-xcode-select --install
-
 # The host must not sleep out from under a running VM
 sudo pmset -a sleep 0 disksleep 0 displaysleep 10
 
 # Confirm
-sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
 sw_vers
 df -h /System/Volumes/Data
 pmset -g | grep -E ' sleep|disksleep'
 ```
 
-Two things to know before you go further:
+If this Mac is shared with other accounts, know that every local macOS user is in the `staff`
+group — the installer never uses it for RunnerVM's own state (see [`docs/install.md`](docs/install.md)).
 
-- **FileVault vs. auto-login.** If you plan to use the LaunchAgent variant (step 10), FileVault's
-  pre-boot prompt happens before any session can auto-log-in, so a *cold* boot will not bring
-  runners back without a human. Decide now whether at-rest encryption or unattended cold-boot
-  recovery matters more.
-- **Other accounts on the Mac.** Every local macOS user is in the `staff` group. If this machine is
-  shared, do **not** let RunnerVM's state directory end up `staff`-readable — step 3 handles this.
-
----
-
-## 2. Get the binaries
-
-**From source** (what this guide assumes):
+### 3. Install
 
 ```sh
-git clone https://github.com/andrejvysny/RunnerVM.git
-cd RunnerVM
-swift build -c release          # ~2 minutes on an M-series Mac
+curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/install.sh | sudo bash
 ```
 
-**Or via Homebrew**, if you would rather not build:
+This downloads the release manifest, the pkg and its `.sha256`, verifies the checksum, prints an
+unsigned-package warning and waits for confirmation on `/dev/tty` (the pkg is not yet
+Developer-ID-signed — `RUNNERVM_ALLOW_UNSIGNED=1` skips the prompt for non-interactive runs),
+installs immutable files only under `/usr/local/{bin,libexec,share}/runnervm`, and hands off to
+`runnerctl setup` on the same tty. `RUNNERVM_NO_SETUP=1` stops after the pkg install if you want to
+run the wizard yourself later; `RUNNERVM_VERSION=vX.Y.Z` or `RUNNERVM_PKG_URL=<dir>` pin a specific
+release instead of latest.
 
-```sh
-brew install andrejvysny/runnervm/runnervm
-```
+### 4. The wizard (`runnerctl setup`)
 
-Homebrew builds and ad-hoc signs the same binaries but does none of the privileged setup below
-(formulae must never call `sudo`). You still run `install.sh`, with `--prebuilt-dir`; see
-[`docs/install.md`](docs/install.md#installing-via-homebrew).
+Answers a short set of questions and does everything else: creates the hidden `_runnervm` service
+account (`dscl` only — no `sysadminctl`, no interactive password, no real home under `/Users`),
+lays out the state directory, writes `config.yaml`, installs and loads the launchd job, stores the
+GitHub token, pulls the Linux image, applies the profiles **after** the image is ready, and finishes
+with `doctor` plus a smoke test. It is re-runnable — an existing account, directory or plist is
+verified, not recreated.
 
-**Go**, for the Linux guest agent that gets baked into images you build. If `go` is missing,
-`install.sh` fails unless you pass `--skip-guest-agent` — but then `runnerctl image build` cannot
-work. Either install Go, or cross-build the agent on another Mac and copy it in:
-
-```sh
-make -C GuestAgent build-linux          # produces GuestAgent/bin/linux-arm64/runnervm-guest-agent
-# ...or copy that file from a machine that has Go; install.sh picks up an existing one and
-# skips the build entirely.
-```
-
----
-
-## 3. Create the service account
-
-RunnerVM runs as a dedicated `_runnervm` user whose primary group is a dedicated `_runnervm`
-group — **never `staff`**, because every local account is in `staff` and would then be able to read
-your GitHub credentials and job logs.
-
-```sh
-# Pick a free GID in 200-400: this should print nothing.
-dscl . -list /Groups PrimaryGroupID | awk '$2 == 250'
-
-sudo dscl . -create /Groups/_runnervm
-sudo dscl . -create /Groups/_runnervm PrimaryGroupID 250
-sudo dscl . -create /Groups/_runnervm RealName "RunnerVM Service"
-sudo dscl . -create /Groups/_runnervm Password "*"
-
-sudo sysadminctl -addUser _runnervm -fullName "RunnerVM Service" \
-  -GID 250 -password - -home /Users/_runnervm -admin off
-```
-
-`-password -` prompts interactively — do not put a password on the command line.
-
-`scripts/install.sh` checks for both principals on every run and prints these exact commands if
-either is missing, so you can also skip ahead and let it tell you.
-
-<details>
-<summary><b>No root on this machine?</b> There is a working root-free path.</summary>
-
-Everything can live under your own home directory instead. This is what a real deployment did on a
-Mac where `sudo` needed a password nobody wanted to type into automation:
-
-```sh
---prefix /Users/you/.local \
---state-dir /Users/you/runnervm \
---runtime-dir /Users/you/runnervm/run \
---user "$(id -un)" --group staff --allow-staff-group
-```
-
-`--group staff` is refused without `--allow-staff-group` for the reason above. If you take this
-path on a machine with other accounts, tighten the state directory by hand afterwards, because
-0750 + `staff` is readable by all of them:
-
-```sh
-chmod 700 /Users/you/runnervm
-```
-
-You give up: the dedicated account, a launchd job at boot (both plist locations need root), and
-`root:staff` ownership of the shipped recipes. Everything else works identically.
-</details>
-
----
-
-## 4. Write the configuration
-
-Start from a template that already validates:
-
-```sh
-.build/release/runnerctl config init > runnervm.yaml
-```
-
-Then edit it. The two scope shapes are the only real difference between an org and a repo setup.
-
-### Organization scope
-
-Serves every repository in the org. Runners land in a runner group; `Default` is the group every
-org has.
-
-```yaml
-github:
-  demand: scaleSet
-  auth:
-    provider: pat
-    source: file
-  scopes:
-    - name: engineering          # local alias, referenced by profiles below
-      type: organization
-      owner: acme                # the org login
-      runnerGroup: Default       # optional; omit for the org default
-
-profiles:
-  - name: ubuntu-24              # this is the runs-on label
-    scope: engineering
-    image: ubuntu-24
-    lifecycle: ephemeral
-    resources:
-      cpu: 2
-      memory: 4GiB
-      disk: 16GiB
-    limits:
-      maxInstances: 3
-```
-
-### Repository scope
-
-Narrower, and the right choice for a first host.
-
-```yaml
-github:
-  demand: scaleSet
-  auth:
-    provider: pat
-    source: file
-  scopes:
-    - name: repo
-      type: repository
-      owner: acme                # user or org that owns it
-      repository: project-a      # just the name, not owner/name
-
-profiles:
-  - name: ubuntu-24
-    scope: repo
-    image: ubuntu-24
-    lifecycle: ephemeral
-    resources:
-      cpu: 2
-      memory: 4GiB
-      disk: 16GiB
-    limits:
-      maxInstances: 3
-```
-
-### Host sizing and the settings people miss
-
-```yaml
-host:
-  reserve:
-    cpu: 2                       # logical CPUs kept for macOS itself
-    memory: 6GiB
-    disk: 50GiB                  # absolute free-space floor; lower it on a small host
-  maxVMs: auto                   # or a number, if disk is the real limit
-
-# A failed session holds its cpu/memory/DISK reservation until this expires.
-# The 2h default strands 16 GiB on a small host.
-diagnostics:
-  failedInstanceRetention: 15m
-
-# The only things that outlive a job. Per-job storage is already fully reclaimed.
-images:
-  cache:
-    maxSize: 20GiB
-logging:
-  retention:
-    instanceLogs: 3d
-```
-
-If your host has less than ~66 GiB free, **lower `host.reserve.disk`** — the 50 GiB default will
-otherwise refuse image builds and VM starts on a machine that has plenty of room in practice.
-
-### When admission refuses a VM the host could actually run
-
-Admission reserves `max(profile.resources.disk, image.virtualBytes)` — the guest disk's *apparent*
-size. An instance disk is an APFS clone of the image, so it starts at nearly zero additional bytes
-and only grows as the job writes; the reservation is a worst case, not a measurement. For Linux
-that costs nothing (a 16 GiB image really occupies 16 GiB). For macOS it is a permanent ~16 GiB
-over-reservation per guest, because the Tart-derived image is 50 GB apparent against 30.6 GiB
-allocated and `resources.disk` must equal the apparent size exactly.
-
-If you hit that, and you know your jobs do not fill their disks:
-
-```yaml
-host:
-  overcommit:
-    disk: 1.5      # scales the post-floor disk budget; 1.0 (default) is fail-closed
-```
-
-`config validate` warns whenever this is above 1.0, and `runnerctl status` grows a
-`Disk overcommit` row so the state is visible without reading the config. **The risk is real**: a
-job that truly does fill its disk can exhaust host storage underneath the daemon and every other
-VM. Raise it only when you understand your workload, and prefer buying disk — an external APFS
-volume for `--state-dir` works and carries no such risk.
-
-### Rules the validator enforces
-
-| rule | why |
+| Question / flag | What it controls |
 | --- | --- |
-| A profile name must not match a GitHub-hosted label | `runs-on: macos-26` or `ubuntu-24.04` sends the job to GitHub's hosted runners instead of your Mac — different billing, secrets and network, with nothing on your host to show for it. Refused as `PROFILE_NAME_SHADOWS_HOSTED_LABEL`. Shadowing names are `ubuntu-latest`/`macos-latest`/`windows-latest`, `macos-<N>`, `ubuntu-<N>.<N>`, `windows-<NNNN>` (± `-large`/`-xlarge`/`-arm64`…). Prefix yours, e.g. `rvm-macos-26`. `ubuntu-24` is fine. |
-| `lifecycle: reusable` needs `reuse.acknowledgeSharedHost: true` | A reusable VM keeps state a job can write anywhere it can `sudo`. Treat it as single-tenant. **Use `ephemeral` in production.** |
-| `security.allowPublicRepositories` defaults off | Turning it on means pull-request code from strangers can execute on your Mac. Only for a dedicated, disposable host. |
-| **One host per profile name, per scope** | Not validated — nothing can see your other Macs. A scale set has exactly one message session, so two hosts sharing a scope *and* a profile name fight over it (`HTTP 409 RunnerScaleSetSessionConflictException`) and whichever restarts loses its jobs to the other. Give each host distinct profile names. |
+| `--mode daemon\|agent` | Headless LaunchDaemon (default, recommended) or a LaunchAgent in a GUI session. |
+| scope | `org:<owner>` or `repo:<owner>/<repo>`. |
+| `--runner-group` | Runner group for an organization scope (`Default` otherwise). |
+| GitHub token | Read without echo, or `--token-stdin` to pipe it in. |
+| `--linux` / `--no-linux` | Create the Linux runner profile (on by default). |
+| `--macos` | Also declare a macOS runner profile, provisioned via the managed-image flow — see [`docs/macos-guests.md`](docs/macos-guests.md). |
+| `--macos-source` | The Tart base to track (default `ghcr.io/cirruslabs/macos-tahoe-base:latest`). |
+| `--linux-concurrency` / `--macos-concurrency` | Concurrent runners per guest family; macOS is capped at 2. |
+| `--profile-prefix` | Overrides the generated `rvm-<host6>-*` prefix (see "Labels" below). |
+| `--dry-run` | Prints the plan and the generated YAML; changes nothing. |
+| `--non-interactive` | Takes every answer from flags instead of prompting; requires `--scope`. |
 
-Check it before going further:
+Needs root (the account creation and `/Library` writes require it) unless `--dry-run`.
+
+### 5. `sudo runnerctl`, no flags needed
+
+A production install's socket is discovered automatically — flag > `RUNNERVM_SOCKET`/
+`RUNNERVM_STATE_DIR`/`RUNNERVM_RUNTIME_DIR` > the production path if it exists > the development
+path. `runnerd` also accepts RPC from uid 0, so this just works once setup finishes:
 
 ```sh
-.build/release/runnerctl config validate runnervm.yaml
+sudo runnerctl status
+sudo runnerctl vm list
+sudo runnerctl scaleset list
 ```
 
----
+### 6. Labels
 
-## 5. Create the GitHub credential
-
-### Option A — fine-grained PAT (recommended for a repository scope)
-
-GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens.
-
-- **Resource owner**: the user or org that owns the repo
-- **Repository access**: *Only select repositories* → just the one
-- **Repository permissions**:
-
-| permission | level | what needs it |
-| --- | --- | --- |
-| Administration | **Read and write** | create the runner scale set, mint registration and JIT configs |
-| Actions | **Read and write** | poll for job demand; *write* is only needed if you run the E2E driver, which cancels runs — Read is enough for normal operation |
-| Metadata | Read-only | mandatory, auto-selected |
-
-### Option B — classic PAT
-
-| scope target | token needs |
-| --- | --- |
-| repository | `repo` |
-| organization | `admin:org` |
-
-Both are broad. An `admin:org` token on a compromised Mac is an org-wide compromise — which is the
-argument for a GitHub App on any org.
-
-### Option C — GitHub App (recommended for an organization)
-
-Create an App owned by the org, install it on the org (or selected repos), and give it
-**Administration: Read and write**, **Actions: Read**, **Metadata: Read**. Then set:
+The wizard's generated profile names are `rvm-<host6>-ubuntu-24` / `rvm-<host6>-macos-tahoe`, where
+`host6` is derived from this Mac's `IOPlatformUUID` — stable across reboots and reinstalls, so two
+hosts registered against the same GitHub scope never collide on a scale-set message session (the
+scale set has exactly one; the second host to connect gets `HTTP 409
+RunnerScaleSetSessionConflictException`). A profile's name **is** its `runs-on` label. The wizard
+prints the sample to use, e.g.:
 
 ```yaml
-github:
-  auth:
-    provider: app
+runs-on: rvm-a1b2c3-ubuntu-24
 ```
 
-and write `<state-dir>/state/github-app.json`:
-
-```json
-{
-  "clientId": "Iv23liXXXXXXXXXXXXXX",
-  "installationId": 12345678,
-  "privateKeyPath": "github-app.pem"
-}
-```
-
-`appId` (numeric) is accepted instead of `clientId`. A relative `privateKeyPath` resolves against
-the descriptor's own directory. Required modes: `github-app.json` 0640 or stricter, the `.pem`
-**0600**, both owned by the service user — the daemon refuses anything looser rather than warning.
-
-### Storing a PAT
-
-**Note the path.** `--state-dir` is the *root*; credentials live in its `state/` subdirectory.
-
-```sh
-# Preferred: never appears in argv or shell history.
-sudo -u _runnervm sh -c 'umask 077; cat > "/Library/Application Support/RunnerVM/state/github-token"'
-# paste the token, then Ctrl-D
-sudo chmod 600 "/Library/Application Support/RunnerVM/state/github-token"
-```
-
-with `source: file` in the config. Once the daemon is running you can also use
-`rvm auth login --token-stdin`.
-
-`source: keychain` is the other option, but it needs an unlocked login keychain in the daemon's own
-session — which a headless host does not have. **On any unattended Mac, use `file`.**
-
----
-
-## 6. Install
-
-```sh
-sudo scripts/install.sh --dry-run --config runnervm.yaml --launchd none   # read what it will do
-sudo scripts/install.sh           --config runnervm.yaml --launchd none
-```
-
-Defaults: `--prefix /usr/local`, `--state-dir "/Library/Application Support/RunnerVM"`,
-`--runtime-dir /var/run/runnervm`, `--user _runnervm`, `--group _runnervm`.
-
-It builds release binaries, signs `vmworker` with the virtualization entitlement, installs
-`runnerd`/`vmworker` under `<prefix>/libexec/runnervm/` and `runnerctl` on your `PATH`, creates the
-state (0750) and runtime (0700) directories owned by the service user, copies your config in, and
-installs the Linux guest agent and the shipped recipes. It never calls `sudo` itself and never runs
-`launchctl` — anything it cannot do, it prints for you to run.
-
-### Teach your shell where the socket is — do this now
-
-`runnerctl` talks to `runnerd` over a Unix socket, and **its built-in default is the *development*
-path** (`/tmp/runnervm-<uid>/runnerd.sock`), not the production runtime directory. There is no
-environment variable for it, so every command against a real install needs `--socket`. Rather than
-typing it a hundred times, put this in your shell profile:
-
-```sh
-export RVM_STATE="/Library/Application Support/RunnerVM"
-export RVM_SOCK=/var/run/runnervm/runnerd.sock
-rvm() { runnerctl --socket "$RVM_SOCK" "$@"; }
-```
-
-The rest of this guide uses `rvm` for anything that talks to the daemon. If you prefer not to,
-substitute `runnerctl --socket /var/run/runnervm/runnerd.sock` everywhere you see it.
-
-`doctor` is the exception — it deliberately works with no daemon at all, so it takes directories
-rather than a socket:
-
-```sh
-runnerctl doctor --state-dir "$RVM_STATE" --config "$RVM_STATE/config.yaml"
-```
-
-Fix everything red before continuing. See the troubleshooting table at the bottom — two of the
-common complaints are expected on a headless Mac.
-
----
-
-## 7. Start the daemon
-
-Foreground first; making it permanent is step 10.
-
-```sh
-sudo -u _runnervm /usr/local/libexec/runnervm/runnerd --foreground \
-  --config "$RVM_STATE/config.yaml" \
-  --state-dir "$RVM_STATE" \
-  --socket-dir /var/run/runnervm
-```
-
-(The shell expands `$RVM_STATE` before `sudo` runs, so it does not matter that `sudo` drops the
-environment.)
-
-In another terminal:
-
-```sh
-rvm status                 # daemon healthy? disk pressure ok?
-rvm github test            # credential and every scope, checked against GitHub
-rvm scaleset list          # state ready, session open, health ok
-```
-
-`rvm github test` is the one that tells you whether your token permissions are right — it
-actually calls GitHub, unlike `doctor`, which only checks that a credential is present.
-
-At this point GitHub shows a runner scale set for the profile. `ADVERTISED` will be `0` until you
-have an image.
-
----
-
-## 8. Get a runner image
-
-Two ways: pull a published one, or build your own. Pulling is faster and needs nothing installed on
-the host beyond `runnerd` itself.
-
-### Pull a published image
-
-```sh
-rvm image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
-rvm image list
-```
-
-The pull prints the immutable `…@sha256:…` it resolved — **that** is what belongs in your profile's
-`image:`, not the tag. The catalogue, what is inside each image, the disk each guest needs and the
-rebuild cadence are in [`docs/published-images.md`](docs/published-images.md).
-
-`rvm registry login ghcr.io -u <user> --password-stdin` first if the package is private. The
-credential belongs to the daemon, because the daemon is what performs the pull.
-
-### Or build your own
-
-Images are built by the daemon itself, from `Runnerfile` recipes that ship with the project.
-`ubuntu-24` is `ubuntu-24-minimal` plus Docker, so build both:
-
-```sh
-rvm image build "$RVM_STATE/share/recipes/ubuntu-24-minimal" --name ubuntu-24-minimal
-rvm image build "$RVM_STATE/share/recipes/ubuntu-24"         --name ubuntu-24
-
-rvm image list
-```
-
-Expect roughly 3 minutes for the bootstrap (it downloads and converts the pinned Ubuntu cloud image
-and installs the guest agent) and 1.5 minutes for the derived one. `--name` is the alias your
-profile's `image:` refers to. Build when you need software the published images do not carry, a
-pinned `actions/runner`, or a base you control end to end — see
-[`docs/image-build.md`](docs/image-build.md).
-
-> `runnerd` must be able to *read* the recipe and its build context. `_runnervm` cannot read your
-> home directory, so keep recipes under `<state-dir>/share/recipes` (where `install.sh` puts them)
-> or `<state-dir>/recipes`.
-
-Once an image exists, `rvm scaleset list` should advertise real capacity.
-
----
-
-## 9. Run a real job
-
-Add a workflow to the target repository. `runs-on` is the **profile name**:
+### 7. Verify with a real job
 
 ```yaml
 name: RunnerVM smoke test
 on: workflow_dispatch
-
 jobs:
   smoke:
-    runs-on: ubuntu-24
+    runs-on: rvm-a1b2c3-ubuntu-24   # your generated label
     steps:
-      - run: |
-          uname -a
-          id
-          cat /etc/os-release
-          docker info
+      - run: uname -a && id && docker info
       - uses: actions/checkout@v4
 ```
 
-Trigger it (`gh workflow run ...` or the Actions tab) and watch the host:
+Trigger it and watch `sudo runnerctl vm list` walk `cloning → … → idle → … → busy → deleted` and
+disappear — that disappearance, and nothing left under `<state-dir>/instances/`, is the whole point
+of `ephemeral`.
 
-```sh
-watch -n 2 rvm vm list
-rvm status
+### 8. Smoke-testing after that
+
+`runnerctl system smoke-test` boots a pinned instance of a profile and proves the guest actually
+works (agent hello, `sw_vers`/`uname`, `agent.selfTest`), independent of live GitHub demand — the
+same check `setup` runs at the end and `doctor --deep` folds in. Useful after a config change, an
+image update, or just to confirm a host you have not touched in a while is still healthy.
+
+### 9. Keeping images current
+
+```yaml
+images:
+  updates:
+    enabled: true
+    interval: 24h
+    jitter: 2h
+    keepPrevious: 1
+    smokeTest: true
 ```
 
-You should see one instance walk the ladder — `cloning → startingWorker → startingVM →
-waitingForAgent → idle → configuringRunner → runnerOnline → busy → stopping → deleted` — in about
-20 seconds to first job step, then disappear.
-
-**Verify nothing was left behind**, which is the whole point of `ephemeral`:
+With this on, the host re-resolves every tracked registry tag (`:stable` on a profile) or managed
+macOS source on the interval, pulls the candidate, qualifies it with a boot-to-idle smoke test, and
+only then promotes it — atomically, and only for **new** instances: a VM already running keeps the
+digest it was created with. A failed candidate (download, verify, or qualification failure) never
+replaces what is currently promoted; the failure is recorded and retried next interval.
 
 ```sh
-rvm vm list                                         # (none)
-ls "$RVM_STATE/instances/"                          # empty
-gh api repos/OWNER/REPO/actions/runners --jq .total_count   # 0
-df -h /System/Volumes/Data                          # unchanged
+runnerctl image update status          # every tracked source, its state, when it last moved
+runnerctl image update check           # re-resolve now, transfer nothing
+runnerctl image update run --wait      # pull + qualify + promote now; --no-wait to fire and forget
 ```
 
-To test more than one at a time, dispatch a matrix job and confirm concurrency stops at your
-configured ceiling and queues the rest.
+The wizard defaults a fresh Linux profile to `image: …:stable` with `images.updates.enabled: true`,
+so a new install stays current without operator intervention.
+
+### 10. Upgrading
+
+```sh
+runnerctl upgrade --check          # report installed vs. released version; no root, changes nothing
+sudo runnerctl upgrade             # --version vX.Y.Z for a specific tag, --drain-timeout 30m (default),
+                                    # --yes/-y to answer every confirmation including the unsigned-pkg one
+```
+
+Manual only — nothing on the host upgrades itself. Fetches `release-manifest.json`, verifies the
+pkg against both its detached `.sha256` and the manifest's own hash (any failure aborts before the
+host is touched), backs up `config.yaml` and the database, drains the host, swaps the package,
+restarts the daemon, and runs `doctor`. If `doctor` fails afterward and the database schema has not
+advanced, the cached previous package and the backup are restored automatically; if the schema did
+advance, migrations are one-way and manual restoration steps are printed instead. Full contract:
+[`docs/design/distribution.md`](docs/design/distribution.md) ("Upgrade policy").
+
+> **This command landed very recently.** It has not yet been exercised on real hardware — verify
+> the flags above against `runnerctl upgrade --help` on your build before relying on this section.
 
 ---
 
-## 10. Make it survive a reboot
+## Part 2 — From source (development)
 
-Nothing so far restarts `runnerd` after a reboot. Pick a variant:
+This repository is built and tested from source, not from the pkg. If you are developing RunnerVM
+itself, or want a from-source install before a release exists:
+**[`docs/developer-setup.md`](docs/developer-setup.md)** — `swift build`, `scripts/sign-dev.sh`,
+building the Go guest agent, and running a local dev daemon.
 
-| variant | needs | status |
-| --- | --- | --- |
-| **LaunchAgent** | a dedicated **auto-login** GUI session for `_runnervm`; FileVault off (or the volume unlocked another way) | Documented default. The GUI session provides an unlocked login keychain, which Virtualization.framework was believed to require. |
-| **LaunchDaemon** | nothing beyond root | Simpler — no auto-login, no FileVault compromise — but **experimental**: the reboot loop has not been qualified. |
-| **none** | your own supervisor | Fine if you already run one. |
-
-```sh
-sudo scripts/install.sh --config runnervm.yaml --launchd agent    # or: daemon
-# install.sh prints the exact launchctl command; it never runs it for you:
-sudo launchctl bootstrap gui/$(id -u _runnervm) /Library/LaunchAgents/com.runnervm.runnerd.agent.plist
-# LaunchDaemon variant:
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist
-```
-
-For the LaunchAgent you must also enable automatic login for `_runnervm` (System Settings → Login
-Screen) and log in as that account once so its login keychain exists.
-
-> **Measured 2026-08-28, one host, macOS 26.5.2:** a `runnerd` started over SSH with **no GUI
-> session at all** and a **locked** login keychain booted every VM asked of it — two image builds,
-> ten jobs, eleven E2E scenarios. The keychain requirement that makes the LaunchAgent the default
-> did not reproduce there, and `doctor`'s `Login keychain` check was a false negative. That is one
-> host and it says nothing about reboot recovery, so the LaunchDaemon stays experimental — but it
-> is worth re-measuring on your own hardware rather than assuming.
-> See [`packaging/launchd/README.md`](packaging/launchd/README.md).
-
-Before trusting either on unattended hardware, run the cold-boot / power-cut loop in
-[`docs/qualification.md`](docs/qualification.md).
+`runnerctl setup` (Part 1, step 4) works the same way against source-built binaries — it only
+cares that `runnerctl`/`runnerd`/`vmworker` exist where it expects them, not how they got there.
 
 ---
 
-## Operating it
+## Rules the validator enforces
 
-```sh
-rvm status                     # health, capacity, profiles, disk pressure
-rvm vm list                    # live instances
-rvm scaleset list              # GitHub-side session, demand, advertised capacity
-rvm runner list                # runner sessions
-rvm metrics                    # counters; Prometheus endpoint if enabled in config
-```
-
-**Logs** — full reference in [`docs/logging.md`](docs/logging.md):
-
-| path | what |
+| rule | why |
 | --- | --- |
-| `<state-dir>/logs/runnerd/runnerd.log` | the daemon's JSON log, self-rotating |
-| `<state-dir>/logs/events.jsonl` | one line per lifecycle transition and audit event |
-| `<state-dir>/logs/instances/<id>/` | per-instance `serial.log`, `worker.log`, `failure.json`, guest `diag/` |
+| A profile name must not match a GitHub-hosted label | `runs-on: macos-26` or `ubuntu-24.04` sends the job to GitHub's hosted runners instead of your Mac — different billing, secrets and network, with nothing on your host to show for it. Refused as `PROFILE_NAME_SHADOWS_HOSTED_LABEL`. Shadowing names are `ubuntu-latest`/`macos-latest`/`windows-latest`, `macos-<N>`, `ubuntu-<N>.<N>`, `windows-<NNNN>` (± `-large`/`-xlarge`/`-arm64`…). The wizard's generated `rvm-<host6>-*` names are already clear of this. |
+| `lifecycle: reusable` needs `reuse.acknowledgeSharedHost: true` | A reusable VM keeps state a job can write anywhere it can `sudo`. Treat it as single-tenant. **Use `ephemeral` in production.** |
+| `security.allowPublicRepositories` defaults off | Turning it on means pull-request code from strangers can execute on your Mac. Only for a dedicated, disposable host. |
+| **One host per profile name, per scope** | Not validated — nothing can see your other Macs. A scale set has exactly one message session, so two hosts sharing a scope *and* a profile name fight over it (`HTTP 409 RunnerScaleSetSessionConflictException`) and whichever restarts loses its jobs to the other. The wizard's `IOPlatformUUID`-derived names exist specifically to avoid this; a manual `--profile-prefix` can still collide. |
 
-**Changing configuration** — applied live, no restart:
-
-```sh
-rvm config validate runnervm.yaml && rvm config apply runnervm.yaml
-```
-
-**Maintenance and upgrades.** Always drain first; `--wait` blocks until the last job finishes:
+Check a config before applying it:
 
 ```sh
-rvm system drain --wait
-sudo launchctl bootout system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist
-sudo scripts/install.sh --config runnervm.yaml --launchd daemon    # same flags as before
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist
-rvm system resume
+runnerctl config validate <path>
 ```
-
-> **The SQLite schema migration is one-way.** `runnerd` migrates the database forward on startup and
-> never downgrades it; rolling back to an older binary on the same state directory is not supported.
-> Take a backup before a major upgrade.
-
-**Uninstall** — removes binaries and the launchd job; **state, images and the service account are
-left in place** deliberately:
-
-```sh
-rvm system drain --wait
-sudo launchctl bootout system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist
-sudo scripts/install.sh --uninstall --launchd daemon
-```
-
----
-
-## Troubleshooting
-
-| symptom | cause and fix |
-| --- | --- |
-| `rvm status` shows `capacity: 0` and jobs queue forever | Almost always disk. Check `Disk pressure` in `rvm status` — if free space is below `host.reserve.disk`, lower the reserve or free space. Remember the reservation is `max(profile.disk, image.virtualBytes)`, ≥16 GiB per Linux instance. |
-| `IMAGE_INSUFFICIENT_DISK_SPACE` on `image build` | Same thing, against `host.reserve.disk`. The default is 50 GiB — far too high for a small Mac. |
-| Jobs stay queued; `rvm scaleset list` shows `SESSION closed` and `HTTP 409 … RunnerScaleSetSessionConflictException` | Another host is registered against the same scope with the same profile name and holds the one message session. Rename this host's profile, or disable it on the other host. |
-| Jobs run on GitHub's hosted runners instead of your Mac | The profile name shadows a hosted label. `config validate` refuses this now (`PROFILE_NAME_SHADOWS_HOSTED_LABEL`); rename to e.g. `rvm-macos-26`. |
-| `doctor`: **FAIL Login keychain … locked** | Expected on a headless Mac, and on macOS 26.5.2 it did not stop any VM from booting. Only meaningful if VM starts actually fail. Run `doctor` as the service account for a truthful answer. |
-| `doctor`: **WARN Disk headroom / could not read free space** | The purgeable-space figure is unavailable without a login session; the daemon falls back to plain available capacity. Harmless. |
-| `doctor`: **FAIL GitHub credential missing** | Wrong path — it is `<state-dir>/**state**/github-token`, not the state root. |
-| `runnerctl` says the daemon is unreachable, but it is running | You omitted `--socket`. `runnerctl`'s built-in default is the *development* socket `/tmp/runnervm-<uid>/runnerd.sock`, and there is no environment variable for it; a production install must pass `--socket /var/run/runnervm/runnerd.sock` (or whatever `--runtime-dir` you chose) on every call. Use the `rvm` shell function from step 6. |
-| `rvm github test` fails on the scope | Token permissions. Administration: Read **and write** is the one people miss; without it the scale set cannot be created. |
-| VM boots, job never starts | Check `<state-dir>/logs/instances/<id>/serial.log` and `worker.log`. A common cause is an image with no guest agent — `rvm image inspect <name>` reports `guest agent`, `doctor` flags it too, and tart-imported images never have one (`IMAGE_NO_GUEST_AGENT`). |
-| `image build` fails with no Go | Install Go, or copy a prebuilt `GuestAgent/bin/linux-arm64/runnervm-guest-agent` in before running `install.sh`. |
-| Everything worked, then stopped after a reboot | You never installed a launchd job (step 10), or the LaunchAgent's auto-login user did not log in — FileVault is the usual reason. |
-
-Two commands worth knowing when you are stuck: `runnerctl doctor --deep` re-hashes every image
-blob, and `rvm vm exec <id> -- <cmd>` runs a command inside a live guest.
 
 ---
 
 ## Where to go next
 
 - [`docs/install.md`](docs/install.md) — every flag, the privilege model, the security notes
+- [`docs/developer-setup.md`](docs/developer-setup.md) — building from source, dev daemon
+- [`docs/published-images.md`](docs/published-images.md) — the prebuilt images and sizing a host for one
 - [`docs/image-build.md`](docs/image-build.md) — the `Runnerfile` instruction set and your own images
+- [`docs/macos-guests.md`](docs/macos-guests.md) — native managed macOS provisioning, the CI keychain, what is still hardware-pending
 - [`docs/live-integration.md`](docs/live-integration.md) — the E2E suite, if you want to prove your host
 - [`docs/qualification.md`](docs/qualification.md) — the cold-boot / power-cut loop before production
 - [`docs/status.md`](docs/status.md) — what is proven, what is experimental, current limitations

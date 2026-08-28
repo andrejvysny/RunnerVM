@@ -5,11 +5,63 @@
 > organization or a repository. This document is the reference behind it: every flag, the privilege
 > model, and the security rationale.
 
-Production packaging for `runnerd`, `vmworker` and `runnerctl` (spec §7.2 privilege model, §22
-layout, §129 socket security, §130 shutdown integration). Everything below is driven by
-`scripts/install.sh`; read that script's `--help` for the exact flag list.
+Two install paths exist, both producing the same host layout underneath:
 
-## Prerequisites
+1. **The pkg + bootstrap installer** (`curl … | sudo bash`, published from the first tagged
+   release) — the path in `SETUP.md` Part 1. See "Package install" below.
+2. **`scripts/install.sh`**, building from source — the from-source/dev path, documented in
+   [`docs/developer-setup.md`](developer-setup.md) and covered here as the flag reference.
+
+Both end with the same service account, the same `<state-dir>`/`<runtime-dir>` layout, and the same
+`runnerctl doctor`/launchd model; only *how the binaries got onto the disk* differs.
+
+## Package install (`install.sh` bootstrap, pkg)
+
+```sh
+curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/install.sh | sudo bash
+```
+
+`scripts/bootstrap.sh`, published byte-for-byte as the `install.sh` release asset, is
+self-contained: it assumes nothing beyond stock macOS tools, never clones this repo, never runs
+`swift`/`go`, and never builds anything. It fetches `release-manifest.json`, downloads the pkg and
+its `.sha256`, verifies the checksum, prints an unsigned-package warning to `/dev/tty` and waits for
+confirmation (the pkg is not yet Developer-ID-signed — see "Unsigned phase" in
+[`docs/design/distribution.md`](design/distribution.md)), runs `installer -pkg`, verifies the
+install, and hands off to `runnerctl setup` on the same tty.
+
+Any failure — a bad checksum, a network error, an install that does not verify — leaves the host
+exactly as it was before the script ran; nothing partial is left behind.
+
+Package layout (immutable files only — no PAT, no config, no database, no VM, created later by
+`runnerctl setup`):
+
+```
+/usr/local/bin/runnerctl
+/usr/local/libexec/runnervm/{runnerd,vmworker}
+/usr/local/share/runnervm/{VERSION,Resources/,recipes/,guest-agent/,launchd/,scripts/,notices/}
+```
+
+`postinstall` does exactly one thing: verify the shipped `vmworker`'s ad-hoc signature and
+entitlement. It never (re-)signs anything — signing happens once, at `scripts/build-package.sh`
+time, off the target host.
+
+Operator-facing environment variables for the bootstrap script: `RUNNERVM_VERSION` (a specific
+`vX.Y.Z` instead of latest), `RUNNERVM_PKG_URL` (a `file://`/`https://` directory carrying the
+manifest, pkg and checksum, overriding `RUNNERVM_VERSION` and the default release),
+`RUNNERVM_ALLOW_UNSIGNED=1` (skip the unsigned-pkg confirmation, for non-interactive runs), and
+`RUNNERVM_NO_SETUP=1` (stop after the pkg install; run `runnerctl setup` yourself later).
+
+After the pkg lands, `runnerctl setup` does the account creation, config, launchd install, GitHub
+token, image pull and first profiles — see "Dedicated service account" below for what it creates,
+and `SETUP.md` for the wizard's questions.
+
+## From-source install (`scripts/install.sh`)
+
+Building the binaries yourself and installing with `scripts/install.sh` — see
+[`docs/developer-setup.md`](developer-setup.md) for the full walkthrough. Read that script's
+`--help` for the exact flag list.
+
+## Prerequisites (from-source path)
 
 - Apple Silicon Mac, macOS 15 or later (`runnerctl doctor` checks both).
 - Xcode command line tools (`swift build`, `codesign`) and, for a Developer ID build,
@@ -21,7 +73,7 @@ layout, §129 socket security, §130 shutdown integration). Everything below is 
 ## Install
 
 ```sh
-sudo scripts/install.sh --launchd agent --config path/to/config.yaml
+sudo scripts/install.sh --launchd daemon --config path/to/config.yaml
 ```
 
 Without `sudo`, the script performs whatever it can with the invoking user's own privileges (handy
@@ -32,7 +84,7 @@ RunnerVM"`, `--runtime-dir /var/run/runnervm`, `--user _runnervm`, `--group _run
 `--launchd none`.
 
 What it does, in order: checks that the `_runnervm` service group and user exist with the right
-`PrimaryGroupID` relationship, queuing `dscl`/`sysadminctl` manual steps for whatever is missing or
+`PrimaryGroupID` relationship, queuing `dscl` manual steps for whatever is missing or
 wrong (see "Dedicated service account and auto-login" below); builds release binaries for
 `runnerd`/`runnerctl`/`vmworker`; signs `vmworker` with `Resources/vmworker.entitlements` (ad-hoc by
 default; set `CODESIGN_IDENTITY` for a Developer ID build); installs `runnerd`+`vmworker` to
@@ -68,6 +120,23 @@ the one that surprises people: instance disk reservation is `max(profile.resourc
 image.virtualBytes)`, so concurrency on a normal Mac is bounded by disk long before CPU or RAM.
 See [`docs/examples/README.md`](examples/README.md).
 
+## Talking to the daemon: `sudo runnerctl`, socket discovery
+
+`runnerctl` and `runnerd` resolve the socket/state/runtime paths the same way, in order:
+`--socket`/`--state-dir`/`--runtime-dir` flag > `RUNNERVM_SOCKET`/`RUNNERVM_STATE_DIR`/
+`RUNNERVM_RUNTIME_DIR` environment variable > the production path (`/var/run/runnervm/runnerd.sock`)
+if it exists > the development path (`/tmp/runnervm-<uid>/runnerd.sock`). `runnerd` additionally
+accepts RPC from uid 0 as well as its own running uid — every other uid is refused at the socket.
+Together this means a production install needs no flags and no shell alias:
+
+```sh
+sudo runnerctl status
+sudo runnerctl vm list
+```
+
+`doctor` is the one exception: it deliberately works with no daemon at all, so it takes
+`--state-dir`/`--config` rather than a socket.
+
 ## Installing via Homebrew
 
 ```sh
@@ -83,7 +152,7 @@ that need root — Homebrew formulae must never call `sudo`. Finish with:
 ```sh
 sudo "$(brew --prefix runnervm)/share/runnervm/scripts/install.sh" \
     --prebuilt-dir "$(brew --prefix runnervm)" \
-    --launchd agent --config path/to/config.yaml
+    --launchd daemon --config path/to/config.yaml
 ```
 
 `--prebuilt-dir` points `install.sh` at the already-built keg instead of running `swift build`/
@@ -111,23 +180,25 @@ scope). Disabling a profile on the losing host is enough to stop it contending; 
 daemon deletes a scale set, so removing a profile from one host's configuration leaves the other
 host's scale set alone.
 
-## Choosing a launchd variant (plan spike S3)
+## Choosing a launchd variant
 
-`scripts/install.sh --launchd agent|daemon|none`. Full trade-off, provisioning steps and
-`sysadminctl`/auto-login instructions live in `packaging/launchd/README.md`. Summary:
+`scripts/install.sh --launchd agent|daemon|none`. Full trade-off and provisioning steps live in
+`packaging/launchd/README.md`. Summary:
 
-- **`agent`** (recommended default): a LaunchAgent in a dedicated auto-login user's GUI session.
-  macOS 15+ Virtualization.framework needs an unlocked login keychain in the session that creates
-  the VM; a GUI session already has one. This is the known-good path Tart/Cirrus Labs use for the
-  same framework.
-- **`daemon`** (experimental): a LaunchDaemon under a dedicated unprivileged account, matching spec
-  §7.2's original wording literally. No GUI session means no automatically-unlocked keychain —
-  needs explicit `security unlock-keychain` provisioning that is not wired up yet. Treat as
-  unverified until spike S3 (`TODO.md`) closes — but note the 2026-08-28 counter-evidence in
-  `packaging/launchd/README.md`: on macOS 26.5.2 a daemon started over SSH with no GUI session at
-  all, and a locked login keychain, booted every VM it was asked for.
-- **`none`** (default): installs nothing launchd-related; the script prints the manual foreground
-  command instead. Useful for testing or for an external process supervisor.
+- **`daemon`** (recommended production default): a LaunchDaemon under the dedicated unprivileged
+  `_runnervm` account. No GUI session, no auto-login, no FileVault compromise. Measured
+  2026-08-28 (macOS 26.5.2, Apple M4 Mac mini): with no GUI login session at all — nobody logged
+  in, `/dev/console` owned by `root` — `runnerd` booted every VM asked of it while the login
+  keychain sat locked; `runnerctl doctor` now skips the login-keychain check entirely under a
+  detected LaunchDaemon rather than reporting it as a false-negative failure. This does **not** by
+  itself prove reboot recovery — that is what the qualification loop in `docs/qualification.md`
+  measures, and it remains the gate before trusting a host unattended.
+- **`agent`** (secondary — developer workstations, GUI sessions): a LaunchAgent in a dedicated
+  auto-login user's GUI session. Choose this only when something in the job workload actually needs
+  a window server; it needs an auto-login account and is incompatible with a cold FileVault boot
+  recovering unattended.
+- **`none`** (default of the script itself): installs nothing launchd-related; the script prints
+  the manual foreground command instead. Useful for testing or for an external process supervisor.
 
 Both plists live in `packaging/launchd/` as templates (`__TOKEN__` placeholders); `install.sh`
 substitutes them and writes the result to `/Library/LaunchAgents/com.runnervm.runnerd.agent.plist`
@@ -159,15 +230,25 @@ sudo dscl . -create /Groups/_runnervm RealName "RunnerVM Service"
 sudo dscl . -create /Groups/_runnervm Password "*"
 
 # 2. Create the service account with that group as its primary group.
-sudo sysadminctl -addUser _runnervm -fullName "RunnerVM Service" \
-  -GID 250 -password - -home /Users/_runnervm -admin off
+sudo dscl . -create /Users/_runnervm
+sudo dscl . -create /Users/_runnervm UserShell /usr/bin/false
+sudo dscl . -create /Users/_runnervm RealName "RunnerVM Service"
+sudo dscl . -create /Users/_runnervm UniqueID 250
+sudo dscl . -create /Users/_runnervm PrimaryGroupID 250
+sudo dscl . -create /Users/_runnervm NFSHomeDirectory "<state-dir>/home"
+sudo dscl . -create /Users/_runnervm Password '*'
+sudo dscl . -create /Users/_runnervm IsHidden 1
 ```
 
-(`-password -` prompts interactively; do not put the password on the command line or in shell
-history.) If `_runnervm` already exists with `staff` as its primary group — a host installed before
-this dedicated group existed — `scripts/install.sh` detects the mismatch and queues
-`sudo dscl . -create /Users/_runnervm PrimaryGroupID <gid>` to fix it in place; nothing else about
-the account needs to change.
+`dscl` only — no `sysadminctl`, no interactive password prompt, and no real home under `/Users`
+(the account never logs in, so `<state-dir>/home` is enough). This is the same sequence
+`ServiceAccountManager` (`Sources/HostSetup`, used by `runnerctl setup`) runs, and what
+`scripts/install.sh`'s source-install path calls too — one implementation, not two. It replaces the
+interactive `sysadminctl` step the first Mac mini deployment needed by hand (`docs/verification.md`,
+"Mac mini deployment"). If `_runnervm` already exists with `staff` as its primary group — a host
+installed before this dedicated group existed — `scripts/install.sh` detects the mismatch and
+queues `sudo dscl . -create /Users/_runnervm PrimaryGroupID <gid>` to fix it in place; nothing else
+about the account needs to change.
 
 For the LaunchAgent path, also enable automatic login for `_runnervm` (System Settings → Login
 Screen) and log in as that user once before relying on it, so its login keychain exists and is
@@ -176,17 +257,35 @@ alternative. Autologin requires FileVault to be off (or the volume unlocked anot
 
 ## Uninstall
 
+**From-source install** (`scripts/install.sh`):
+
 ```sh
-sudo scripts/install.sh --uninstall --launchd agent
+sudo scripts/install.sh --uninstall --launchd daemon
 ```
 
 Removes the installed binaries and the matching launchd plist (both variants if `--launchd` is
-omitted). **State (`<state-dir>`, including images and instance disks) and the runtime socket
-directory are left in place** — remove them by hand if you actually want the data gone. Unload the
-job first (the command is printed) so nothing tries to restart the daemon mid-uninstall.
+omitted). Unload the job first (the command is printed) so nothing tries to restart the daemon
+mid-uninstall.
 
-The `_runnervm` service account and group are also left in place — uninstall never deletes
-directory service records. Remove them yourself (`sudo sysadminctl -deleteUser _runnervm`,
+**Pkg install**:
+
+```sh
+sudo launchctl bootout system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist   # or gui/<uid> for the agent variant
+sudo pkgutil --forget com.runnervm.pkg
+sudo rm -rf /usr/local/bin/runnerctl /usr/local/libexec/runnervm /usr/local/share/runnervm
+```
+
+`pkgutil --forget` only removes the receipt (so a later install does not think it is upgrading in
+place); it does not delete files itself, so the binaries under `/usr/local/{bin,libexec,share}
+/runnervm` still need the explicit `rm -rf` above.
+
+**Either path, state is preserved deliberately**: `<state-dir>` (config, database, images, instance
+disks, logs) and the runtime socket directory are left in place. Remove them by hand only if you
+actually want the data gone — a reinstall of either kind picks the existing state directory back up
+unchanged.
+
+The `_runnervm` service account and group are also left in place — neither uninstall path deletes
+directory service records. Remove them yourself (`sudo dscl . -delete /Users/_runnervm`,
 `sudo dscl . -delete /Groups/_runnervm`) only after confirming nothing else on the host still
 depends on that account owning files under `<state-dir>`.
 
@@ -244,11 +343,31 @@ pipelines.
 
 ## Upgrade procedure
 
+**Pkg install:**
+
+```sh
+runnerctl upgrade --check                              # report only; no root
+sudo runnerctl upgrade [--version vX.Y.Z] [--drain-timeout 30m] [--yes]
+```
+
+Manual only — nothing on the host upgrades itself. Fetches `release-manifest.json` (latest, or the
+named tag), verifies the pkg against both its detached `.sha256` and the manifest's own hash — any
+failure aborts before the host is touched — backs up `config.yaml` and the database, `system drain
+--wait`-equivalent (bounded by `--drain-timeout`, default 30m), swaps the package, restarts the
+daemon, and runs `doctor`. `--yes`/`-y` answers every confirmation, including the unsigned-package
+one. Rollback happens automatically only when `doctor` fails **and** the schema did not advance
+during the upgrade — a schema change is one-way and prints manual restoration steps instead. Full
+contract: [`docs/design/distribution.md`](design/distribution.md) ("Upgrade policy"). This command
+landed very recently and has not been exercised on real hardware — verify against
+`runnerctl upgrade --help` before relying on this section.
+
+**From-source install:**
+
 1. Stop new work from landing on this host before touching binaries:
    `runnerctl system drain --wait` advertises zero capacity, admits no new jobs, and blocks until
    the last active job finishes (`--timeout` bounds the wait, default 900s).
-2. `sudo launchctl bootout gui/$(id -u _runnervm) /Library/LaunchAgents/com.runnervm.runnerd.agent.plist`
-   (or `system` + the daemon plist path for the LaunchDaemon variant).
+2. `sudo launchctl bootout system /Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist`
+   (or `gui/$(id -u _runnervm)` + the agent plist path for the LaunchAgent variant).
 3. Re-run `scripts/install.sh` with the same flags — it overwrites the binaries and re-signs
    `vmworker` in place; state and runtime directories are untouched. Homebrew installs:
    `brew upgrade runnervm` first, then re-run the `install.sh --prebuilt-dir ...` command from

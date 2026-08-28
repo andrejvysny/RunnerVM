@@ -2,6 +2,76 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — Distribution hardening (milestone D)
+
+Closes the distribution milestone (`docs/design/distribution.md`, `TODO.md` "D — Distribution
+hardening"): a fresh Apple Silicon Mac becomes a working runner host from one `curl … | sudo bash`.
+Every item below is unit/integration-tested only. **Nothing here has been released, published to
+GHCR, or run on real hardware yet** — no tag is pushed, no GitHub release exists, and the operator
+matrix (fresh-Mac install, reboot loop, upgrade, managed macOS provisioning, keychain e2e, first
+publish) is still open. Track it in `docs/status.md` "Open verification".
+
+- **Repository renamed** to `andrejvysny/RunnerVM`, `LICENSE` is now Apache-2.0 for RunnerVM code
+  (FSL attribution for ported Tart files unchanged in `NOTICE`/`PROVENANCE.md`), and
+  `RunnerVMVersion.current = "0.2.0"` (`Sources/RunnerCore/Version.swift`) becomes the one place a
+  version is authored — `runnerctl --version` prints it offline, the release workflow asserts the
+  git tag matches it, and the pkg ships it as `share/runnervm/VERSION`.
+- **Socket auto-discovery.** `runnerctl`/`runnerd` resolve `--socket`/`--state-dir`/`--runtime-dir`
+  as flag > `RUNNERVM_SOCKET`/`RUNNERVM_STATE_DIR`/`RUNNERVM_RUNTIME_DIR` > the production path if
+  it exists > the development path — no more spelling `--socket` on every call against a real
+  install. `runnerd` now also accepts RPC from uid 0, so `sudo runnerctl …` works against a daemon
+  running as `_runnervm`.
+- **`doctor` grows a service-mode-aware model.** A new `skip` status, LaunchDaemon/LaunchAgent/
+  foreground detection, the login-keychain check now skipped (not failed) under a detected
+  LaunchDaemon and warned elsewhere, FileVault and reboot-persistence checks, and `--deep` running
+  the shared smoke test end to end.
+- **Prebuilt pkg and release automation.** `scripts/build-package.sh` lays out
+  `/usr/local/{bin,libexec/runnervm,share/runnervm/...}`; `.github/workflows/release.yml` is
+  tag-gated (the tag must equal `RunnerVMVersion.current`), runs an install smoke test, and creates
+  a `gh release` carrying the pkg, its sha256, `release-manifest.json` and `install.sh`.
+  `scripts/bootstrap.sh` (published as the `install.sh` release asset) is the curl one-liner: it
+  verifies the download, installs, and hands off to `runnerctl setup` on `/dev/tty`
+  (`RUNNERVM_VERSION`/`RUNNERVM_PKG_URL`/`RUNNERVM_ALLOW_UNSIGNED`/`RUNNERVM_NO_SETUP`).
+- **`runnerctl setup`** is the wizard behind that handoff: daemon deployment by default, org/repo
+  scope, a PAT read without echo, a sizing recommendation, `rvm-<host6>-*` generated profile names
+  (so two hosts in one GitHub scope cannot collide on a scale-set session), profiles applied only
+  after images are pulled or provisioned, and a finish that runs `doctor` plus a smoke test and
+  prints a single-scale-set-label `runs-on` sample. Creates the hidden `_runnervm` account
+  `dscl`-only (shell `/usr/bin/false`, home under the state directory — no `sysadminctl`).
+  `--dry-run`/`--non-interactive` supported.
+- **Maintenance instances.** `vm create --pinned --ttl [--image]` makes a resource-visible,
+  demand-invisible instance that scale-to-zero never cancels; `runnerctl system smoke-test` wraps
+  the same client-side check the wizard and image qualification use; `scripts/qualify-macos-image.sh`
+  now pins its instance, fixing H2 (an ephemeral qualification instance could be scaled away by the
+  scheduler before the guest agent ever connected).
+- **Automatic image updates.** `images.updates {enabled, interval, jitter, keepPrevious,
+  smokeTest}` re-resolves every tracked registry tag or managed source on an interval, pulls and
+  qualifies the candidate (boot-to-idle), and only then promotes it atomically. An update never
+  terminates a running VM, a failed update never replaces the current image, `keepPrevious` is the
+  only deletion gate, and a digest-pinned profile is never tracked. Operator surface: `runnerctl
+  image update check|run|status`, plus an `Updates` block in `status`.
+- **Native managed macOS provisioning.** `images.managed [{name, kind: macos-tart, source,
+  autoUpdate, resources}]` lets the daemon pull the Cirrus Tart base read-only, boot it under
+  `vmworker` itself (no Tart binary, no Homebrew on the host), find its IP by MAC from
+  `/var/db/dhcpd_leases`, and drive `scripts/provision-macos-tart.sh --attach` over SSH — payload
+  manifest, seal-time lockdown, a refusal to seal without harden proof and a graceful shutdown, and
+  a cold-boot qualification of a fresh-identity clone before promoting via alias. Macos images are
+  still never published.
+- **Per-VM macOS CI keychain**, in the Go guest agent: a fresh, empty, unlocked
+  `runnervm-ci.keychain` per session, exposed to the runner as `RUNNERVM_CI_KEYCHAIN`/
+  `RUNNERVM_CI_KEYCHAIN_PASSWORD`, fail-closed (`KEYCHAIN_UNAVAILABLE`) if it cannot be built, and
+  deleted on exit. `agent.selfTest` proves the import-then-codesign chain actually works
+  (`Proto/guest_agent.md`).
+- **`sudo runnerctl upgrade` (D10).** Manual-only, per `docs/design/distribution.md` ("Upgrade
+  policy"): `--check` reports the installed vs. released version with no root; otherwise it
+  verifies the pkg against its detached checksum and the manifest's own hash, backs up
+  `config.yaml` and the database, drains the host (`--drain-timeout`, default 30m), swaps the
+  package, restarts the daemon, and runs `doctor` — with auto-rollback only when `doctor` fails and
+  the schema did not advance. Landed very close to this entry; not yet exercised on real hardware.
+- **`publish-images.yml`**, self-hosted (`runnervm-publisher`), monthly. The first publish of
+  `ubuntu-24-base:stable` to GHCR is an operator step (login, dispatch or wait for the schedule,
+  make the package public, connect it to the repo) and has not been run.
+
 ## 2026-08-28 — pull-only deployment: `image inspect --remote`, `images.prefetch`, published images
 
 A host that pulls its images should not have to build any. Three gaps stood between that and the

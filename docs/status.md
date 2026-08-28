@@ -1,4 +1,4 @@
-# Project status — 2026-08-27
+# Project status — 2026-08-28
 
 The single-page answer to "what does RunnerVM do today, how sure are we, and what is next".
 `TODO.md` is the task-level tracker; `CHANGELOG.md` lists what landed when; `docs/verification.md`
@@ -6,10 +6,11 @@ holds the evidence behind every "live" claim below.
 
 ## Next milestone
 
-Distribution hardening (milestone D) — contract in `docs/design/distribution.md`. Goal: a fresh
-Apple Silicon Mac becomes a working runner host from one `curl … | sudo bash` — pkg install,
-wizard, headless LaunchDaemon, GHCR-pulled Linux images with auto-update, native managed macOS
-provisioning, manual-only upgrade. Tracked in `TODO.md` "D — Distribution hardening".
+Distribution hardening (milestone D, contract in `docs/design/distribution.md`) is code-complete,
+including `runnerctl upgrade` (D10). Every piece of it is unit/integration-tested only: **nothing
+has been released, published, or run on real hardware yet.** The next milestone is that
+hardware/live matrix, not new code — see "Open verification". Tracked in `TODO.md` "D — Distribution
+hardening".
 
 ## What RunnerVM is
 
@@ -44,8 +45,19 @@ the host, pulled from an OCI registry, or imported from tart.
 | SSH provisioning of agent-less (tart) images | macOS only, script | `scripts/provision-macos-tart.sh` (one-shot image preparation over SSH, not a runtime dependency); Linux tart imports remain inspect/re-publish only |
 | GitHub App authentication | done | tests against fakes |
 | CI (Swift 6.1.2 on macOS 15 + Go + shellcheck) | green | flakes fixed at the root (`74ecb12`); every hardening push green after `4f214e2` |
+| Repo rename, Apache-2.0 `LICENSE`, `RunnerVMVersion.current` version source of truth | done | `runnerctl --version` offline; unit/integration tests; live verification pending |
+| Socket auto-discovery (flag > `RUNNERVM_SOCKET`/`STATE_DIR`/`RUNTIME_DIR` > production-if-exists > dev), root-uid RPC | done | unit/integration tests; live verification pending |
+| `doctor` service-mode detection, `skip` status, login-keychain skip under LaunchDaemon, FileVault + reboot-persistence checks | done | unit/integration tests; live verification pending |
+| Prebuilt pkg (`scripts/build-package.sh`) + tag-gated `release.yml` + curl bootstrap installer | done | unit/integration tests (`scripts/tests/`); **nothing released yet** — no tag pushed, no GitHub release exists |
+| `runnerctl setup` wizard (dscl-only `_runnervm` account, daemon/agent mode, PAT no-echo, profiles-after-images, `rvm-<host6>-*` names) | done | unit/integration tests; live verification pending |
+| Maintenance instances (`vm create --pinned --ttl`), `runnerctl system smoke-test` | done | unit/integration tests, incl. the fixed `qualify-macos-image.sh` (H2); live verification pending |
+| Automatic image updates (`images.updates`, `runnerctl image update check\|run\|status`) | done, opt-in | unit/integration tests; live verification pending |
+| Native managed macOS provisioning (`images.managed`, `kind: macos-tart`, no Tart binary on host) | done | unit/integration tests; live verification pending — see `docs/macos-guests.md` |
+| Per-VM macOS CI keychain (Go guest agent, `RUNNERVM_CI_KEYCHAIN`, `agent.selfTest`) | done | unit/integration tests (`Proto/guest_agent.md`); real-workflow e2e (`.github/workflows/e2e.yml` `keychain` job) not yet run on hardware |
+| `runnerctl upgrade` (D10: `--check`/`--version`, drain, backup, doctor, rollback-if-schema-unchanged) | done | unit/integration tests; landed very close to this entry, not yet exercised on real hardware |
+| `publish-images.yml` (self-hosted, monthly) | script + docs done | same caveat as the manual publisher below — **first publish unrun** |
 
-Test suite: 1355 Swift tests / 172 suites (`swift test`), Go guest-agent tests (`go test -race`), install-script tests 21/21, qualify-host tests 53/53.
+Test suite: 1665+ Swift tests (`swift test`), Go guest-agent tests (`go test -race`), install-script tests, qualify-host tests, `scripts/tests/*` bash suites — all green. Exact current counts: `swift test --parallel 2>&1 | tail -5`.
 
 ## What the last milestone added (M8 macOS guests, 2026-08-27/28)
 
@@ -147,13 +159,28 @@ Two things bite on a multi-host or multi-account Mac and are not enforced anywhe
    10-reboot / cold-power-cycle loop in `docs/qualification.md` — **not run** (skipped on the
    operator's decision; the doctor/qualify tooling for it is in place and hardware-verified).
 2. `scripts/live-builder-faults.sh`: finish the kill -9 run at `staging`/`booting`/`provisioning`/`sealing` (in flight at hand-off; `queued`/`resolving` are unobservable on a warm build).
-4. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
-5. Build-time secrets (`docs/design/build-secrets.md`).
-6. macOS guests: the hardening pass's own live runs — `scripts/qualify-macos-image.sh` against a
+3. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
+4. Build-time secrets (`docs/design/build-secrets.md`).
+5. macOS guests: the hardening pass's own live runs — `scripts/qualify-macos-image.sh` against a
    re-provisioned image (H2), then `scripts/live-macos-e2e.sh` for the 2-concurrent-guest /
    third-job-waits test (H3, blocked only by free disk on the dev host — admission reserves the
    image's full virtual size per instance), the recovery matrix (H4) and the 100-short-jobs soak
    (H5). The native IPSW builder (M8.6) comes after those, not before. See `docs/macos-guests.md`.
+6. **Milestone-D hardware matrix** — every distribution feature above is unit/integration-tested
+   only; none of the following has been run:
+   - fresh-Mac curl install (`curl … | sudo bash` → `runnerctl setup` wizard) on hardware that has
+     never had RunnerVM on it;
+   - the reboot loop (§1 above) specifically against the pkg-installed LaunchDaemon;
+   - `runnerctl upgrade` end to end against a real prior install;
+   - native managed macOS provisioning (`images.managed`, D7) driven live — the daemon pulling the
+     Tart base, provisioning under `vmworker`, and qualify-then-promote;
+   - the per-VM CI keychain (D9) exercised by a real workflow (`.github/workflows/e2e.yml`
+     `keychain` job) rather than `agent.selfTest` alone;
+   - the first `ubuntu-24-base` publish to GHCR (`publish-images.yml` or the manual command in
+     `docs/published-images.md`) — package visibility and repo-connection are one-time operator
+     steps that have not been done;
+   - the first tagged GitHub release (`v0.2.0`) — no tag is pushed and no release exists yet, so
+     the curl one-liner above has nothing to download.
 
 ## Developer quick start
 
