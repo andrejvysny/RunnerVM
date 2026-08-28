@@ -70,6 +70,20 @@ jobs:
         working-directory: dist
         run: shasum -a 256 -c ./*.sha256
 
+      # scripts/bootstrap.sh is published byte-for-byte as the "install.sh" release asset (see its
+      # own header and docs/design/distribution.md "Goal") -- this is the only place that copy is
+      # produced.
+      - name: Stage install.sh
+        run: cp scripts/bootstrap.sh dist/install.sh
+
+      # Runs the real bootstrap.sh end-to-end against the pkg just built, pointed at the local
+      # dist/ directory instead of a GitHub release. A second `installer -pkg` over the first
+      # install a few steps up is fine: installer is idempotent.
+      - name: Bootstrap script smoke test
+        run: |
+          RUNNERVM_PKG_URL="file://$PWD/dist" RUNNERVM_ALLOW_UNSIGNED=1 RUNNERVM_NO_SETUP=1 \
+            sudo -E bash scripts/bootstrap.sh
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -78,7 +92,6 @@ jobs:
             dist/RunnerVM-macos-arm64.pkg \
             dist/RunnerVM-macos-arm64.pkg.sha256 \
             dist/release-manifest.json \
+            dist/install.sh \
             --title "RunnerVM $GITHUB_REF_NAME" \
             --generate-notes
-          # TODO(D4): upload install.sh once scripts/bootstrap.sh (published as install.sh) exists,
-          # so the curl-fsSL-from-latest-release one-liner in docs/design/distribution.md works.

@@ -81,6 +81,8 @@ jobs:
         run: bash scripts/tests/publish-images-test.sh
       - name: pkg build script unit test
         run: bash scripts/tests/build-package-test.sh
+      - name: bootstrap (install.sh) script unit test
+        run: bash scripts/tests/bootstrap-test.sh
       # swiftformat --lint is deliberately absent: the tree predates the .swiftformat rules
       # (≈250 files differ). Enable it in the same commit that runs `swiftformat .` once.
 
