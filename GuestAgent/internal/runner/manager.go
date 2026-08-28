@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/runnervm/guest-agent/internal/keychain"
 	"github.com/runnervm/guest-agent/internal/system"
 )
 
@@ -54,6 +55,10 @@ var (
 	ErrAlreadyStarted = errors.New("runner: session already started")
 	ErrBusy           = errors.New("runner: another session is running")
 	ErrInvalidSession = errors.New("runner: invalid sessionId")
+	// ErrKeychainUnavailable means the per-VM CI keychain could not be
+	// created. The runner is not started: a job that signs with whatever
+	// keychain happens to be lying around is the leak this prevents.
+	ErrKeychainUnavailable = errors.New("runner: ci keychain unavailable")
 )
 
 // Config configures a Manager.
@@ -66,7 +71,11 @@ type Config struct {
 	StartScript string
 	// OnlineAfter overrides the starting→online dwell time (tests).
 	OnlineAfter time.Duration
-	Logger      *slog.Logger
+	// KeychainPreparer creates the per-VM CI keychain handed to the runner
+	// through the environment (macOS). Nil disables the feature entirely,
+	// which is the Linux-guest behaviour.
+	KeychainPreparer keychain.Preparer
+	Logger           *slog.Logger
 }
 
 // StartRequest is one agent.startRunner call. JITConfig is a secret: it is
@@ -111,6 +120,11 @@ type session struct {
 	logPath   string
 	done      chan struct{}
 
+	// keychain is the session's CI keychain, deleted once the runner is
+	// gone. Nil when the platform has none.
+	keychain     keychain.Session
+	keychainOnce sync.Once
+
 	exited   bool
 	exitCode int
 	exitedAt time.Time
@@ -152,7 +166,7 @@ func (m *Manager) SelfCheck() error {
 // Start launches the runner for sessionID. It is single-shot per session:
 // re-starting the same id always fails, and a second id is rejected while
 // the first session is still alive.
-func (m *Manager) Start(req StartRequest) (StartResult, error) {
+func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {
 	if !sessionIDPattern.MatchString(req.SessionID) {
 		return StartResult{}, fmt.Errorf("%w: %q", ErrInvalidSession, req.SessionID)
 	}
@@ -172,7 +186,7 @@ func (m *Manager) Start(req StartRequest) (StartResult, error) {
 		}
 	}
 
-	sess, err := m.spawn(req)
+	sess, err := m.spawn(ctx, req)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -185,7 +199,7 @@ func (m *Manager) Start(req StartRequest) (StartResult, error) {
 }
 
 // spawn does the privileged work of Start. The caller holds m.mu.
-func (m *Manager) spawn(req StartRequest) (*session, error) {
+func (m *Manager) spawn(ctx context.Context, req StartRequest) (*session, error) {
 	script := filepath.Join(m.cfg.Dir, m.cfg.StartScript)
 	if err := m.SelfCheck(); err != nil {
 		return nil, err
@@ -195,6 +209,19 @@ func (m *Manager) spawn(req StartRequest) (*session, error) {
 			return nil, err
 		}
 	}
+	kc, err := m.prepareKeychain(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	// Every failure between here and a successful fork must take the
+	// keychain with it; only a live runner is allowed to own one.
+	spawned := false
+	defer func() {
+		if !spawned && kc != nil {
+			_ = kc.Close()
+		}
+	}()
+
 	logFile, logPath, err := m.openSessionLog(req.SessionID)
 	if err != nil {
 		return nil, err
@@ -209,7 +236,7 @@ func (m *Manager) spawn(req StartRequest) (*session, error) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.Env = m.childEnv(req)
+	cmd.Env = m.childEnv(req, kc)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// Own process group so stopRunner can signal the runner and every
 		// job process it forked with a single kill(-pgid).
@@ -239,9 +266,37 @@ func (m *Manager) spawn(req StartRequest) (*session, error) {
 		startedAt: time.Now().UTC(),
 		logPath:   logPath,
 		done:      make(chan struct{}),
+		keychain:  kc,
 	}
+	spawned = true
 	go m.reap(sess, cmd)
 	return sess, nil
+}
+
+// prepareKeychain creates the CI keychain this session's runner signs with.
+// It is fail-closed: no keychain, no runner.
+func (m *Manager) prepareKeychain(ctx context.Context, sessionID string) (keychain.Session, error) {
+	if m.cfg.KeychainPreparer == nil {
+		return nil, nil
+	}
+	kc, err := m.cfg.KeychainPreparer.Prepare(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrKeychainUnavailable, err)
+	}
+	return kc, nil
+}
+
+// closeKeychain deletes the session's CI keychain. Both the exit path and
+// the stop path call it, so it runs at most once.
+func (s *session) closeKeychain(log *slog.Logger) {
+	if s.keychain == nil {
+		return
+	}
+	s.keychainOnce.Do(func() {
+		if err := s.keychain.Close(); err != nil {
+			log.Warn("ci keychain cleanup failed", "sessionId", s.id, "error", err.Error())
+		}
+	})
 }
 
 // reap records the runner's exit so runnerStatus can report it after the
@@ -263,6 +318,8 @@ func (m *Manager) reap(sess *session, cmd *osexec.Cmd) {
 	sess.exitCode = code
 	sess.exitedAt = time.Now().UTC()
 	m.mu.Unlock()
+	// The keychain must not outlive the process that was signing with it.
+	sess.closeKeychain(m.log)
 	close(sess.done)
 
 	m.log.Info("runner exited", "sessionId", sess.id, "pid", sess.pid, "exitCode", code)
@@ -309,6 +366,9 @@ func (m *Manager) Stop(ctx context.Context, sessionID string, grace time.Duratio
 	}
 	pid, done := sess.pid, sess.done
 	m.mu.Unlock()
+	// reap() closes it as soon as it observes the exit, but stopRunner must
+	// not answer the host while the keychain could still be readable.
+	defer sess.closeKeychain(m.log)
 
 	m.log.Info("stopping runner", "sessionId", sessionID, "pid", pid, "graceMs", grace.Milliseconds())
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
@@ -418,7 +478,7 @@ func (m *Manager) chown(path string) {
 // childEnv builds the runner's environment explicitly rather than
 // inheriting the agent's: a systemd/launchd daemon environment is not a
 // login environment, and the runner needs HOME, PATH and TMPDIR to work.
-func (m *Manager) childEnv(req StartRequest) []string {
+func (m *Manager) childEnv(req StartRequest, kc keychain.Session) []string {
 	acct := m.cfg.Account
 	path := os.Getenv("PATH")
 	if path == "" {
@@ -447,9 +507,20 @@ func (m *Manager) childEnv(req StartRequest) []string {
 	if req.WorkDir != "" {
 		env["RUNNER_WORKDIR"] = req.WorkDir
 	}
+	// The CI keychain lands before the caller's entries, and the loop below
+	// drops anything in its reserved namespace, so a host request can never
+	// redirect the runner at a keychain the agent did not create.
+	if kc != nil {
+		for k, v := range kc.Env() {
+			env[k] = v
+		}
+	}
 	for k, v := range req.Env {
 		if k == "" || strings.ContainsAny(k, "=\x00") || k == jitConfigEnvVar {
 			continue // reject unrepresentable keys and secret smuggling
+		}
+		if strings.HasPrefix(k, keychain.EnvPrefix) {
+			continue // reserved: see the keychain merge above
 		}
 		env[k] = v
 	}

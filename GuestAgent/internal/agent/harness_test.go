@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/runnervm/guest-agent/internal/keychain"
 	"github.com/runnervm/guest-agent/internal/rpc"
 	"github.com/runnervm/guest-agent/internal/vsock"
 )
@@ -31,6 +32,8 @@ type harness struct {
 	root       string
 	logs       *syncBuffer
 	poweredOff chan struct{}
+	// toolLog collects the argv of every stubbed macOS keychain tool call.
+	toolLog string
 }
 
 func newHarness(t *testing.T, mutate func(*Config)) *harness {
@@ -49,6 +52,7 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	logs := &syncBuffer{}
 	poweredOff := make(chan struct{})
 	var once sync.Once
+	toolLog := filepath.Join(root, "keychain-tools.log")
 
 	cfg := Config{
 		Version:    "test",
@@ -71,7 +75,15 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 			once.Do(func() { close(poweredOff) })
 			return nil
 		},
-		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		// The macOS keychain tooling is stubbed for the whole suite. The
+		// real /usr/bin/security would run against the account the test
+		// binary belongs to, and `list-keychains -s` / `default-keychain -s`
+		// rewrite that account's login keychain search list -- not a thing a
+		// unit test may do to the machine it runs on.
+		SecurityPath: writeToolStub(t, root, "security", toolLog),
+		OpenSSLPath:  writeToolStub(t, root, "openssl", toolLog),
+		CodesignPath: writeToolStub(t, root, "codesign", toolLog),
+		Logger:       slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -111,7 +123,39 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	return &harness{
 		svc: svc, client: client, cfg: cfg,
 		runnerDir: runnerDir, stateDir: stateDir, root: root,
-		logs: logs, poweredOff: poweredOff,
+		logs: logs, poweredOff: poweredOff, toolLog: toolLog,
+	}
+}
+
+// writeToolStub creates an inert stand-in for one macOS keychain tool. It
+// appends its argv to logPath and exits 0, unless a marker file named
+// fail-<tool> or fail-<subcommand> exists next to it, which makes it exit 1.
+func writeToolStub(t *testing.T, dir, name, logPath string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\n" +
+		"printf '" + name + " %s\\n' \"$*\" >> '" + logPath + "'\n" +
+		"if [ -f '" + filepath.Join(dir, "fail-"+name) + "' ]; then exit 1; fi\n" +
+		"if [ -f '" + filepath.Join(dir, "fail-") + "'\"$1\" ]; then exit 1; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write %s stub: %v", name, err)
+	}
+	return path
+}
+
+// keychainTestConfig is a keychain.Config that names no real tool, for the
+// platform tests that only care whether a preparer is built at all.
+func keychainTestConfig() keychain.Config {
+	return keychain.Config{RunnerHome: "/nonexistent", SecurityPath: "/nonexistent"}
+}
+
+// failTool makes the named stub (or, with a subcommand, that one call) exit
+// non-zero on its next invocation.
+func failTool(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "fail-"+name), nil, 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
 	}
 }
 

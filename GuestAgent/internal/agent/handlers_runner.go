@@ -39,7 +39,7 @@ func (s *Service) handleStartRunner(ctx context.Context, req rpc.Envelope) (any,
 		wipe(req.Payload)
 	}()
 
-	result, err := s.runner.Start(runner.StartRequest{
+	result, err := s.runner.Start(ctx, runner.StartRequest{
 		SessionID: p.SessionID,
 		JITConfig: jit,
 		WorkDir:   p.WorkDir,
@@ -108,6 +108,11 @@ func mapRunnerError(err error) error {
 		return errCode(rpc.CodeBusy, err, true)
 	case errors.Is(err, runner.ErrInvalidSession):
 		return errCode(rpc.CodeInvalidParams, err, false)
+	case errors.Is(err, runner.ErrKeychainUnavailable):
+		// Not retryable: a guest that cannot build a keychain will not
+		// manage it on the next call either, so the host should replace the
+		// VM rather than spin.
+		return errCode(CodeKeychainUnavailable, err, false)
 	default:
 		return errInternal(err)
 	}

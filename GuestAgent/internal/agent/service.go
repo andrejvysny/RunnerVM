@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/runnervm/guest-agent/internal/cleanup"
+	"github.com/runnervm/guest-agent/internal/keychain"
 	"github.com/runnervm/guest-agent/internal/metrics"
 	"github.com/runnervm/guest-agent/internal/rpc"
 	"github.com/runnervm/guest-agent/internal/runner"
@@ -47,8 +48,14 @@ const defaultShutdownDelay = 500 * time.Millisecond
 // see cleanup.EnsureHomeSnapshot / cleanup.RestoreHome.
 const homeSnapshotFileName = "home-pristine.tar"
 
-// capabilities advertises which optional method families this build serves.
-var capabilities = []string{"exec", "metrics", "runner", "resizeDisk", "cleanup", "shutdown"}
+// baseCapabilities advertises the optional method families every build
+// serves. Its order is part of the wire contract's readability, not its
+// semantics, but the host logs it verbatim: keep it stable.
+var baseCapabilities = []string{"exec", "metrics", "runner", "resizeDisk", "cleanup", "shutdown"}
+
+// capabilities is what agent.hello reports: the base list plus whatever the
+// platform adds (platform_darwin.go / platform_other.go).
+var capabilities = append(append([]string{}, baseCapabilities...), platformCapabilities()...)
 
 // Config configures a Service. Only RunnerDir and StateDir are required;
 // everything else has a production-sane default.
@@ -77,6 +84,13 @@ type Config struct {
 	CleanupExtraPaths []string
 	// PruneDocker enables `docker system prune` during agent.cleanup.
 	PruneDocker bool
+	// SecurityPath, OpenSSLPath and CodesignPath override the macOS tools
+	// behind the per-VM CI keychain and agent.selfTest. Empty means the
+	// production absolute paths in internal/keychain; tests point them at
+	// stubs so the suite never touches a real keychain.
+	SecurityPath string
+	OpenSSLPath  string
+	CodesignPath string
 	// MetricsWindow is the CPU sampling window for agent.getMetrics.
 	MetricsWindow time.Duration
 	// RunnerOnlineAfter is how long the runner must survive before
@@ -110,6 +124,10 @@ type Service struct {
 	cleaner *cleanup.Cleaner
 	bootID  string
 	started time.Time
+
+	// keychainCfg drives both the per-VM CI keychain the runner manager
+	// prepares and the agent.selfTest proof.
+	keychainCfg keychain.Config
 
 	// hostSafeMode is true when the agent could not confirm it is running
 	// inside a VM (and AllowHostDestructive was not set): agent.cleanup,
@@ -156,11 +174,52 @@ func New(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Second safety rail, independent of the non-root check above: even a
+	// root agent must not run agent.cleanup/resizeDisk/shutdown on real
+	// hardware. This is what caught the incident that motivated it -- a
+	// developer running the agent binary directly on their Mac, as root,
+	// is privileged by the check above but is not a disposable guest.
+	detectVM := cfg.VMDetector
+	if detectVM == nil {
+		detectVM = system.InVirtualMachine
+	}
+	inVM, evidence := detectVM()
+	hostSafeMode := !cfg.AllowHostDestructive && !inVM
+	if hostSafeMode {
+		log.Warn("host-safe-mode: refusing agent.cleanup/resizeDisk/shutdown",
+			"reason", "could not confirm the agent is running inside a virtual machine",
+			"evidence", evidence,
+			"hint", "pass --allow-host-destructive to override for guest image builds on real hardware")
+	}
+
+	keychainCfg := keychain.Config{
+		RunnerHome:   account.Home,
+		User:         account.Name,
+		SecurityPath: cfg.SecurityPath,
+		OpenSSLPath:  cfg.OpenSSLPath,
+		CodesignPath: cfg.CodesignPath,
+		Credential:   account.Credential(),
+		Logger:       log,
+	}
+	// Preparing a macOS keychain rewrites the account's keychain search
+	// list and default keychain -- host state, not guest state. On a
+	// developer's Mac, which is precisely what host-safe-mode exists to
+	// notice, that would trash their login keychain, so the preparer is
+	// built only where the agent can confirm it is a disposable guest.
+	var keychainPreparer keychain.Preparer
+	if hostSafeMode {
+		log.Warn("host-safe-mode: agent.startRunner will not create a per-VM CI keychain",
+			"reason", "could not confirm the agent is running inside a virtual machine")
+	} else {
+		keychainPreparer = newKeychainPreparer(keychainCfg)
+	}
+
 	mgr, err := runner.New(runner.Config{
-		Dir:         cfg.RunnerDir,
-		Account:     account,
-		OnlineAfter: cfg.RunnerOnlineAfter,
-		Logger:      log,
+		Dir:              cfg.RunnerDir,
+		Account:          account,
+		OnlineAfter:      cfg.RunnerOnlineAfter,
+		KeychainPreparer: keychainPreparer,
+		Logger:           log,
 	})
 	if err != nil {
 		return nil, err
@@ -207,27 +266,15 @@ func New(cfg Config) (*Service, error) {
 		log.Warn("boot id unavailable", "error", err.Error())
 	}
 
-	// Second safety rail, independent of the non-root check above: even a
-	// root agent must not run agent.cleanup/resizeDisk/shutdown on real
-	// hardware. This is what caught the incident that motivated it -- a
-	// developer running the agent binary directly on their Mac, as root,
-	// is privileged by the check above but is not a disposable guest.
-	detectVM := cfg.VMDetector
-	if detectVM == nil {
-		detectVM = system.InVirtualMachine
-	}
-	inVM, evidence := detectVM()
-	hostSafeMode := !cfg.AllowHostDestructive && !inVM
-	if hostSafeMode {
-		log.Warn("host-safe-mode: refusing agent.cleanup/resizeDisk/shutdown",
-			"reason", "could not confirm the agent is running inside a virtual machine",
-			"evidence", evidence,
-			"hint", "pass --allow-host-destructive to override for guest image builds on real hardware")
-	} else if err := cleaner.EnsureHomeSnapshot(); err != nil {
-		// Not fatal: the agent still starts, and agent.cleanup fails closed
-		// with HOME_SNAPSHOT_MISSING on a reusable VM until this is fixed,
-		// which is safer than refusing to serve at all.
-		log.Warn("cleanup: could not take initial home snapshot", "error", err.Error())
+	// Skipped in host-safe-mode: agent.cleanup is refused there, so there
+	// is nothing to snapshot for.
+	if !hostSafeMode {
+		if err := cleaner.EnsureHomeSnapshot(); err != nil {
+			// Not fatal: the agent still starts, and agent.cleanup fails
+			// closed with HOME_SNAPSHOT_MISSING on a reusable VM until this
+			// is fixed, which is safer than refusing to serve at all.
+			log.Warn("cleanup: could not take initial home snapshot", "error", err.Error())
+		}
 	}
 
 	return &Service{
@@ -238,6 +285,7 @@ func New(cfg Config) (*Service, error) {
 		cleaner:      cleaner,
 		bootID:       bootID,
 		started:      time.Now(),
+		keychainCfg:  keychainCfg,
 		hostSafeMode: hostSafeMode,
 	}, nil
 }
@@ -248,6 +296,7 @@ func (s *Service) Register(srv *rpc.Server) {
 	srv.Handle("agent.health", rpc.ReadOnly, s.handleHealth)
 	srv.Handle("agent.getInfo", rpc.ReadOnly, s.handleGetInfo)
 	srv.Handle("agent.getMetrics", rpc.ReadOnly, s.handleGetMetrics)
+	srv.Handle("agent.selfTest", rpc.ReadOnly, s.handleSelfTest)
 	srv.Handle("agent.resizeDisk", rpc.IdempotentMutation, s.handleResizeDisk)
 	srv.Handle("agent.startRunner", rpc.SingleShot, s.handleStartRunner)
 	srv.Handle("agent.runnerStatus", rpc.ReadOnly, s.handleRunnerStatus)

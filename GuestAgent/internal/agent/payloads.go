@@ -38,6 +38,21 @@ type InfoResult struct {
 	DockerVersion string   `json:"dockerVersion,omitempty"`
 }
 
+// SelfTestResult answers agent.selfTest. Checks is always present
+// (possibly empty) and is ordered by execution: the run stops at the first
+// failure, so at most the last entry has ok=false.
+type SelfTestResult struct {
+	Checks []SelfTestCheck `json:"checks"`
+}
+
+// SelfTestCheck is one self-test step. Detail is always present; it carries
+// the failure reason, or a note about how a step succeeded, or "".
+type SelfTestCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
 // ResizeDiskResult answers agent.resizeDisk.
 type ResizeDiskResult struct {
 	Grown     bool  `json:"grown"`
