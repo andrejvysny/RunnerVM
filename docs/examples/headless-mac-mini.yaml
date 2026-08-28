@@ -17,6 +17,13 @@ host:
     cpu: 2          # 10 logical - 2 => 8 vCPU budget
     memory: 6GiB    # 32 - 6 => 26 GiB budget
     disk: 4GiB      # absolute free-space floor
+  # Left at the 1.0 default here. Raise it only to admit a guest whose disk is sparse --
+  # a macOS image is 50 GB apparent against ~30 GiB allocated, and the instance disk is an
+  # APFS clone that only grows as the job writes, so admission's worst-case reservation
+  # refuses guests this host would run comfortably. This machine needs ~1.51 for one macOS
+  # guest. The risk is real: a job that truly fills its disk exhausts host storage.
+  overcommit:
+    disk: 1.0
   maxVMs: 1         # one runner at a time on this host
 
 github:
