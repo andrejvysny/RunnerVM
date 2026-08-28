@@ -86,16 +86,22 @@ enum Mapping {
       placeholder: false)
   }
 
-  /// Both halves come from local state — the cached auth probe and the persisted scope health —
-  /// so `system.status` answers even while GitHub is unreachable.
-  static func github(auth: AuthStatus, scopes: [GitHubScopeRecord]) -> GitHubSummary {
+  /// Auth and scopes come from local state — the cached auth probe and the persisted scope health
+  /// — so `system.status` answers even while GitHub is unreachable. `scaleSetsHealthy` is the
+  /// caller's count over the same `demandReport()` rows `scaleset.list` renders, rather than a
+  /// second opinion: it was hardcoded to 0, so `status` reported "Scale sets: 0 healthy" on a host
+  /// whose only scale set was `ready`/`open`/`ok` in `scaleset list` — an operator reading status
+  /// during a deployment sees a broken GitHub connection that is not broken.
+  static func github(
+    auth: AuthStatus, scopes: [GitHubScopeRecord], scaleSetsHealthy: Int
+  ) -> GitHubSummary {
     let enabled = scopes.filter(\.enabled)
     return GitHubSummary(
       authState: auth.state,
       authLogin: auth.login,
       scopeCount: enabled.count,
       scopesHealthy: enabled.count { $0.health == GitHubMapping.healthy },
-      scaleSetsHealthy: 0,
+      scaleSetsHealthy: scaleSetsHealthy,
       placeholder: false)
   }
 

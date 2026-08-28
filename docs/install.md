@@ -81,6 +81,25 @@ directories, launchd job) is identical to a from-source install. Upgrades: `brew
 followed by the same `sudo ... install.sh --prebuilt-dir ...` command re-signs and re-installs the
 binaries in place (see "Upgrade procedure" below).
 
+## One host per profile name, per scope
+
+A profile's name is the scale-set name RunnerVM registers on GitHub (`runnervm-<profile>`), and a
+scale set has exactly one message session. Two hosts pointing at the same org/repo with the same
+profile name therefore fight over it: the second daemon logs
+
+```
+GITHUB_CONFLICT: conflict: POST /_apis/runtime/runnerscalesets/<id>/sessions: HTTP 409
+  RunnerScaleSetSessionConflictException: The actions runner scaleset runnervm-<profile>
+  already has an active session.
+```
+
+and its scale set sits `closed` in `runnerctl scaleset list`. The incumbent keeps the session, so
+nothing breaks while both are up — but whichever host restarts loses the session to the other, and
+jobs then land on a host you did not intend. **Give each host its own profile names** (or its own
+scope). Disabling a profile on the losing host is enough to stop it contending; nothing in the
+daemon deletes a scale set, so removing a profile from one host's configuration leaves the other
+host's scale set alone.
+
 ## Choosing a launchd variant (plan spike S3)
 
 `scripts/install.sh --launchd agent|daemon|none`. Full trade-off, provisioning steps and
@@ -93,7 +112,9 @@ binaries in place (see "Upgrade procedure" below).
 - **`daemon`** (experimental): a LaunchDaemon under a dedicated unprivileged account, matching spec
   §7.2's original wording literally. No GUI session means no automatically-unlocked keychain —
   needs explicit `security unlock-keychain` provisioning that is not wired up yet. Treat as
-  unverified until spike S3 (`TODO.md`) closes.
+  unverified until spike S3 (`TODO.md`) closes — but note the 2026-08-28 counter-evidence in
+  `packaging/launchd/README.md`: on macOS 26.5.2 a daemon started over SSH with no GUI session at
+  all, and a locked login keychain, booted every VM it was asked for.
 - **`none`** (default): installs nothing launchd-related; the script prints the manual foreground
   command instead. Useful for testing or for an external process supervisor.
 

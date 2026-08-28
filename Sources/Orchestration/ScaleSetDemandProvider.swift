@@ -109,12 +109,17 @@ public actor ScaleSetDemandProvider: DemandProvider {
     continuation.finish()
   }
 
-  /// Picks up profiles a `config.apply` added and retries the ones whose registration failed.
-  /// Called at start and from every orchestrator tick, so it must stay cheap for the steady state.
+  /// Picks up profiles a `config.apply` added, drops the ones it disabled, and retries the ones
+  /// whose registration failed. Called at start and from every orchestrator tick, so it must stay
+  /// cheap for the steady state — both loops below are empty once the set of profiles is stable.
   public func refresh() async {
     guard running, let plane = await plane() else { return }
     guard let rows = try? await profiles.list(), let scopeRows = try? await scopes.list() else {
       return
+    }
+    let enabled = Set(rows.lazy.filter(\.enabled).map(\.id))
+    for profileId in states.keys where !enabled.contains(profileId) {
+      await retire(profileId)
     }
     let scopesById = Dictionary(scopeRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     for row in rows where row.enabled && states[row.id] == nil {
@@ -123,6 +128,34 @@ public actor ScaleSetDemandProvider: DemandProvider {
       else { continue }
       await register(row, scopeRecord: scopeRow, plane: plane)
     }
+  }
+
+  /// Closes and forgets one profile's message session, the mirror of `register`.
+  ///
+  /// `refresh()` used to only ever *add*, so a profile `config.apply` disabled kept its session
+  /// for the life of the process — and a scale set has exactly one session, so that daemon went on
+  /// taking job messages for a profile it no longer runs. Seen live: a second host on the same
+  /// repository held `runnervm-ubuntu-24` open after its profile was disabled and captured a job
+  /// the deployed host was locked out of (`HTTP 409 RunnerScaleSetSessionConflictException`).
+  ///
+  /// Cancelling before closing matters: `ensureSession` re-opens a missing session at the top of
+  /// every poll, so closing first would just hand the loop a fresh one.
+  private func retire(_ profileId: RunnerProfileID) async {
+    if let task = tasks.removeValue(forKey: profileId) {
+      task.cancel()
+      await task.value
+    }
+    if let session = sessions.removeValue(forKey: profileId) { try? await session.close() }
+    registrationFailures.removeValue(forKey: profileId)
+    guard let state = states.removeValue(forKey: profileId) else { return }
+    try? await scaleSets.recordSession(
+      scaleSetId: state.scaleSetRowId, generation: state.generation, sessionId: nil,
+      state: "closed")
+    logger.info(
+      "scale set session retired",
+      metadata: .context(profile: profileId, scaleSetID: state.scaleSetRowId).merging([
+        "scale_set": .string(state.name), "generation": .stringConvertible(state.generation),
+      ]) { $1 })
   }
 
   private func shouldRetryRegistration(_ id: RunnerProfileID) -> Bool {

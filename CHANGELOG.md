@@ -2,6 +2,53 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — first headless deployment (Mac mini)
+
+Deploying onto a Mac with no GUI login session — the configuration the LaunchDaemon variant and
+any unattended host actually run in — found five defects that the development Mac could not.
+Evidence, host layout and the full list of what was and was not tested:
+`docs/verification.md` "Mac mini deployment".
+
+- **Free space read as 0 in any session without a login window, so the daemon advertised
+  `capacity=0` and never scheduled a VM.** `APFSClone.freeSpace` used only
+  `volumeAvailableCapacityForImportantUsageKey`; that figure is produced by a per-login-session
+  service and is 0 where there is none — measured on macOS 26.5.2 as 0 against 70 GiB of real free
+  space, while the same host's `volumeAvailableCapacity` was correct. The daemon came up in
+  permanent `critical` disk pressure. It now falls back to `volumeAvailableCapacityKey`, which
+  undercounts purgeable space — the safe direction for an admission check — and
+  `runnerctl doctor` reads the same function instead of the volume keys a second time, so
+  doctor's "Disk headroom" line and the daemon's own accounting can no longer disagree.
+- **The in-daemon image builder never received the applied configuration**, so the whole `build:`
+  block was ignored and `host.reserve.disk` stayed at its 50 GiB default: every build on a host
+  configured for a smaller floor was refused with `IMAGE_INSUFFICIENT_DISK_SPACE`.
+  `updateConfiguration` is now part of `ImageBuildService` and is called wherever `images`,
+  `instances`, `gateway` and `orchestrator` are updated. It has no default implementation on
+  purpose: a protocol-extension no-op outranks the actor's own method at a concrete call site, and
+  the version that had one silently disabled the build harness's own configuration.
+- **`scripts/provision-macos-tart.sh` could never verify its staged payload over password SSH.**
+  The H1 payload check compared raw `ssh` output, and without `--ssh-key` that output carries the
+  pty's own `password:` prompt, so the comparison failed with all four digests visibly identical.
+  Only digest lines are compared now.
+- **`runnerctl status` always claimed "Scale sets: 0 healthy"** — `Mapping.github` hardcoded the
+  figure — while `scaleset list` reported the same scale set `ready`/`open`/`ok`. It is now
+  counted over the rows `scaleset.list` renders.
+- **Disabling a profile did not close its scale-set message session**, so a daemon went on polling
+  — and answering job messages — for a profile it no longer runs. A scale set has exactly one
+  session, so the effect is cross-host: a second daemon whose profile had been disabled took the
+  session back at the first host's next restart and captured its job
+  (`HTTP 409 RunnerScaleSetSessionConflictException` on the host that should have had it).
+  `ScaleSetDemandProvider.refresh()` now retires sessions whose profile is no longer enabled,
+  cancelling the poll task before closing the session — closing first only lets `ensureSession`
+  open a fresh one on the next poll.
+
+Also documented, because nothing enforced it: **profile names must be unique per scope across
+hosts** (`docs/install.md`, "One host per profile name, per scope").
+
+Known and unfixed, found by the same deployment: `scripts/qualify-macos-image.sh` cannot qualify an
+ephemeral profile whose scale set is live and idle — the scheduler correctly scales the instance
+the script creates with `vm create` away before the guest agent connects, so `cold_boot_to_idle`
+can never pass as written.
+
 ## 2026-08-28 — macOS hardening pass (H1–H2)
 
 The runtime from M8.0–M8.4 works; this pass makes its bad states impossible rather than adding

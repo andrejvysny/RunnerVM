@@ -159,6 +159,7 @@ actor DaemonServiceImpl: DaemonService {
     await instances.updateConfiguration(appliedConfig)
     await gateway.updateConfiguration(appliedConfig)
     await orchestrator?.updateConfiguration(appliedConfig)
+    await builder?.updateConfiguration(appliedConfig)
   }
 
   private static func read(_ url: URL) throws -> String {
@@ -190,6 +191,7 @@ actor DaemonServiceImpl: DaemonService {
     let mode = try await hosts.mode(id: hostId)
     let pressure = await diskPressure.refresh(floorBytes: reserveDiskFloor())
     let demand = await orchestrator?.states() ?? [:]
+    let scaleSetReports = await orchestrator?.demandReport() ?? []
     return SystemStatus(
       daemon: DaemonHealth(
         state: probe.probeSucceeded ? .healthy : .degraded,
@@ -204,7 +206,8 @@ actor DaemonServiceImpl: DaemonService {
       capacity: Mapping.capacity(
         appliedConfig, runningVMs: instanceRecords.count { $0.state.hasRunningVM }),
       github: Mapping.github(
-        auth: await gateway.snapshot(), scopes: scopeRecords),
+        auth: await gateway.snapshot(), scopes: scopeRecords,
+        scaleSetsHealthy: scaleSetReports.count { $0.snapshot.healthy }),
       images: await imageSummary(imageRecords),
       profiles: profileRecords.map { profile in
         ProfileRuntimeSummary(
@@ -272,6 +275,7 @@ actor DaemonServiceImpl: DaemonService {
     await instances.updateConfiguration(config)
     await gateway.updateConfiguration(config)
     await orchestrator?.updateConfiguration(config)
+    await builder?.updateConfiguration(config)
     // Spec §138: a profile whose image now resolves to a different digest retires the reusable
     // VMs still on the old one. Running instances keep their image identity either way.
     _ = await instances.retireOutdatedReusable()

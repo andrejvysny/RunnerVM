@@ -210,10 +210,16 @@ verify_staged_payload() {
         "$PLIST_SHA256" "$STAGE_DIR/com.runnervm.guest-agent.plist" \
         "$RUNNER_SHA256" "$STAGE_DIR/$(runner_asset_name "$RUNNER_VERSION")" \
         "$GUEST_SCRIPT_SHA256" "$GUEST_SCRIPT_REMOTE")"
+    # Keep only shasum lines. Without a --ssh-key this runs through expect, and the pty echoes
+    # ssh's own "admin@<ip>'s password:" prompt onto stdout, which is not part of the guest's
+    # answer -- comparing raw output then fails with all four digests visibly identical.
+    # Dropping non-digest lines cannot mask a real mismatch: the two sorted sets still have to
+    # agree line for line, so a missing or altered digest still fails.
     actual="$(guest_ssh "shasum -a 256 $(shq "$STAGE_DIR")/runnervm-guest-agent \
 $(shq "$STAGE_DIR")/com.runnervm.guest-agent.plist \
 $(shq "$STAGE_DIR/$(runner_asset_name "$RUNNER_VERSION")") \
-$(shq "$GUEST_SCRIPT_REMOTE")" | tr -d '\r')"
+$(shq "$GUEST_SCRIPT_REMOTE")" | tr -d '\r' \
+        | sed -E 's/^.*[Pp]assword: *//' | grep -E '^[0-9a-f]{64}  ' || true)"
     [ "$(printf '%s\n' "$actual" | sort)" = "$(printf '%s\n' "$expected" | sort)" ] || die \
         "the staged payload does not hash to what this host sent:
 expected:

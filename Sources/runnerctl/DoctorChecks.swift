@@ -1,5 +1,6 @@
 import DaemonAPI
 import Foundation
+import ImageStore
 import RunnerCore
 
 /// Orchestrator plus the checks that need neither `vmworker` nor a configuration file: host
@@ -130,13 +131,14 @@ enum DoctorChecks {
     return values?.volumeSupportsFileCloning ?? false
   }
 
+  /// Deliberately `APFSClone.freeSpace`, not a second reading of the volume keys: doctor's disk
+  /// headroom line has to be the number admission will actually use, including its fallback for
+  /// sessions where the "important usage" key answers 0 (see `APFSClone.freeSpace`). Two
+  /// independent readings drifted apart on a headless host -- doctor said "could not read free
+  /// space" while the daemon sat in `critical` disk pressure.
   static func freeBytes(at url: URL) -> UInt64? {
-    let ancestor = nearestExistingAncestor(of: url)
-    let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey]
-    guard let values = try? ancestor.resourceValues(forKeys: keys),
-          let capacity = values.volumeAvailableCapacityForImportantUsage, capacity > 0
-    else { return nil }
-    return UInt64(capacity)
+    let free = APFSClone.freeSpace(at: nearestExistingAncestor(of: url))
+    return free > 0 ? free : nil
   }
 
   static func socketPathLengths(_ paths: RunnerPaths) -> DoctorCheck {

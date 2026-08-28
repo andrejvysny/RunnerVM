@@ -29,7 +29,7 @@ the host, pulled from an OCI registry, or imported from tart.
 | **In-daemon image builder** (`runnerctl image build`, Runnerfile recipes) | done | live 2026-08-27: built image ran a real GitHub job (`scripts/live-builder-e2e.sh` 5/5) |
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |
 | Legacy host-script builder (`scripts/build-ubuntu-image.sh`) | kept, legacy | live 2026-08-26 |
-| Production install (`install.sh`, launchd, `_runnervm` service account) | done | `scripts/tests/install-test.sh`; not yet run on a dedicated Mac mini |
+| Production install (`install.sh`, launchd, `_runnervm` service account) | done | `scripts/tests/install-test.sh`; **deployed 2026-08-28 on a Mac mini** (user-scoped, no root, headless over SSH) — `docs/verification.md` "Mac mini deployment". The launchd job itself and the `_runnervm` account still need root and are unrun there |
 | **macOS guests (M8)** | runtime landed + hardened, **experimental** | `MacOSVMPlatform`, per-instance machine identifier (durable write), ephemeral-only, `resources.disk` must equal the image; live 2026-08-27: Tart `macos-tahoe-base` provisioned by `scripts/provision-macos-tart.sh`, imported, one GitHub JIT job on `rvm-macos-26` (23 s cold start), VM removed after the job. Hardening pass 2026-08-28: sealed images no longer carry `admin`/`admin` or SSH, a forced stop cannot seal, the LaunchDaemon fails closed, `vmworker` fences the 2-guest ceiling itself, `scripts/qualify-macos-image.sh` cold-boots a clone as the image gate. Still open: the H3–H5 live runs (concurrency, recovery, soak) and the native IPSW builder — `docs/macos-guests.md` |
 | SSH provisioning of agent-less (tart) images | macOS only, script | `scripts/provision-macos-tart.sh` (one-shot image preparation over SSH, not a runtime dependency); Linux tart imports remain inspect/re-publish only |
 | GitHub App authentication | done | tests against fakes |
@@ -104,6 +104,26 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 - Base-image cache (`cache/base-images`) is bounded by `build.cache` (LRU, pins live builds, honours
   the disk reserve) — but the free-space check for *image pulls* still counts compressed bytes only.
 - `config validate` flags an agentless profile image only once its *tag* has been resolved locally.
+
+## Headless hosts (added 2026-08-28)
+
+`runnerd` now runs correctly with **no GUI login session** — the state a LaunchDaemon, or any
+unattended Mac nobody has logged into, is actually in. Two things that blocked it are fixed
+(free-space accounting and the image builder's configuration; see `CHANGELOG.md`), and one
+long-standing assumption did not reproduce: on macOS 26.5.2 Virtualization.framework booted every
+VM with the service account's **login keychain locked**, which is the premise
+`packaging/launchd/README.md` uses to call the LaunchDaemon variant experimental. `runnerctl
+doctor`'s `Login keychain` check is a false negative on that host. This is one host and one OS
+version, so it does not by itself qualify the LaunchDaemon variant — the reboot loop below is
+still unrun — but it removes the reason to prefer the LaunchAgent path by default.
+
+Two things bite on a multi-host or multi-account Mac and are not enforced anywhere:
+
+- **Profile names must be unique per scope across hosts.** Two daemons pointing at one repository
+  with the same profile name fight over the scale set's message session (`HTTP 409
+  RunnerScaleSetSessionConflictException`); the incumbent keeps it, and whoever restarts loses.
+- **`--group staff` is a real exposure on a shared Mac**, not a theoretical one. Use the dedicated
+  `_runnervm` group whenever root is available.
 
 ## Open verification / next steps
 

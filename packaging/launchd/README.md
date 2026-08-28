@@ -23,6 +23,19 @@ Both are packaged now so the choice is evidence-based, not architecture-based: r
 against your own hardware/macOS version and pick the variant that actually boots a VM across a
 cold reboot.
 
+**Counter-evidence, 2026-08-28 (one host, macOS 26.5.2, Apple M4).** On a Mac mini with no GUI
+login session at all — nobody logged in, no auto-login user, `/dev/console` owned by `root` —
+`runnerd` booted every VM it was asked for (two image builds, ten GitHub jobs, eleven live E2E
+scenarios) while `runnerctl doctor` reported `FAIL Login keychain — login keychain for blackpen is
+locked (security exit 36)`. `vmworker probe` likewise answered `virtualizationSupported: true`.
+The keychain requirement above did not reproduce there, so the `Login keychain` doctor check is a
+false negative on that host. See `docs/verification.md` "Mac mini deployment".
+
+That is a single host and a single OS version, and it says nothing about whether the job comes
+back across a reboot — the qualification loop in `docs/qualification.md` remains unrun, so the
+LaunchDaemon variant stays **experimental**. It does mean the *reason* for preferring the
+LaunchAgent is worth re-testing on your own hardware rather than assumed.
+
 ## LaunchAgent path (recommended)
 
 1. Create the dedicated service group and account (needs an admin). The group is a hidden system

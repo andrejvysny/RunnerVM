@@ -177,6 +177,38 @@ import Testing
     }
   }
 
+  /// A scale set has exactly one message session, so a daemon that keeps polling for a profile it
+  /// no longer runs locks every other host out of that scale set (`HTTP 409
+  /// RunnerScaleSetSessionConflictException`) and answers job messages that were never meant for
+  /// it. `refresh()` only ever added sessions, so disabling a profile left its session open for the
+  /// life of the process; this is the mirror.
+  @Test func disablingAProfileClosesItsMessageSession() async throws {
+    try await withHarness { harness in
+      try await harness.markScopeHealthy()
+      let profile = try await harness.profileID("linux")
+      let provider = harness.demandProvider()
+      try await provider.start()
+      let registered = await provider.report().count
+      let row = try #require(try await harness.scaleSets.get(profileId: profile))
+      #expect(try await harness.scaleSets.currentSession(scaleSetId: row.id)?.state == "open")
+
+      var disabled = try #require(try await harness.profileRows.get(name: "linux"))
+      disabled.enabled = false
+      try await harness.profileRows.upsert(disabled)
+      await provider.refresh()
+
+      #expect(await provider.report().count == registered - 1)
+      #expect(await provider.report().allSatisfy { $0.profileId != profile })
+      #expect(try await harness.scaleSets.currentSession(scaleSetId: row.id)?.state == "closed")
+      // Re-enabling it registers again rather than leaving the profile permanently dead.
+      disabled.enabled = true
+      try await harness.profileRows.upsert(disabled)
+      await provider.refresh()
+      #expect(await provider.report().count == registered)
+      await provider.stop()
+    }
+  }
+
   @Test func advertisedCapacityIsSentWithTheNextPoll() async throws {
     try await withHarness { harness in
       try await harness.markScopeHealthy()

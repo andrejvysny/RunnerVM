@@ -47,12 +47,28 @@ public enum APFSClone {
   /// Space the volume will really hand over, i.e. after purgeable caches are reclaimed. Using the
   /// "important usage" key rather than raw free space avoids refusing to boot a VM on a Mac whose
   /// free space is mostly reclaimable.
+  ///
+  /// That key is computed by a per-login-session service, so it answers 0 in every session that
+  /// has none: a LaunchDaemon, or a daemon started over SSH on a Mac with nobody logged in --
+  /// exactly the unattended host this is written for. Reading it as "no space" put the daemon in
+  /// permanent `critical` disk pressure and advertised `capacity=0`, so no VM was ever scheduled
+  /// (seen live on macOS 26.5.2: `importantUsage` 0 against 70 GiB of real free space). Fall back
+  /// to the plain available-capacity figure there; it undercounts purgeable space, which is the
+  /// safe direction for an admission check.
   public static func freeSpace(at url: URL) -> UInt64 {
-    let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey]
-    guard let values = try? existingAncestor(of: url).resourceValues(forKeys: keys),
-          let capacity = values.volumeAvailableCapacityForImportantUsage, capacity > 0
-    else { return 0 }
-    return UInt64(capacity)
+    let keys: Set<URLResourceKey> = [
+      .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
+    ]
+    guard let values = try? existingAncestor(of: url).resourceValues(forKeys: keys) else {
+      return 0
+    }
+    if let important = values.volumeAvailableCapacityForImportantUsage, important > 0 {
+      return UInt64(important)
+    }
+    if let available = values.volumeAvailableCapacity, available > 0 {
+      return UInt64(available)
+    }
+    return 0
   }
 
   /// Volume queries need a path that exists; the store's directories are created lazily.
