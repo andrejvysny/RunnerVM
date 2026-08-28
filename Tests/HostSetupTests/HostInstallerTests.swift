@@ -94,7 +94,7 @@ import Testing
     _ = await HostInstaller(Self.dependencies(io: io)).install(Self.plan(), token: "ghp_x")
 
     #expect(io.output.contains("Labels: self-hosted, rvm-ab12cd-ubuntu-24"))
-    #expect(io.output.contains("runs-on: [self-hosted, rvm-ab12cd-ubuntu-24]"))
+    #expect(io.output.contains("runs-on: rvm-ab12cd-ubuntu-24"))
     #expect(io.output.contains("runnerctl doctor"))
   }
 

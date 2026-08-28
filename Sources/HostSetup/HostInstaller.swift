@@ -378,7 +378,10 @@ public struct HostInstaller: Sendable {
     io.say("jobs:")
     io.say("  build:")
     for profile in plan.activeProfiles {
-      io.say("    runs-on: [\(profile.labels.joined(separator: ", "))]")
+      // Scale-set matching (the production default) is single-label: the scale set carries
+      // exactly one label — the profile name — and a multi-label runs-on never matches it
+      // (found live 2026-08-26, commit b9ab328). The [self-hosted, …] form is JIT-origin only.
+      io.say("    runs-on: \(profile.name)")
     }
     io.say("")
     io.say("Then:  sudo runnerctl doctor        # full health check")
