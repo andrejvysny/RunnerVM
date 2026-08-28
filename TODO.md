@@ -10,6 +10,39 @@
 Plans: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (M0–M13) and
 `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (M14/M15). Current state: `docs/status.md`.
 
+## D — Distribution hardening (started 2026-08-28)
+
+Plan: `~/.claude/plans/act-as-senior-swift-federated-willow.md` (approved; decisions locked there).
+Goal: one-command curl install on a fresh Apple Silicon Mac — pkg, wizard, headless LaunchDaemon,
+GHCR pull-only Linux, native managed macOS provisioning, auto image updates, per-VM CI keychain,
+manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.current = "0.2.0"`.
+
+- [ ] D0 contracts: `docs/design/distribution.md`, LICENSE (Apache-2.0), status pointer
+- [ ] D1 operator plumbing: `RunnerPaths.resolve` (+`RUNNERVM_SOCKET`), root allowed on RPC,
+      `Version.swift`, `runnerctl --version`, atomic token write, doctor `skip` status +
+      service-mode/filevault/reboot-persistence checks, launchd README tier flip, dscl-only
+      service account in install.sh
+- [ ] D2 pkg: `scripts/build-package.sh`, `packaging/pkg/`, release-manifest.json, tests
+- [ ] D3 `.github/workflows/release.yml` (tag == RunnerVMVersion gate, pkg install smoke, gh release)
+- [ ] D4 `scripts/bootstrap.sh` (published as install.sh) + `Sources/HostSetup` + `runnerctl setup`
+      (wizard, dscl account, launchd, PAT, pull, profiles-last flow, dry-run) + tests
+- [ ] D5 publish-images.yml (self-hosted) + docs; first `ubuntu-24-base:stable` publish = user step
+- [ ] D6 `ImageUpdateService` + schema v4 `managed_images` + promoted-digest resolution +
+      `image update check|run|status` + retention (keepPrevious)
+- [ ] D7 native managed macOS provisioning: `ImagePullPurpose.provisioningBase`,
+      `image_builds.kind = macosProvision`, `MacOSProvisionStages`, DHCP-lease IP, script
+      `--attach` mode, qualify-then-promote via alias
+- [ ] D8 pinned maintenance instances (`purpose`/`pinned_until`, orchestrator exemptions, TTL
+      reaper) + `runnerctl system smoke-test` + fix qualify-macos-image.sh (H2) + move shared
+      helpers into lib/live-common.sh (live-macos-e2e.sh bug)
+- [ ] D9 guest CI keychain: `GuestAgent/internal/keychain`, startRunner fail-closed env,
+      `agent.selfTest`, capability, Proto + Swift DTOs, e2e keychain job
+- [ ] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged)
+- [ ] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/
+      status/CHANGELOG/AGENTS/Proto
+- [ ] Hardware/live matrix (user Macs): blackpen pkg install + wizard + reboot loop + upgrade;
+      dev Mac managed macOS build/qualify/promote + keychain e2e; release v0.2.0 + curl e2e
+
 ## Mac mini deployment (2026-08-28) — follow-ups
 
 First deployment onto a host that is not the development Mac, and the first headless run (no GUI
@@ -240,7 +273,7 @@ All code tasks landed 2026-08-26 (921 Swift + 70 Go tests green). Still open: ha
 - [x] R2-6 CI green on `master` — run 33063743404 (commit 0c15077, 2026-08-27): Swift 6.1 build+tests, shellcheck, guest agent all green. Timing-sensitive suites (`RunnerSessionTests`, `ReusableLifecycleTests`) still flake under CI load on some runs — de-flake candidate.
 
 ## Live end-to-end PROVEN (2026-08-26)
-- Registered RunnerVM as a repo Runner Scale Set (`runnervm-ubuntu-24`, label `ubuntu-24`) on andrejvysny/github-managed-runners.
+- Registered RunnerVM as a repo Runner Scale Set (`runnervm-ubuntu-24`, label `ubuntu-24`) on andrejvysny/RunnerVM.
 - `.github/workflows/runnervm-selftest.yml` (`runs-on: ubuntu-24`) ran to SUCCESS on an ephemeral Linux VM: JobAvailable -> VM create -> guest agent -> JIT -> runnerOnline -> jobRunning -> completed -> VM destroyed. 12/12 steps green (uname/os, guest-agent active, docker info + `docker run alpine`, checkout, setup-go, `go build`+`go test`, summary).
 - Two live bugs found + fixed this session:
   - `[x] R2-6` scale-set label was the prefixed scale-set name; GitHub keeps labels from creation, so `runs-on: <profile>` never matched. Fixed: label = profile name (`row.name`); `runs-on` = profile name in all workflows/docs (commit b9ab328).

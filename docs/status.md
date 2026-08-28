@@ -4,6 +4,13 @@ The single-page answer to "what does RunnerVM do today, how sure are we, and wha
 `TODO.md` is the task-level tracker; `CHANGELOG.md` lists what landed when; `docs/verification.md`
 holds the evidence behind every "live" claim below.
 
+## Next milestone
+
+Distribution hardening (milestone D) — contract in `docs/design/distribution.md`. Goal: a fresh
+Apple Silicon Mac becomes a working runner host from one `curl … | sudo bash` — pkg install,
+wizard, headless LaunchDaemon, GHCR-pulled Linux images with auto-update, native managed macOS
+provisioning, manual-only upgrade. Tracked in `TODO.md` "D — Distribution hardening".
+
 ## What RunnerVM is
 
 A self-hosted GitHub Actions runner orchestrator for one Apple Silicon Mac. `runnerd` turns
