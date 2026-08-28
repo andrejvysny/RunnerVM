@@ -103,6 +103,12 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
   <name>` follows the alias to the newest.
 - Base-image cache (`cache/base-images`) is bounded by `build.cache` (LRU, pins live builds, honours
   the disk reserve) — but the free-space check for *image pulls* still counts compressed bytes only.
+- **`image list`'s `ON DISK` column overstates what deleting an image will free.** Blobs are
+  content-addressed and materialized with `clonefile`, so a derived image shares APFS blocks with
+  the base it was built `FROM`; both rows report the full allocation and `du` double-counts the
+  shared extents. Measured 2026-08-28: deleting `ubuntu-24` (2.9 GiB) and `ubuntu-24-minimal`
+  (2.5 GiB) plus a 1.85 GiB base cache returned **3.39 GiB**, not 7.21 GiB. Plan capacity from
+  `df`, not from the sum of the `ON DISK` column.
 - `config validate` flags an agentless profile image only once its *tag* has been resolved locally.
 
 ## Headless hosts (added 2026-08-28)

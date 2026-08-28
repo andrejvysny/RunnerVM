@@ -9,9 +9,16 @@ The **exact** configuration `runnerd` is running on the Mac mini (`blackpen`) �
 file at `<state-dir>/config.yaml`, not a cleaned-up illustration. It is worth reading for the
 comments, which record *why* each number is what it is rather than what the key means.
 
-It is currently sized for **one** Linux runner at a time (4 vCPU / 8 GiB, `maxVMs: 1`). The
-autoscaling and parallel-VM evidence in `docs/verification.md` was gathered with the same file at
-`maxVMs: 3` and 2 vCPU / 4 GiB per guest — the only difference is those four numbers.
+It is sized for **one** Linux runner at a time (4 vCPU / 8 GiB, `maxVMs: 1`). The autoscaling and
+parallel-VM evidence in `docs/verification.md` was gathered with the same file at `maxVMs: 3` and
+2 vCPU / 4 GiB per guest — the only difference is those four numbers.
+
+> The Mac mini itself is currently **parked with `profiles: []`** and no images: they were removed
+> on request while evaluating whether a macOS guest would fit (it does not — see below). This file
+> keeps the working profile because it is the useful example; re-applying it is all that is needed
+> to bring the host back, once an image exists again. Add the profile and the image together —
+> a profile whose image is missing still advertises capacity, so GitHub would assign jobs that then
+> fail to start a VM.
 
 Host it was written for: Apple M4, 10 logical CPUs, 32 GiB RAM, 62 GiB free, macOS 26.5.2, no GUI
 login session, three other local accounts.
