@@ -345,9 +345,7 @@ import Testing
       await harness.launcher.killWorker(instance.id)
       await harness.instances.markWorkerDead(id: instance.id)
 
-      try await waitUntil("the restarted VM to reach idle again") {
-        try await harness.record(instance.id).state == .idle
-      }
+      _ = try await harness.awaitInstance(instance.id, state: .idle)
       #expect(try await harness.record(instance.id).workerGeneration == 2)
 
       await harness.launcher.killWorker(instance.id)
@@ -369,16 +367,12 @@ import Testing
 
       await harness.launcher.killWorker(instance.id)
       await harness.instances.markWorkerDead(id: instance.id)
-      try await waitUntil("the first restart to reach idle again") {
-        try await harness.record(instance.id).state == .idle
-      }
+      _ = try await harness.awaitInstance(instance.id, state: .idle)
       #expect(try await harness.record(instance.id).workerGeneration == 2)
 
       await harness.launcher.killWorker(instance.id)
       await harness.instances.markWorkerDead(id: instance.id)
-      try await waitUntil("the second restart to reach idle again") {
-        try await harness.record(instance.id).state == .idle
-      }
+      _ = try await harness.awaitInstance(instance.id, state: .idle)
       #expect(try await harness.record(instance.id).workerGeneration == 3)
 
       await harness.launcher.killWorker(instance.id)
