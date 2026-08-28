@@ -30,14 +30,28 @@ the host, pulled from an OCI registry, or imported from tart.
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |
 | Legacy host-script builder (`scripts/build-ubuntu-image.sh`) | kept, legacy | live 2026-08-26 |
 | Production install (`install.sh`, launchd, `_runnervm` service account) | done | `scripts/tests/install-test.sh`; not yet run on a dedicated Mac mini |
-| macOS guests | not implemented | `os: macos` rejected (`GUEST_OS_UNSUPPORTED`); plan in `docs/macos-guests.md` |
-| SSH provisioning of agent-less (tart) images as build bases | not implemented | tart imports are inspect/re-publish only |
+| **macOS guests (M8)** | runtime landed, **experimental** | `MacOSVMPlatform`, per-instance machine identifier, ephemeral-only; live 2026-08-27: Tart `macos-tahoe-base` provisioned by `scripts/provision-macos-tart.sh`, imported, one GitHub JIT job on `rvm-macos-26` (23 s cold start), VM removed after the job; 2-guest concurrency and the native IPSW builder still open — `docs/macos-guests.md` |
+| SSH provisioning of agent-less (tart) images | macOS only, script | `scripts/provision-macos-tart.sh` (one-shot image preparation over SSH, not a runtime dependency); Linux tart imports remain inspect/re-publish only |
 | GitHub App authentication | done | tests against fakes |
 | CI (Swift 6.1.2 on macOS 15 + Go + shellcheck) | green | flakes fixed at the root (`74ecb12`); every hardening push green after `4f214e2` |
 
-Test suite: 1312 Swift tests / 166 suites (`swift test`), Go guest-agent tests (`go test -race`), install-script tests 21/21, qualify-host tests 53/53.
+Test suite: 1355 Swift tests / 172 suites (`swift test`), Go guest-agent tests (`go test -race`), install-script tests 21/21, qualify-host tests 53/53.
 
-## What the last milestone added (M14 tart import + M15 image builder)
+## What the last milestone added (M8 macOS guests, 2026-08-27/28)
+
+- Identity plumbing: `MacOSInstancePlatformSpec` in `spec.json`, `machine-identifier.bin` minted by
+  `vmworker` under the worker lock and reused on restart, image minimums enforced at admission
+  (`VM_MACOS_PROFILE_CPU_TOO_SMALL` / `…_MEMORY_TOO_SMALL`), Tart `cpuCountMin`/`memorySizeMin` mapped.
+- `MacOSVMPlatform` (`VZMacOSBootLoader`, `VZMacPlatformConfiguration`, `isSupported` check, one
+  1920×1080 display with no window); `os: macos` profiles validate, `lifecycle: reusable` refused
+  for macOS; `runnerctl image import --hardware-model`.
+- `scripts/provision-macos-tart.sh`: turns a Tart macOS base into a RunnerVM image (runner account,
+  guest-agent LaunchDaemon, `actions/runner` osx-arm64, empty git credential helper, sealed metadata).
+- Live: cold boot, restart-keeps-identity, agent over vsock, GitHub JIT job end to end. Found and
+  fixed live: Tart's `/Users/runner` symlink; profile names shadowing GitHub-hosted labels
+  (`PROFILE_NAME_SHADOWS_HOSTED_LABEL`).
+
+## What the previous milestone added (M14 tart import + M15 image builder)
 
 Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Codex review integrated).
 
@@ -88,7 +102,7 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 2. `scripts/live-builder-faults.sh`: finish the kill -9 run at `staging`/`booting`/`provisioning`/`sealing` (in flight at hand-off; `queued`/`resolving` are unobservable on a warm build).
 4. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
 5. Build-time secrets (`docs/design/build-secrets.md`).
-6. macOS guests (M8) — tart macOS import already parses; needs the platform builder + SSH provisioning.
+6. macOS guests (M8): the 2-concurrent-guest / third-job-waits test (blocked only by free disk on the dev host — admission reserves the image's full 46.6 GiB per instance), crash/restart recovery and the 100-short-jobs soak (M8.5), then the native IPSW builder (M8.6). See `docs/macos-guests.md`.
 
 ## Developer quick start
 

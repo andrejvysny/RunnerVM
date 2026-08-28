@@ -2,6 +2,34 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — macOS guests, runtime milestone (M8.0–M8.4)
+
+- macOS is a guest platform now: `MacOSVMPlatform` builds `VZMacOSBootLoader` +
+  `VZMacPlatformConfiguration` from the image's opaque hardware model (`isSupported` checked, typed
+  `VM_MACOS_*` errors), the per-instance auxiliary storage and a per-instance
+  `VZMacMachineIdentifier` (`machine-identifier.bin`, minted by `vmworker` after taking the worker
+  lock, reused across restarts, never sealed into an image). One 1920×1080 virtual display, no window.
+- `spec.json` gains an optional `macos` block (`MacOSInstancePlatformSpec`); image metadata records
+  `minimumCPUCount`/`minimumMemoryBytes` and admission refuses undersized profiles before any row
+  or clone exists. Tart imports carry `cpuCountMin`/`memorySizeMin` into those fields.
+- `os: macos` profiles validate (`HostConstants.supportedGuestOS`); `lifecycle: reusable` is refused
+  for macOS (`PROFILE_MACOS_REUSABLE_UNSUPPORTED`); the 2-guest cap is documented as Apple's license
+  allowance / supported operating model, not a framework error. `runnerctl image import
+  --hardware-model` for Tart-derived disks.
+- `scripts/provision-macos-tart.sh` + `scripts/lib/macos-{guest-provision,provision-vm}.sh`: one-shot
+  SSH provisioning of a Tart macOS base into a RunnerVM image (runner account, guest-agent
+  LaunchDaemon, sha256-verified `actions/runner` osx-arm64, CLT, empty git credential helper as
+  `runner`, sealed `metadata.json`); 57 bash unit tests in CI.
+- New warning `PROFILE_NAME_SHADOWS_HOSTED_LABEL`: a profile named like a GitHub-hosted label
+  (`macos-26`, `ubuntu-24.04`, `windows-2025`, `*-latest`) sends jobs to GitHub's runners, not yours.
+- Live on this host (see `docs/verification.md` "M8"): Tart `macos-tahoe-base` (26.6.2) boots under
+  `vmworker`, restart keeps its identity, guest agent over vsock, one GitHub JIT job on
+  `rvm-macos-26` with a 23 s cold start and the VM removed afterwards. Still open: two concurrent
+  macOS guests + third job waiting (blocked by free disk on the dev host), recovery/soak (M8.5),
+  native IPSW builder (M8.6).
+- `ReusableLifecycleTests`: the last polling waits are event-driven (`awaitInstance`); this was the
+  `a771905` CI flake.
+
 ## 2026-08-27 — Production hardening pass (`74ecb12` … see `docs/verification.md`)
 
 - Deterministic teardown ordering (`interrupt` writes the row before dropping the guest;

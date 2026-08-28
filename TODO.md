@@ -1,7 +1,37 @@
-# RunnerVM TODO
+# TODO
+
+## Now
+
+- [ ] `scripts/live-builder-faults.sh`: per-phase image alias (or scope the "≤1 image" check to the phase's `imageDigest`), treat unobservable warm phases as skipped, rerun `--phase booting --phase provisioning --phase sealing`, record in `docs/verification.md`
+- [x] Confirm CI green for `a771905` — flake, rerun green (see M8.0)
+- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27)
+
 
 Plans: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (M0–M13) and
 `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (M14/M15). Current state: `docs/status.md`.
+
+## M8 — macOS guests (started 2026-08-27; runtime first, native IPSW builder last)
+
+Roadmap from the M8 review (kept in the session prompt; summarized in `docs/macos-guests.md`).
+Assumed answers to the review's open questions (review's own recommendations): first milestone =
+A (prebuilt/Tart image runs a GitHub job); Tahoe 26 only; host macOS ≥ 15; GitHub.com; macOS v1
+ephemeral-only; no Xcode/simulators/signing in the first image; no GUI; `minIdle: 0`; runner
+auto-update disabled.
+
+- [x] M8.0 baseline: `a771905` CI failure was a flake (`ReusableLifecycleTests` idle poll, rerun green); idle waits made event-driven (`awaitInstance`)
+- [x] M8.1 identity plumbing (1338 tests green): `ImageMetadata.MacOSPlatform` minimums · `MacOSInstancePlatformSpec` · `VMInstanceSpec.macos` / `InstanceSpecFile.macos` · `VMRuntimePaths.machineIdentifier` + `VMInstanceLayout.machineIdentifierName` · `MacOSMachineIdentity` (load/create after lock) · `VMError` macOS cases · admission CPU/memory-vs-image checks · Tart `cpuCountMin`/`memorySizeMin` mapping · tests
+- [x] M8.2 (code landed, 1354 tests; LIVE: Tart macos-tahoe-base 26.6.2/25G83 booted under vmworker 2026-08-27, ssh ok, serial from our machine id) `MacOSVMPlatform` (`VZMacOSBootLoader`, `VZMacPlatformConfiguration`, `isSupported` check, one 1920×1080@80 display, no window) · `supportedGuestOS += .macos` · `PROFILE_MACOS_REUSABLE_UNSUPPORTED` · live: Tart `macos-tahoe-base` imported + boots under vmworker
+- [x] M8.3 (LIVE 2026-08-27: provisioned Tart base, imported `macos-26-base`, agent over vsock) guest agent over vsock in macOS (provision Tart image over SSH: `runner` user, darwin guest-agent + LaunchDaemon, actions/runner osx-arm64, `git config --global credential.helper ""` as runner) · hello/health/guestInfo · `startSession`
+- [x] M8.4 (LIVE 2026-08-27: run 33118688632 on `rvm-macos-26`, 23 s cold start, VM removed after job) (`runs-on: [self-hosted, macos, arm64]`; `sw_vers`, `uname -m`, checkout)
+- [ ] M8.5 (restart-keeps-id proven; 2-VM test blocked by disk: needs ~95 GiB free) identity uniqueness across clones, restart keeps id, 2 concurrent + 3rd blocked by scheduler, crash/restart recovery, 100 short jobs, no leaks
+- [ ] M8.6 native IPSW builder (`runnerctl image build-macos`), separate from the Runnerfile builder
+- [ ] validation warning: profile name shadowing a GitHub-hosted label (`macos-*`, `ubuntu-*`, `windows-*`, `*-latest`) — found live
+- [ ] docs: rewrite `docs/macos-guests.md` (graphics not an Apple requirement; 2-guest rationale = Apple license/framework operating model), `docs/status.md`, `CHANGELOG.md`
+
+Facts: Apple catalog latest for this host = macOS 26.6.2 (25G83), `mostFeaturefulSupportedConfiguration`
+min 2 vCPU / 4 GiB; hardware-model base64 captured as a test fixture. `tart pull
+ghcr.io/cirruslabs/macos-tahoe-base:latest` started 2026-08-27 (27.3 GB compressed; log in the
+session scratchpad). Disk free at start: 74 GiB.
 
 ## M0 — Foundation + spikes
 - [x] Package skeleton (all targets compile)
@@ -215,3 +245,21 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (Codex sol/xhigh 
   and hardware SIGKILL still pending.
 - [ ] WP9 doctor/qualify checks DONE (hardware-verified on the dev layout); LaunchDaemon reboot qualification SKIPPED (operator decision 2026-08-27) — still open
 - [x] Docs: status.md / verification.md / CHANGELOG / image-build.md / install.md / live-integration.md
+
+## Homebrew packaging (2026-08-27) — plan `~/.claude/plans/act-as-expert-on-reflective-lightning.md`
+- [x] `scripts/install.sh --prebuilt-dir <dir>`: consumes an already-built Homebrew-keg-shaped
+  layout (`bin/runnerctl`, `libexec/{runnerd,vmworker}`,
+  `share/runnervm/{Resources,recipes,guest-agent/...}`) instead of running `swift build`/`make -C
+  GuestAgent build-linux`; every other step (signing, service account, state/runtime dirs,
+  launchd) unchanged. Missing guest agent under `--prebuilt-dir` fails fast instead of trying to
+  build from a source tree that isn't there. 10 new `scripts/tests/install-test.sh` cases (32
+  total); shellcheck clean.
+- [x] CI: `swift build -c release` step added (the formula runs exactly this).
+- [x] Docs: `docs/install.md` "Installing via Homebrew" section + upgrade-procedure note,
+  `docs/release.md` (manual tag → tap-formula-bump runbook, version scheme), README pointer.
+- [x] Tap repo `andrejvysny/homebrew-runnervm` created (public) and pushed: `Formula/runnervm.rb`
+  (builds from source + ad-hoc signs, `--prebuilt-dir`-compatible layout, `caveats` naming the one
+  sudo command; `brew style` clean), `README.md`, `.github/workflows/tests.yml`.
+- [ ] Formula still inert: `license` unset (repo has no `LICENSE` file, only `NOTICE` for the
+  derived Tart code) and `tag`/`revision` are placeholders — no `vX.Y.Z` cut yet. `brew install
+  andrejvysny/runnervm/runnervm` won't work until both are resolved; see `docs/release.md`.

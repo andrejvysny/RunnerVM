@@ -276,3 +276,53 @@ no GitHub credential configured (`github.demand: manual`).
   clone, no pin left behind.
 - Not covered live: a daemon restart mid-build (covered by `ImageBuildTests` against fakes), `--push`
   to a real registry, LaunchDaemon (`_runnervm`) builds — `doctor build_tools` gates those.
+
+## M8 — macOS guests (2026-08-27, uncommitted work in progress)
+
+Tier: **hardware** (this Mac, macOS 26.4, Apple Silicon). Not yet production-qualified.
+
+- **M8.2 cold boot (manual vmworker, admission bypassed).** Image: Tart `ghcr.io/cirruslabs/macos-tahoe-base:latest`
+  (`sha256:fa96c198…`, 50 GB raw disk, 33 MB auxiliary storage), APFS-cloned into a scratch instance
+  directory with a hand-written `spec.json` carrying the `macos` block (hardware model from Tart's
+  `config.json`, 4 vCPU, 8 GiB). `vmworker run` created `machine-identifier.bin`, took the lock,
+  published both sockets and reported `vm state running` 0.3 s after `starting`. Guest reachable over
+  NAT (`/var/db/dhcpd_leases` by the spec's MAC) and SSH (Tart's `admin/admin`): `sw_vers` =
+  macOS 26.6.2 (25G83), `uname -m` = arm64, `hw.model` = VirtualMac2,1, `kern.hv_vmm_present` = 1,
+  4 CPUs / 8 GiB as specified, `IOPlatformSerialNumber` derived from RunnerVM's freshly minted
+  machine identifier (not Tart's ECID), Command Line Tools + git 2.50.1 present, passwordless sudo.
+  No window was shown; one 1920×1080 virtual display configured.
+- **M8.2 restart keeps identity.** Guest halted (`shutdown -h now`), worker terminated, `vmworker run`
+  re-issued on the same directory with generation 2: log shows `loaded macOS machine identifier`
+  (not `created`), `machine-identifier.bin` byte-identical (sha256 prefix `dc002e89de227e22` before and
+  after), guest back to `running` in 0.3 s.
+- **M8.3 first provisioning run failed, root cause found live.** The Tart base image ships
+  `/Users/runner -> /Users/admin` (symlink) and a pre-installed `actions-runner` owned by `admin`;
+  `sysadminctl -addUser runner -home /Users/runner` therefore bound the new account to admin's home and
+  `sudo -u runner tar` collided with admin's files (9,287 `Permission denied`). The in-guest agent
+  itself came up under launchd and logged `guest-agent listening … vsock(4294967295):4050`, and its
+  cleanup refused the symlinked HOME as designed. Fix: the provisioner removes the symlink before
+  creating the account and replaces any pre-existing runner directory wholesale.
+- **M8.3 provisioning + import (run #3).** `scripts/provision-macos-tart.sh --force` on the Tart base:
+  symlink removed, `runner` (uid 502) created with a real `/Users/runner`, agent LaunchDaemon loaded,
+  `actions/runner` 2.337.0 (sha256 verified twice) unpacked, CLT already present, `credential.helper`
+  reset to the empty override as `runner`, passwordless sudo; guest halted in 10 s; `metadata.json`
+  sealed with the hardware model, `sourceVersion` 26.6.2, minimums 2 vCPU / 4 GiB; imported as
+  `macos-26-base` (46.6 GiB virtual, 30.4 GiB on disk, guest agent present, runner health healthy).
+- **Daemon path, manual create (`runnerctl vm create --profile …`).** Clone → worker → `startingVM` →
+  `waitingForAgent` in ~2 s, then `instance.cancelled (demand dropped)`: with zero confirmed demand
+  the ephemeral VM is surplus and scale-to-zero removes it. Correct, and the reason `vm create` is a
+  debug surface, not the M8 acceptance path.
+- **Label collision found live.** A profile named `macos-26` registers scale-set label `macos-26`,
+  which is also a GitHub-hosted runner label: run 33118542128 (`runs-on: macos-26`) was executed by
+  `GitHub Actions 1000003524` (hosted) and never reached RunnerVM. Profile renamed `rvm-macos-26`.
+  Follow-up: validation warning for profile names that shadow hosted labels.
+- **M8.4 GitHub JIT job, ephemeral macOS (run 33118688632, `long`, 1 minute).** Dispatched
+  21:33:27Z; instance `45df4889` `waitingForAgent` by 21:33:36, `configuringRunner` 21:33:42,
+  `runnerOnline` 21:33:47, job started 21:33:50 (**23 s cold start**: clone + boot + agent over
+  vsock + JIT registration), `busy` through the job, job `success` 21:34:54, session `completed`
+  (`result: job`), instance `stopping` → deleted; runner `rvm-rvmmacos26-45df4889` with label
+  `rvm-macos-26`, `Machine name: Manageds-Virtual-Machine`. No SSH involved anywhere on this path.
+- **Two concurrent macOS guests: blocked by disk on this host, not by code.** Admission reserves
+  `max(profile.disk, image.virtual)` = 47 GiB per instance plus the `host.reserve.disk` floor; with
+  ~90 GiB free the scale set advertises 1. Needs ≥ ~95 GiB free (or a smaller macOS image) to
+  exercise the 2-guest cap and the third-job wait.
