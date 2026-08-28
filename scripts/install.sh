@@ -244,8 +244,14 @@ quote_cmd() {
 #
 # dscl reads (existence/GID checks) are harmless without privilege and always run for real, dry
 # run or not, so the plan below reflects this machine's actual directory service state. Only the
-# dscl mutations that create/fix records go through privileged() (or, for the one interactive
-# step, straight into MANUAL_STEPS) -- this script still never calls sudo itself.
+# dscl mutations that create/fix records go through privileged() -- this script still never calls
+# sudo itself.
+#
+# The account is created with dscl alone, never `sysadminctl -addUser`: that command's
+# `-password -` prompts on stdin, which hangs a non-interactive install, and it provisions a
+# login-capable account with a home under /Users. The service account never logs in -- no GUI
+# session, no login keychain, no password -- so a hidden record with `Password '*'`,
+# `UserShell /usr/bin/false` and a home inside the state directory is both sufficient and tighter.
 # --------------------------------------------------------------------------
 GROUP_GID_MIN=200
 GROUP_GID_MAX=400
@@ -265,11 +271,30 @@ find_free_gid() {
     return 1
 }
 
+# Same range for UIDs. Prefers uid == the service group's gid when that number is free, purely so
+# the pair reads as one identity in `ls -n` output; falls back to the first free UID otherwise.
+find_free_uid() {
+    local preferred="$1" uid="$GROUP_GID_MIN" used
+    used="$(dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}')"
+    if [ -n "$preferred" ] && ! printf '%s\n' "$used" | grep -qx "$preferred"; then
+        printf '%s' "$preferred"
+        return 0
+    fi
+    while [ "$uid" -le "$GROUP_GID_MAX" ]; do
+        if ! printf '%s\n' "$used" | grep -qx "$uid"; then
+            printf '%s' "$uid"
+            return 0
+        fi
+        uid=$((uid + 1))
+    done
+    return 1
+}
+
 # Ensure $SERVICE_GROUP and $SERVICE_USER exist, and that the user's primary group is
-# $SERVICE_GROUP. Missing/incorrect pieces are queued as manual dscl/sysadminctl steps (or run
-# directly when this shell already has the privilege, same as every other step in this script).
+# $SERVICE_GROUP. Missing/incorrect pieces are queued as manual dscl steps (or run directly when
+# this shell already has the privilege, same as every other step in this script).
 ensure_service_principals() {
-    local group_attr user_attr group_gid user_pgid new_gid
+    local group_attr user_attr group_gid user_pgid new_gid new_uid
 
     group_attr="$(dscl . -read "/Groups/$SERVICE_GROUP" PrimaryGroupID 2>/dev/null || true)"
     if [ -z "$group_attr" ]; then
@@ -293,13 +318,30 @@ ensure_service_principals() {
 
     user_attr="$(dscl . -read "/Users/$SERVICE_USER" PrimaryGroupID 2>/dev/null || true)"
     if [ -z "$user_attr" ]; then
-        # sysadminctl -addUser -password - prompts on stdin for the account password; never
-        # attempted directly (which would hang a non-interactive run) -- always a manual step.
-        MANUAL_STEPS+=(
-            "$(quote_cmd sysadminctl -addUser "$SERVICE_USER" -fullName "RunnerVM Service" \
-                -GID "$group_gid" -home "/Users/$SERVICE_USER" -password - -admin off)"
-        )
-        log "user $SERVICE_USER does not exist — queued creation with primary group $SERVICE_GROUP (GID $group_gid, see 'manual steps' below)"
+        new_uid="$(find_free_uid "$group_gid")" || {
+            echo "error: no free UID in ${GROUP_GID_MIN}-${GROUP_GID_MAX} for user $SERVICE_USER" >&2
+            exit 1
+        }
+        log "user $SERVICE_USER does not exist — queuing creation with UID $new_uid, primary group $SERVICE_GROUP (GID $group_gid)"
+        privileged "create user $SERVICE_USER" dscl . -create "/Users/$SERVICE_USER"
+        # No login shell: the account exists to own files and run launchd jobs, never to log in.
+        privileged "set $SERVICE_USER UserShell" \
+            dscl . -create "/Users/$SERVICE_USER" UserShell /usr/bin/false
+        privileged "set $SERVICE_USER RealName" \
+            dscl . -create "/Users/$SERVICE_USER" RealName "RunnerVM Service"
+        privileged "set $SERVICE_USER UniqueID $new_uid" \
+            dscl . -create "/Users/$SERVICE_USER" UniqueID "$new_uid"
+        privileged "set $SERVICE_USER PrimaryGroupID $group_gid" \
+            dscl . -create "/Users/$SERVICE_USER" PrimaryGroupID "$group_gid"
+        # Home lives inside the state directory, not /Users: nothing about this account belongs in
+        # the login window's user list, and $STATE_DIR is already the tree it owns.
+        privileged "set $SERVICE_USER NFSHomeDirectory" \
+            dscl . -create "/Users/$SERVICE_USER" NFSHomeDirectory "$STATE_DIR/home"
+        # '*' is "no password will ever authenticate", not "empty password".
+        privileged "set $SERVICE_USER Password" \
+            dscl . -create "/Users/$SERVICE_USER" Password '*'
+        privileged "hide $SERVICE_USER from the login window" \
+            dscl . -create "/Users/$SERVICE_USER" IsHidden 1
     else
         user_pgid="${user_attr#PrimaryGroupID: }"
         if [ "$user_pgid" != "$group_gid" ]; then
@@ -441,6 +483,14 @@ for sub in images instances logs state cache; do
     privileged "chown $STATE_DIR/$sub to $SERVICE_USER:$SERVICE_GROUP" \
         chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/$sub"
 done
+# The service account's NFSHomeDirectory (see ensure_service_principals). It is never logged into,
+# but anything that resolves $HOME for the daemon -- git, the GitHub runner's own tooling -- needs
+# a directory that exists and that the account owns.
+privileged "create $STATE_DIR/home (0750, $SERVICE_USER:$SERVICE_GROUP)" \
+    mkdir -p -m 0750 "$STATE_DIR/home"
+privileged "chown $STATE_DIR/home to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/home"
+privileged "chmod 0750 $STATE_DIR/home" chmod 0750 "$STATE_DIR/home"
 # logs/ and logs/instances hold runner _diag bundles, serial console output and job logs --
 # owner + service group only, no world access, matching <state-dir> itself.
 privileged "chmod 0750 $STATE_DIR/logs" chmod 0750 "$STATE_DIR/logs"

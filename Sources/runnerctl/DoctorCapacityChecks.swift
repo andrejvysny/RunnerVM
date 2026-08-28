@@ -10,7 +10,7 @@ extension DoctorChecks {
     let id = "free_memory"
     let title = "Free memory"
     guard let config else {
-      return DoctorCheck(id: id, title: title, status: .warn, detail: "no valid --config; skipped")
+      return DoctorCheck(id: id, title: title, status: .skip, detail: "no valid --config; skipped")
     }
     let physical = capabilities?.physicalMemoryBytes ?? ProcessInfo.processInfo.physicalMemory
     let largestProfile = config.profiles.map(\.resources.memoryBytes).max() ?? 0

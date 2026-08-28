@@ -86,7 +86,9 @@ struct RunnerD: AsyncParsableCommand {
         configPath: config.map { URL(fileURLWithPath: $0) },
         reconcileInterval: .seconds(reconcileInterval),
         // Only this user's tools may drive the daemon (spec §66; getpeereid check in RPCServer).
-        allowedUIDs: [getuid()]),
+        // root is allowed as well: a production install runs the daemon as _runnervm, and the
+        // operator drives it with `sudo runnerctl`.
+        allowedUIDs: [getuid(), 0]),
       parseConfig: { try ConfigLoader.load(yaml: $0) },
       logger: logger)
 
@@ -139,13 +141,12 @@ struct RunnerD: AsyncParsableCommand {
     return parsed.logging
   }
 
+  /// Flags stay authoritative; `RUNNERVM_STATE_DIR`/`RUNNERVM_RUNTIME_DIR` come next, and the
+  /// production layout is only auto-detected when neither says otherwise. See
+  /// `RunnerPaths.resolveRoots` — `runnerctl` and `doctor` resolve through the same function, so
+  /// the daemon and its clients cannot end up pointed at different installs.
   private func resolvedPaths() -> RunnerPaths {
-    let development = RunnerPaths.development(
-      uid: getuid(), home: FileManager.default.homeDirectoryForCurrentUser)
-    return RunnerPaths(
-      rootDir: stateDir.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? development.rootDir,
-      runtimeDir: socketDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        ?? development.runtimeDir)
+    RunnerPaths.resolveRoots(stateDir: stateDir, socketDir: socketDir)
   }
 
   private func describe(_ error: any Error) -> String {

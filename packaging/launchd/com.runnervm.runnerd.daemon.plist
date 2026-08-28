@@ -6,11 +6,12 @@
     <string>com.runnervm.runnerd</string>
 
     <!-- LaunchDaemon variant: no GUI session, runs from boot under a dedicated unprivileged
-         service account (spec §7.2). EXPERIMENTAL (plan C3 S3): as of macOS 15+, Virtualization
-         .framework needs an unlocked login keychain in the session that creates the VM, and a
-         LaunchDaemon's service account normally has none. This variant only works with explicit
-         keychain provisioning (`security unlock-keychain`) wired into the boot sequence; until
-         that is verified, prefer the LaunchAgent variant. See packaging/launchd/README.md. -->
+         service account (spec §7.2). This is the RECOMMENDED production default. The older
+         "needs an unlocked login keychain in the creating session" premise was measured against
+         this repo's own vmworker on 2026-08-28 (macOS 26.5.2, M4, no login session at all) and
+         did not reproduce: every VM booted with the login keychain locked. No keychain
+         provisioning is required. The remaining gate is the reboot loop in docs/qualification.md,
+         which proves the job comes back across a power cycle. See packaging/launchd/README.md. -->
     <key>ProgramArguments</key>
     <array>
         <string>__RUNNERD_PATH__</string>

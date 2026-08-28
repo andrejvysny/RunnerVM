@@ -1,6 +1,7 @@
 import ArgumentParser
 import DaemonAPI
 import Foundation
+import RunnerCore
 
 struct Status: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -132,25 +133,44 @@ struct Status: AsyncParsableCommand {
   }
 }
 
+/// The client version always prints, whether or not a daemon is listening — "what am I running"
+/// is a question an operator asks precisely when the daemon is down. Only the daemon half is
+/// conditional, and its absence is reported, not treated as an error (exit 0).
 struct Version: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    commandName: "version", abstract: "Show the daemon build and protocol versions.")
+    commandName: "version",
+    abstract: "Show the client build, and the daemon build and protocol versions when reachable.")
 
   @OptionGroup var options: GlobalOptions
 
+  /// The daemon fields keep the names `system.version` uses, so a script that read this JSON
+  /// before still finds them; `client` is added alongside and `daemon` is null when unreachable.
+  private struct Report: Encodable {
+    var client: String
+    var daemon: VersionInfo?
+    var daemonError: String?
+  }
+
   func run() async throws {
-    let version = try await options.withDaemon { try await $0.version() }
+    let daemon = try? await options.withDaemon { try await $0.version() }
     switch options.output {
     case .json:
-      try JSONOut.print(version)
+      try JSONOut.print(
+        Report(
+          client: RunnerVMVersion.current, daemon: daemon,
+          daemonError: daemon == nil ? "unreachable" : nil))
     case .human:
-      print(
-        Table.fields(
-          [
-            ("runnerd", version.version),
-            ("protocol", "\(version.protocolName) v\(version.protocolVersion)"),
-            ("schema", "v\(version.schemaVersion)"),
-          ], indent: ""))
+      var fields = [("runnerctl", RunnerVMVersion.current)]
+      if let daemon {
+        fields += [
+          ("runnerd", daemon.version),
+          ("protocol", "\(daemon.protocolName) v\(daemon.protocolVersion)"),
+          ("schema", "v\(daemon.schemaVersion)"),
+        ]
+      } else {
+        fields.append(("daemon", "unreachable (\(options.socketURL.path(percentEncoded: false)))"))
+      }
+      print(Table.fields(fields, indent: ""))
     }
   }
 }

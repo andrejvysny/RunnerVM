@@ -9,7 +9,12 @@ enum OutputMode: String, ExpressibleByArgument, CaseIterable, Sendable {
 /// Options every subcommand accepts. Declared on the root command too, so
 /// `runnerctl --socket <path> status` and `runnerctl status --socket <path>` both work.
 struct GlobalOptions: ParsableArguments {
-  @Option(name: .long, help: "Path to runnerd.sock.")
+  @Option(
+    name: .long,
+    help: ArgumentHelp(
+      "Path to runnerd.sock.",
+      discussion: "Falls back to RUNNERVM_SOCKET, then the production socket when it exists, "
+        + "then the development one."))
   var socket: String?
 
   @Option(name: .long, help: "human or json.")

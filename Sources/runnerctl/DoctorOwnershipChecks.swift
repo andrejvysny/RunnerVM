@@ -74,7 +74,7 @@ extension DoctorChecks {
     let title = "Service account ownership"
     guard FileManager.default.fileExists(atPath: paths.rootDir.path) else {
       return DoctorCheck(
-        id: id, title: title, status: .warn,
+        id: id, title: title, status: .skip,
         detail: "\(paths.rootDir.path) does not exist yet; skipped"
       )
     }
@@ -108,7 +108,7 @@ extension DoctorChecks {
     let dir = paths.runtimeDir
     guard FileManager.default.fileExists(atPath: dir.path) else {
       return DoctorCheck(
-        id: id, title: title, status: .warn, detail: "\(dir.path) does not exist yet; skipped")
+        id: id, title: title, status: .skip, detail: "\(dir.path) does not exist yet; skipped")
     }
     let expected = expectedOwner(
       rootDirPath: paths.rootDir.path, overrideServiceUser: overrideServiceUser)

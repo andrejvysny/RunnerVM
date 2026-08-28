@@ -115,7 +115,8 @@ public enum OrchestrationError: RunnerError {
 
 /// Build identity reported by `system.version` and `system.status`.
 public enum RunnerVMBuild {
-  public static let version = "0.1.0-dev"
+  /// One constant, shared with `runnerctl --version` (which must answer without a daemon).
+  public static let version = RunnerVMVersion.current
   /// Highest SQLite schema version this build migrates to (`Persistence.Migrator`).
   public static let schemaVersion = PersistenceSchema.currentVersion
 }

@@ -196,6 +196,7 @@ CHECK_JSON=()
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+SKIP_COUNT=0
 
 json_escape() {
     local s="$1"
@@ -212,6 +213,7 @@ record() {
     PASS) PASS_COUNT=$((PASS_COUNT + 1)) ;;
     WARN) WARN_COUNT=$((WARN_COUNT + 1)) ;;
     FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    SKIP) SKIP_COUNT=$((SKIP_COUNT + 1)) ;;
     esac
     printf '%-4s %s: %s\n' "$status" "$title" "$detail"
     CHECK_JSON+=("{\"id\":\"$(json_escape "$id")\",\"title\":\"$(json_escape "$title")\",\"status\":\"$status\",\"detail\":\"$(json_escape "$detail")\"}")
@@ -219,6 +221,8 @@ record() {
 pass() { record "$1" "$2" PASS "$3"; }
 warn() { record "$1" "$2" WARN "$3"; }
 fail() { record "$1" "$2" FAIL "$3"; }
+# "not applicable here", never a verdict: a skip counts towards nothing and never fails the run.
+skipped() { record "$1" "$2" SKIP "$3"; }
 
 # --------------------------------------------------------------------------
 # JSON field extraction from runnerctl's `--output json` (JSONEncoder, prettyPrinted,
@@ -592,6 +596,7 @@ record_from_doctor() {
     ok) pass "$id" "$title" "$detail" ;;
     warn) warn "$id" "$title" "$detail" ;;
     fail) fail "$id" "$title" "$detail" ;;
+    skip) skipped "$id" "$title" "$detail" ;;
     *) warn "$id" "$title" "unrecognized doctor status '$status': $detail" ;;
     esac
 }
@@ -923,7 +928,7 @@ main() {
     github_job_check
 
     echo
-    echo "summary: $PASS_COUNT pass, $WARN_COUNT warn, $FAIL_COUNT fail"
+    echo "summary: $PASS_COUNT pass, $WARN_COUNT warn, $FAIL_COUNT fail, $SKIP_COUNT skipped"
     write_report
 
     [ "$FAIL_COUNT" -eq 0 ]

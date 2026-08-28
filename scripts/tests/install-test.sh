@@ -187,5 +187,38 @@ else
     expect_contains "$out" "not found" "missing --prebuilt-dir error names the problem"
 fi
 
+# --------------------------------------------------------------------------
+# 8. The service account is created with dscl alone -- never `sysadminctl -addUser`, whose
+#    `-password -` prompts on stdin and hangs a non-interactive install. Forced through the
+#    "user does not exist" branch with a throwaway --user/--group that cannot be present on any
+#    machine; the dscl reads install.sh does are read-only, so nothing is created for real.
+# --------------------------------------------------------------------------
+out="$(dry_run principals --user _rvmtest_absent --group _rvmtest_absent)"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent" \
+    "missing service account is created with dscl"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent UserShell /usr/bin/false" \
+    "service account gets no login shell"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent UniqueID " \
+    "service account gets an explicit UniqueID"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent PrimaryGroupID " \
+    "service account gets the service group as its primary group"
+expect_contains "$out" \
+    "dscl . -create /Users/_rvmtest_absent NFSHomeDirectory $WORK/principals/state/home" \
+    "service account's home is inside the state directory, not /Users"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent Password *" \
+    "service account gets a disabled password"
+expect_contains "$out" "dscl . -create /Users/_rvmtest_absent IsHidden 1" \
+    "service account is hidden from the login window"
+case "$out" in
+*sysadminctl*) no "service account creation never uses sysadminctl" "found sysadminctl: $out" ;;
+*) ok "service account creation never uses sysadminctl" ;;
+esac
+
+# The home directory that NFSHomeDirectory names is actually created and owned by the account.
+expect_contains "$out" "mkdir -p -m 0750 $WORK/principals/state/home" \
+    "service account home is created 0750"
+expect_contains "$out" "chown _rvmtest_absent:_rvmtest_absent $WORK/principals/state/home" \
+    "service account home is owned by the service user"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

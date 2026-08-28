@@ -11,7 +11,11 @@ struct RunnerCtl: ParsableCommand {
       runnerctl talks to runnerd over runnerd.sock and never opens SQLite, instance files or \
       GitHub directly. Use --output json for automation; the JSON fields are more stable than \
       the human tables.
+
+      The socket is discovered automatically: --socket, then RUNNERVM_SOCKET, then the production \
+      socket (/var/run/runnervm/runnerd.sock) when it exists, then the development one.
       """,
+    version: "runnerctl \(RunnerVMVersion.current)",
     subcommands: [
       Status.self, Version.self, ConfigCommand.self, Profile.self, Scope.self, Image.self,
       Registry.self, VM.self, Auth.self, GitHubCommand.self, Runner.self, ScaleSet.self,
@@ -23,12 +27,9 @@ struct RunnerCtl: ParsableCommand {
 }
 
 extension GlobalOptions {
-  var socketURL: URL {
-    if let socket, !socket.isEmpty { return URL(fileURLWithPath: socket) }
-    return RunnerPaths
-      .development(uid: getuid(), home: FileManager.default.homeDirectoryForCurrentUser)
-      .daemonSocket
-  }
+  /// `--socket` > `RUNNERVM_SOCKET` > the production socket if a daemon laid one down > the
+  /// development socket. See `RunnerPaths.resolveSocket`.
+  var socketURL: URL { RunnerPaths.resolveSocket(explicit: socket) }
 
   /// One connection per invocation, closed before the command returns.
   func withDaemon<T>(_ body: (DaemonClient) async throws -> T) async throws -> T {

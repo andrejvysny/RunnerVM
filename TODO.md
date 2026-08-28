@@ -17,8 +17,8 @@ Goal: one-command curl install on a fresh Apple Silicon Mac — pkg, wizard, hea
 GHCR pull-only Linux, native managed macOS provisioning, auto image updates, per-VM CI keychain,
 manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.current = "0.2.0"`.
 
-- [ ] D0 contracts: `docs/design/distribution.md`, LICENSE (Apache-2.0), status pointer
-- [ ] D1 operator plumbing: `RunnerPaths.resolve` (+`RUNNERVM_SOCKET`), root allowed on RPC,
+- [x] D0 contracts: `docs/design/distribution.md`, LICENSE (Apache-2.0), status pointer
+- [x] D1 operator plumbing: `RunnerPaths.resolve` (+`RUNNERVM_SOCKET`), root allowed on RPC,
       `Version.swift`, `runnerctl --version`, atomic token write, doctor `skip` status +
       service-mode/filevault/reboot-persistence checks, launchd README tier flip, dscl-only
       service account in install.sh

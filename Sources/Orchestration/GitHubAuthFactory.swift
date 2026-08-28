@@ -75,21 +75,20 @@ public enum GitHubTokenStore: Sendable {
 
   /// Owner-only from the moment the file exists: `FilePATProvider` refuses to read anything
   /// looser, and a token with `admin:org` in a world-readable file is a host-wide compromise.
+  ///
+  /// Written through `AtomicFileWrite`, not `createFile`: overwriting an existing token truncates
+  /// it first, so a crash or a full disk mid-write would leave the daemon with an empty credential
+  /// file and no working GitHub auth until someone noticed. The replace is all-or-nothing, and the
+  /// 0600 mode is set on the temporary before any byte of the token reaches the disk.
   private static func writeFile(_ token: String, to url: URL) throws {
-    let manager = FileManager.default
     let path = url.path(percentEncoded: false)
     do {
-      try manager.createDirectory(
+      try FileManager.default.createDirectory(
         at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      guard manager.createFile(
-        atPath: path, contents: Data(token.utf8), attributes: [.posixPermissions: 0o600])
-      else {
-        throw GitHubControlError.permanentConfiguration(reason: "cannot write token file \(path)")
-      }
-      // `createFile` keeps the mode of a file that already existed, so it is reasserted here.
-      try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
-    } catch let error as GitHubControlError {
-      throw error
+      try AtomicFileWrite.replace(Data(token.utf8), at: url, mode: 0o600)
+    } catch let error as AtomicFileWriteError {
+      throw GitHubControlError.permanentConfiguration(
+        reason: "cannot write token file \(path): \(error.description)")
     } catch {
       throw GitHubControlError.permanentConfiguration(
         reason: "cannot write token file \(path): \(error.localizedDescription)")

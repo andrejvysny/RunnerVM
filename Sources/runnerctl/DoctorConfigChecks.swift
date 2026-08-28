@@ -13,7 +13,7 @@ extension DoctorChecks {
     guard let path else {
       return (
         DoctorCheck(
-          id: "config_validate", title: "Configuration", status: .warn,
+          id: "config_validate", title: "Configuration", status: .skip,
           detail: "no --config given; skipped"
         ), nil
       )
@@ -59,7 +59,7 @@ extension DoctorChecks {
   static func diskHeadroom(rootDir: URL, config: RunnerConfiguration?) -> DoctorCheck {
     guard let config else {
       return DoctorCheck(
-        id: "disk_headroom", title: "Disk headroom", status: .warn,
+        id: "disk_headroom", title: "Disk headroom", status: .skip,
         detail: "no valid --config; skipped"
       )
     }
@@ -194,7 +194,7 @@ extension DoctorChecks {
   static func githubToken(config: RunnerConfiguration?, paths: RunnerPaths) -> DoctorCheck {
     guard let config else {
       return DoctorCheck(
-        id: "github_token", title: "GitHub credential", status: .warn,
+        id: "github_token", title: "GitHub credential", status: .skip,
         detail: "no valid --config; skipped"
       )
     }

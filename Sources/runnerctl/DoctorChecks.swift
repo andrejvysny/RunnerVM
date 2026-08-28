@@ -6,11 +6,14 @@ import RunnerCore
 /// Orchestrator plus the checks that need neither `vmworker` nor a configuration file: host
 /// platform, filesystem, host sleep, launchd, and the daemon socket. vmworker-related checks are
 /// in `DoctorVMWorkerChecks.swift`; configuration/GitHub-credential checks are in
-/// `DoctorConfigChecks.swift`. One small static function per spec §104 line item (plus the
-/// host-sleep and launchd-job checks the implementation plan adds); no sleeping anywhere here.
+/// `DoctorConfigChecks.swift`; deployment-shape checks (service mode, FileVault, reboot
+/// persistence) are in `DoctorServiceModeChecks.swift`. One small static function per spec §104
+/// line item (plus the host-sleep and launchd-job checks the implementation plan adds); no
+/// sleeping anywhere here.
 enum DoctorChecks {
   static func runAll(
     paths: RunnerPaths, configPath: String?, daemonSocket: URL, serviceUser: String? = nil,
+    mode: ServiceModeFacts = ServiceModeFacts(mode: .foreground, loaded: false, plistPath: nil),
     deep: Bool = false
   ) async -> DoctorReport {
     var checks: [DoctorCheck] = [appleSilicon(), macOSVersion()]
@@ -40,8 +43,11 @@ enum DoctorChecks {
     checks.append(await guestAgentImage(paths: paths))
 
     checks.append(hostSleepDisabled())
+    checks.append(serviceMode(mode))
     checks.append(launchdJobLoaded())
-    checks.append(loginKeychainUnlocked())
+    checks.append(rebootPersistence(mode))
+    checks.append(fileVault())
+    checks.append(loginKeychainUnlocked(mode: mode.mode))
 
     let (daemonCheck, status, images) = await daemonReachable(url: daemonSocket)
     checks.append(daemonCheck)

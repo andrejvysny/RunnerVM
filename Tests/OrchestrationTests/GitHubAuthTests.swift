@@ -111,6 +111,83 @@ import Testing
   }
 }
 
+/// The PAT file is replaced atomically (`AtomicFileWrite`), not truncated and rewritten: a crash
+/// or a full disk mid-write used to leave the daemon holding an empty credential.
+@Suite struct GitHubTokenFileWriteTests {
+  private static func withTemporaryDirectory(_ body: (URL) throws -> Void) throws {
+    let root = URL(
+      fileURLWithPath: "/tmp/rvm-token-\(UUID().uuidString.prefix(8))", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try body(root)
+  }
+
+  private static func mode(of url: URL) throws -> UInt16 {
+    let attributes = try FileManager.default.attributesOfItem(
+      atPath: url.path(percentEncoded: false))
+    return try #require((attributes[.posixPermissions] as? NSNumber)?.uint16Value)
+  }
+
+  @Test func writingOverAnExistingTokenReplacesItAndKeeps0600() throws {
+    try Self.withTemporaryDirectory { root in
+      let url = root.appending(path: GitHubTokenStore.fileName)
+      let store = GitHubTokenStore.file(url: url)
+
+      try store.write(token: "ghp_first")
+      #expect(try String(contentsOf: url, encoding: .utf8) == "ghp_first")
+      #expect(try Self.mode(of: url) & 0o777 == 0o600)
+
+      try store.write(token: "ghp_second_which_is_much_longer")
+
+      #expect(try String(contentsOf: url, encoding: .utf8) == "ghp_second_which_is_much_longer")
+      #expect(try Self.mode(of: url) & 0o777 == 0o600)
+    }
+  }
+
+  /// A looser mode left behind by an older install must not survive the rewrite: the new file is
+  /// created 0600 rather than inheriting the old inode's bits.
+  @Test func aWorldReadableTokenFileIsReplacedWithAnOwnerOnlyOne() throws {
+    try Self.withTemporaryDirectory { root in
+      let url = root.appending(path: GitHubTokenStore.fileName)
+      let path = url.path(percentEncoded: false)
+      try Data("ghp_loose".utf8).write(to: url)
+      try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+
+      try GitHubTokenStore.file(url: url).write(token: "ghp_tight")
+
+      #expect(try Self.mode(of: url) & 0o777 == 0o600)
+      #expect(try String(contentsOf: url, encoding: .utf8) == "ghp_tight")
+    }
+  }
+
+  @Test func noTemporaryFileIsLeftBehind() throws {
+    try Self.withTemporaryDirectory { root in
+      let url = root.appending(path: GitHubTokenStore.fileName)
+      let store = GitHubTokenStore.file(url: url)
+
+      try store.write(token: "ghp_one")
+      try store.write(token: "ghp_two")
+
+      let entries = try FileManager.default.contentsOfDirectory(atPath: root.path(percentEncoded: false))
+      #expect(entries == [GitHubTokenStore.fileName])
+    }
+  }
+
+  /// The store creates its parent directory, so `auth login` works on a state tree the daemon has
+  /// never written to.
+  @Test func aMissingParentDirectoryIsCreated() throws {
+    try Self.withTemporaryDirectory { root in
+      let url = root.appending(path: "state", directoryHint: .isDirectory)
+        .appending(path: GitHubTokenStore.fileName)
+
+      try GitHubTokenStore.file(url: url).write(token: "ghp_nested")
+
+      #expect(try String(contentsOf: url, encoding: .utf8) == "ghp_nested")
+      #expect(try Self.mode(of: url) & 0o777 == 0o600)
+    }
+  }
+}
+
 /// Runner-group resolution and the health hysteresis around an unreachable GitHub (spec §134).
 @Suite struct ScopeHealthTests {
   private static let organizationYAML = """
