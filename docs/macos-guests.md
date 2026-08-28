@@ -177,7 +177,7 @@ scripts/qualify-macos-image.sh --profile rvm-macos-26 --state-dir ~/runnervm-dev
 ```mermaid
 flowchart LR
     P["provision + seal"] --> I["runnerctl image import"]
-    I --> C["runnerctl vm create"]
+    I --> C["runnerctl vm create --pinned"]
     C --> B["cold boot"]
     B --> A["agent hello over vsock"]
     A --> H["metrics + exec sw_vers"]
@@ -189,16 +189,12 @@ flowchart LR
 It exits non-zero if any check fails and writes a JSON report either way. `--allow-ssh` records the
 SSH checks as skipped for an image built with `--debug-ssh`.
 
-**As written it cannot pass on a host whose scale set is live and idle** (first run, 2026-08-28).
-The script creates its instance with `runnerctl vm create`; an ephemeral instance with no confirmed
-GitHub demand behind it is surplus, so the scheduler scales it away before the guest agent connects:
-`FAIL cold_boot_to_idle — instance reached deleted` after 11 s, daemon log
-`instance.cancelled (demand dropped)`. Nothing is wrong with the image or the VM — the clone reached
-`waitingForAgent` in 6 s — and the run's other four checks (teardown, no live instances, instance
-directory removed, image digest unchanged) passed. The gate needs `github.demand: manual`, a pin on
-the instance it creates, or a host mode that suspends scale-to-zero while it runs. Until then the
-acceptance path for a macOS image is a real GitHub job, not this script. That run's report is
-[`docs/e2e/reports/2026-08-28-macos-qualify-h2.json`](e2e/reports/2026-08-28-macos-qualify-h2.json).
+The script creates its instance with `runnerctl vm create --pinned --ttl 30m` (D8): a pinned
+maintenance instance is resource-visible but demand-invisible, so the scheduler cannot scale it
+away before the guest agent connects the way it did an ordinary ephemeral instance on the first
+run, 2026-08-28 (`FAIL cold_boot_to_idle — instance reached deleted` after 11 s — nothing was wrong
+with the image, the clone had reached `waitingForAgent` in 6 s; report:
+[`docs/e2e/reports/2026-08-28-macos-qualify-h2.json`](e2e/reports/2026-08-28-macos-qualify-h2.json)).
 
 ## Guest side
 

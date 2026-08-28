@@ -32,9 +32,12 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
 - [ ] D7 native managed macOS provisioning: `ImagePullPurpose.provisioningBase`,
       `image_builds.kind = macosProvision`, `MacOSProvisionStages`, DHCP-lease IP, script
       `--attach` mode, qualify-then-promote via alias
-- [ ] D8 pinned maintenance instances (`purpose`/`pinned_until`, orchestrator exemptions, TTL
+- [x] D8 pinned maintenance instances (`purpose`/`pinned_until`, orchestrator exemptions, TTL
       reaper) + `runnerctl system smoke-test` + fix qualify-macos-image.sh (H2) + move shared
-      helpers into lib/live-common.sh (live-macos-e2e.sh bug)
+      helpers into lib/live-common.sh (live-macos-e2e.sh bug). D8b: `HostSetup` target +
+      `SmokeTest` (reusable, tested against a fake daemon) + `doctor --deep`'s `smoke_test` +
+      qualify-macos-image.sh `--pinned` + the seven (+`runnerd_pid`) helpers moved to
+      lib/live-common.sh
 - [x] D9 guest CI keychain (Go + Swift selfTest wiring done; live e2e workflow pending docs sweep): `GuestAgent/internal/keychain`, startRunner fail-closed env,
       `agent.selfTest`, capability, Proto + Swift DTOs, e2e keychain job
 - [ ] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged)
@@ -58,7 +61,7 @@ login session). Evidence, host layout, and the full tested/skipped list: `docs/v
 - [ ] **`runnerctl doctor`'s `Login keychain` check is a false negative on macOS 26.5.2** — it fails
       while every VM starts fine headless. Decide whether it should warn, probe for the condition it
       actually cares about, or be dropped; do not leave a permanent red FAIL on a healthy host.
-- [ ] **`scripts/qualify-macos-image.sh` cannot pass as written** (H2) — see the M8 section.
+- [x] **`scripts/qualify-macos-image.sh` cannot pass as written** (H2) — fixed by `vm create --pinned` (D8); see the M8 section.
 - [ ] **macOS guests do not fit on the Mac mini** (~20 GiB short; the reservation is the image's
       full 50 GB and a macOS guest cannot resize its APFS container). Either free the space, or
       produce a smaller macOS image, or accept Linux-only there.
@@ -115,7 +118,7 @@ auto-update disabled.
 
 - [x] `scripts/qualify-macos-image.sh`: import → create → cold boot → agent hello/health/guestInfo → `exec sw_vers` → TCP/22 unreachable → `admin/admin` rejected → destroy → report
 - [x] re-provisioned image produced 2026-08-28 (`macos-26`, hardened; the old `macos-26-base` predated the lockdown)
-- [ ] **the script cannot pass as written — fix it, then run it.** First run 2026-08-28 against `macos-26`: `FAIL cold_boot_to_idle — instance reached deleted` after 11 s. Not the image: the clone booted normally and reached `waitingForAgent` in 6 s, then the scheduler correctly scaled it away because a `vm create` instance is surplus with zero confirmed GitHub demand (`instance.cancelled (demand dropped)`). The other four checks (teardown, no live instances, instance directory removed, image digest unchanged) passed. Needs `github.demand: manual`, a pin on the instance it creates, or a host mode that suspends scale-to-zero for the duration
+- [x] **the script cannot pass as written — fix it, then run it.** Fixed by `vm create --pinned` (D8). First run 2026-08-28 against `macos-26`: `FAIL cold_boot_to_idle — instance reached deleted` after 11 s. Not the image: the clone booted normally and reached `waitingForAgent` in 6 s, then the scheduler correctly scaled it away because a `vm create` instance is surplus with zero confirmed GitHub demand (`instance.cancelled (demand dropped)`). The other four checks (teardown, no live instances, instance directory removed, image digest unchanged) passed. Needs `github.demand: manual`, a pin on the instance it creates, or a host mode that suspends scale-to-zero for the duration. Run it (H2's remaining "run pending") is still outstanding -- needs hardware
 
 **H3–H5 — concurrency, recovery, soak (need hardware; 2-VM test still blocked on disk)**
 

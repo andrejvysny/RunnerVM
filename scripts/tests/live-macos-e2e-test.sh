@@ -218,5 +218,21 @@ else
     no "an undeterminable slot count is skipped, not failed"
 fi
 
+# --------------------------------------------------------------------------
+# 6. The helpers this driver calls but does not define itself (start_peak_monitor,
+# stop_peak_monitor, read_peak, wait_for_instance_state, restart_runnerd, runnerd_pid,
+# kill_runnerd, wait_for_daemon_up) must actually come from sourcing the driver -- which sources
+# scripts/lib/live-common.sh. They used to live only in scripts/live-github-e2e.sh, which this
+# driver never sources: every one of these calls was "command not found" at runtime.
+# --------------------------------------------------------------------------
+for helper in start_peak_monitor stop_peak_monitor read_peak wait_for_instance_state \
+    restart_runnerd runnerd_pid kill_runnerd wait_for_daemon_up; do
+    if [ "$(type -t "$helper" 2>/dev/null)" = "function" ]; then
+        ok "$helper is defined after sourcing the driver"
+    else
+        no "$helper is defined after sourcing the driver" "not found"
+    fi
+done
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

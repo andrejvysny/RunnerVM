@@ -220,8 +220,12 @@ instance_field() {
 
 create_instance() {
     local created
-    log "creating an instance of $PROFILE"
-    created=$(rc vm create --profile "$PROFILE") ||
+    log "creating a pinned instance of $PROFILE"
+    # --pinned: an ordinary instance with no confirmed GitHub demand behind it is surplus, and the
+    # scheduler scales it away before the guest agent connects (see the H2 note this replaced).
+    # A pinned maintenance instance is resource-visible but demand-invisible, so it survives long
+    # enough to actually prove the cold boot.
+    created=$(rc vm create --profile "$PROFILE" --pinned --ttl 30m) ||
         die "vm create failed; the image or profile was refused before any VM booted"
     INSTANCE_ID=$(printf '%s' "$created" | jq -r '.id')
     [ -n "$INSTANCE_ID" ] || die "vm create returned no instance id"
@@ -408,7 +412,7 @@ qualify-macos-image.sh plan
   ssh checks       $([ "$ALLOW_SSH" -eq 1 ] && echo "skipped (--allow-ssh)" || echo "enforced")
 
   1. resolve the profile and its image digest
-  2. runnerctl vm create --profile $PROFILE
+  2. runnerctl vm create --profile $PROFILE --pinned --ttl 30m
   3. wait for state=idle (cold boot + guest agent over vsock)
   4. agent handshake (bootId), agent.metrics, exec sw_vers
   5. guest agent LaunchDaemon loaded after a real boot

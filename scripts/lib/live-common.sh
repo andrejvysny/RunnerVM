@@ -1,18 +1,26 @@
 # shellcheck shell=bash
 # Shared bash helpers for RunnerVM's live E2E drivers (scripts/live-github-e2e.sh,
-# scripts/live-builder-e2e.sh). Sourced, never executed: `source scripts/lib/live-common.sh`.
+# scripts/live-macos-e2e.sh, scripts/live-builder-e2e.sh). Sourced, never executed:
+# `source scripts/lib/live-common.sh`.
 #
 # Every function here reads its context (RUNNERCTL_BIN, SOCKET, OWNER, REPO, LEFTOVER_TIMEOUT,
-# WORKFLOW_FILE, RUN_POLL_INTERVAL, STATE_DIR, JSON_REPORT, REPORT_TMP, PROFILE) from globals the
-# sourcing script sets before calling it -- the same convention `rc()` already used before this
-# split, so moving a function here changes where it lives, not how it is called. Nothing in this
-# file sets `set -euo pipefail` itself; both callers already do, before sourcing this file.
+# WORKFLOW_FILE, RUN_POLL_INTERVAL, STATE_DIR, JSON_REPORT, REPORT_TMP, PROFILE, RESTART_CMD,
+# KILL_CMD, PEAK_FILE, PEAK_MONITOR_PID) from globals the sourcing script sets before calling it --
+# the same convention `rc()` already used before this split, so moving a function here changes
+# where it lives, not how it is called. Nothing in this file sets `set -euo pipefail` itself; every
+# caller already does, before sourcing this file.
+#
+# Host restart (`restart_runnerd`/`runnerd_pid`/`kill_runnerd`/`wait_for_daemon_up`), the peak-VM
+# monitor and `wait_for_instance_state` live here rather than in live-github-e2e.sh, which is where
+# they were first written, precisely because live-macos-e2e.sh's recovery/concurrency scenarios
+# call all of them too; keeping them script-local there was a real bug (`source
+# scripts/lib/live-common.sh` alone did not pull them in) rather than a deliberate split.
 #
 # What stays script-local (not here): anything shaped around one driver's own scenario/workflow
 # vocabulary -- e.g. live-github-e2e.sh's `dispatch_workflow` (e2e.yml's job/count/profile inputs;
-# runnervm-selftest.yml's inputs are shaped differently: profile/sleep_seconds/fanout), its
-# restart/kill helpers, its peak-VM monitor, and both drivers' own `--dry-run` plans, argument
-# parsing and top-level scenario/step functions.
+# runnervm-selftest.yml's inputs are shaped differently: profile/sleep_seconds/fanout),
+# `wait_for_session_instance`, `system_drain`/`system_resume`, and both drivers' own `--dry-run`
+# plans, argument parsing and top-level scenario/step functions.
 
 # --------------------------------------------------------------------------
 # Logging
@@ -180,6 +188,122 @@ assert_no_leftovers() {
   [ "$gh_runners" -eq 0 ] \
     || warn "GitHub still lists $gh_runners runner(s) matching rvm-$(profile_short_name "$profile") (may lag briefly; not fatal)"
   return 0
+}
+
+# --------------------------------------------------------------------------
+# Instance state polling
+# --------------------------------------------------------------------------
+
+# $1=profile $2=space-separated instance states $3=timeout. Prints the first matching instance id.
+# States are InstanceState raw values (Sources/RunnerCore/StateMachines/InstanceState.swift):
+# planned, preparing, cloning, startingWorker, startingVM, waitingForAgent, idle,
+# configuringRunner, runnerStarting, runnerOnline, busy, cleaning, stopping, stopped, interrupted,
+# failed, orphaned, deleting, deleted -- any subset can be passed, e.g. the boot window
+# ("startingWorker startingVM waitingForAgent") or the runner-configuration window
+# ("configuringRunner runnerStarting").
+wait_for_instance_state() {
+  local profile="$1" states="$2" timeout="$3" deadline now id
+  deadline=$(($(date +%s) + timeout))
+  while true; do
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || return 1
+    id=$(rc vm list 2>/dev/null | jq -r --arg p "$profile" --arg s "$states" '
+      ($s | split(" ")) as $wanted
+      | [.instances[] | select(.profile==$p and (.state as $st | $wanted | index($st) != null))]
+      | .[0].id // empty' 2>/dev/null) || id=""
+    [ -n "$id" ] && { printf '%s\n' "$id"; return 0; }
+    sleep 2
+  done
+}
+
+# --------------------------------------------------------------------------
+# Peak VM count monitor (reads/writes $PEAK_FILE, $PEAK_MONITOR_PID; concurrent / queue-overflow
+# scenarios in both live-github-e2e.sh and live-macos-e2e.sh)
+# --------------------------------------------------------------------------
+start_peak_monitor() {
+  local profile="$1"
+  PEAK_FILE=$(mktemp)
+  echo 0 >"$PEAK_FILE"
+  (
+    while true; do
+      local n cur
+      n=$(rc vm list 2>/dev/null | jq --arg p "$profile" \
+        '[.instances[] | select(.profile==$p and .state!="deleted")] | length' 2>/dev/null || echo 0)
+      cur=$(cat "$PEAK_FILE" 2>/dev/null || echo 0)
+      if [ "$n" -gt "$cur" ] 2>/dev/null; then echo "$n" >"$PEAK_FILE"; fi
+      sleep 3
+    done
+  ) &
+  PEAK_MONITOR_PID=$!
+}
+
+stop_peak_monitor() {
+  [ -n "$PEAK_MONITOR_PID" ] && kill "$PEAK_MONITOR_PID" 2>/dev/null
+  wait "$PEAK_MONITOR_PID" 2>/dev/null || true
+  PEAK_MONITOR_PID=""
+}
+
+read_peak() {
+  cat "$PEAK_FILE" 2>/dev/null || echo 0
+  rm -f "$PEAK_FILE"
+}
+
+# --------------------------------------------------------------------------
+# Host maintenance / restart (reads $RESTART_CMD, $KILL_CMD)
+# --------------------------------------------------------------------------
+restart_runnerd() {
+  log "restarting runnerd"
+  if [ -n "$RESTART_CMD" ]; then
+    sh -c "$RESTART_CMD"
+    return $?
+  fi
+  local label
+  label="gui/$(id -u)/com.runnervm.runnerd"
+  if launchctl print "$label" >/dev/null 2>&1; then
+    launchctl kickstart -k "$label"
+    return $?
+  fi
+  die "no com.runnervm.runnerd launchd job found; pass --restart-cmd '<how to restart runnerd>'"
+}
+
+# Prints runnerd's pid: `runnerctl status`'s daemon.pid, falling back to pgrep. Empty if neither
+# finds one (e.g. the daemon is already down).
+runnerd_pid() {
+  local pid
+  pid=$(rc status 2>/dev/null | jq -r '.daemon.pid // empty' 2>/dev/null) || pid=""
+  if [ -z "$pid" ] || [ "$pid" = "null" ]; then
+    # The bracket around the first letter keeps pgrep from matching its own invocation.
+    pid=$(pgrep -f '[r]unnerd' 2>/dev/null | head -n1) || pid=""
+  fi
+  printf '%s\n' "$pid"
+}
+
+# SIGKILLs runnerd directly, for restart-during-job-sigkill: an unclean death, not the graceful
+# stop every other restart scenario exercises. --kill-cmd overrides pid discovery entirely (e.g.
+# for a remote/sandboxed host where the driver cannot signal the daemon's pid itself); it must
+# still be followed by restart_runnerd (this function never restarts anything on its own).
+kill_runnerd() {
+  if [ -n "$KILL_CMD" ]; then
+    log "SIGKILL-ing runnerd via --kill-cmd"
+    sh -c "$KILL_CMD"
+    return $?
+  fi
+  local pid
+  pid=$(runnerd_pid)
+  [ -n "$pid" ] || { warn "could not determine runnerd's pid; pass --kill-cmd"; return 1; }
+  log "SIGKILL-ing runnerd (pid $pid)"
+  kill -9 "$pid"
+}
+
+wait_for_daemon_up() {
+  local timeout="${1:-60}" deadline now
+  deadline=$(($(date +%s) + timeout))
+  while true; do
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || return 1
+    rc status >/dev/null 2>&1 && return 0
+    sleep 2
+  done
 }
 
 # --------------------------------------------------------------------------

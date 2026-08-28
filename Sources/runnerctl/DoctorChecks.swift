@@ -56,6 +56,10 @@ enum DoctorChecks {
       runnerVersion(images: images, config: loaded.config, authState: status?.github.authState))
     checks.append(profileImageGuestAgent(images: images, config: loaded.config))
 
+    if deep {
+      checks.append(await smokeTest(paths: paths, daemonSocket: daemonSocket, images: images))
+    }
+
     return DoctorReport(checks: checks)
   }
 

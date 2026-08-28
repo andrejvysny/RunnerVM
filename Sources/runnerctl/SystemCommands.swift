@@ -8,7 +8,7 @@ struct System: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "system",
     abstract: "Put the host into maintenance, or stop the daemon.",
-    subcommands: [Drain.self, Resume.self, Offline.self, Shutdown.self],
+    subcommands: [Drain.self, Resume.self, Offline.self, Shutdown.self, SmokeTestCommand.self],
     aliases: ["daemon"])
 }
 

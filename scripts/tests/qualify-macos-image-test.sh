@@ -147,5 +147,24 @@ write_report >/dev/null
 expect_eq "$(jq -r .qualified "$TWORK/pass.json")" "true" \
     "a report whose checks all passed is qualified"
 
+# --------------------------------------------------------------------------
+# 4. create_instance asks for a *pinned* instance. Unpinned, an ephemeral instance with no
+# confirmed GitHub demand behind it is surplus and the scheduler scales it away before the guest
+# agent connects (the H2 defect this driver used to hit; see docs/macos-guests.md "Image
+# qualification"). `--pinned` is what makes the cold-boot proof possible at all.
+# --------------------------------------------------------------------------
+report_init
+# `create_instance` calls `rc` inside a `$(...)` command substitution -- a subshell -- so the stub
+# below records its own arguments to a file rather than a variable, which a subshell cannot write
+# back to its parent.
+RC_ARGS_FILE="$TWORK/rc-args"
+rc() { printf '%s' "$*" >"$RC_ARGS_FILE"; printf '{"id":"22222222-3333-4444-5555-666666666666"}\n'; }
+PROFILE="rvm-macos-26"
+create_instance >/dev/null 2>&1
+LAST_RC_ARGS="$(cat "$RC_ARGS_FILE")"
+expect_contains "$LAST_RC_ARGS" "--pinned" "create_instance asks for a pinned instance"
+expect_contains "$LAST_RC_ARGS" "--ttl 30m" "create_instance sets a ttl"
+rm -f "$REPORT_TMP" 2>/dev/null || true
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

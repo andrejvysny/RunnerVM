@@ -39,6 +39,10 @@ STATE_DIR="${RUNNERVM_STATE_DIR:-}"
 RESTART_CMD=""
 KILL_CMD=""
 DRY_RUN=0
+# Read/written by scripts/lib/live-common.sh's start_peak_monitor/stop_peak_monitor/read_peak;
+# pre-declared so `set -u` never trips before the first start_peak_monitor call.
+PEAK_FILE=""
+PEAK_MONITOR_PID=""
 
 OWNER=""
 REPO="${RUNNERVM_E2E_REPO:-}"

@@ -49,6 +49,10 @@ let package = Package(
       .product(name: "Yams", package: "Yams"),
     ]),
     .target(name: "DaemonAPI", dependencies: ["RunnerCore", "RPC", "GuestControl"]),
+    // Reusable host-side checks that boot a real instance (`runnerctl system smoke-test`,
+    // `doctor --deep`'s `smoke_test`): depends only on the client-side wire types, never on
+    // Orchestration, so it works the same way against any daemon on the other end of the socket.
+    .target(name: "HostSetup", dependencies: ["RunnerCore", "DaemonAPI", "GuestControl"]),
     .target(name: "Orchestration", dependencies: [
       "RunnerCore", "RunnerLogging", "RPC", "DaemonAPI", "Persistence", "Scheduler",
       "WorkerProtocol", "GuestControl", "ImageStore", "ImageBuild", "OCIRegistry", "GitHubControl",
@@ -64,7 +68,7 @@ let package = Package(
       // ImageStore reads `images/` directly (no I/O beyond the local filesystem, no Virtualization
       // link): `doctor`'s `image_store_integrity`/`guest_agent_image` checks work without a
       // running daemon the same way every other doctor check does.
-      "DaemonAPI", "ConfigLoader", "GuestControl", "ImageBuild", "ImageStore",
+      "DaemonAPI", "ConfigLoader", "GuestControl", "ImageBuild", "ImageStore", "HostSetup",
       .product(name: "ArgumentParser", package: "swift-argument-parser"),
     ]),
     .executableTarget(name: "vmworker", dependencies: [
@@ -77,6 +81,8 @@ let package = Package(
     .testTarget(name: "PersistenceTests", dependencies: ["Persistence"]),
     .testTarget(name: "ConfigLoaderTests", dependencies: ["ConfigLoader"]),
     .testTarget(name: "DaemonAPITests", dependencies: ["DaemonAPI", "GuestControl"]),
+    .testTarget(
+      name: "HostSetupTests", dependencies: ["HostSetup", "DaemonAPI", "GuestControl", "RunnerCore"]),
     .testTarget(name: "ImageStoreTests", dependencies: ["ImageStore"]),
     .testTarget(name: "SchedulerTests", dependencies: ["Scheduler"]),
     .testTarget(name: "MetricsTests", dependencies: ["Metrics"]),

@@ -10,9 +10,10 @@ import RunnerCore
 ///
 /// Individual checks live in `DoctorChecks.swift` (host platform, filesystem, sleep, launchd,
 /// daemon), `DoctorVMWorkerChecks.swift` (vmworker binary/entitlement/probe),
-/// `DoctorConfigChecks.swift` (configuration, disk headroom, GitHub credential presence) and
-/// `DoctorServiceModeChecks.swift` (how runnerd is deployed, FileVault, reboot persistence) —
-/// split by concern to keep each file under the project's line-count convention.
+/// `DoctorConfigChecks.swift` (configuration, disk headroom, GitHub credential presence),
+/// `DoctorServiceModeChecks.swift` (how runnerd is deployed, FileVault, reboot persistence) and
+/// `DoctorSmokeTestCheck.swift` (`--deep`'s `smoke_test`, via `HostSetup`) — split by concern to
+/// keep each file under the project's line-count convention.
 struct Doctor: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "doctor",
@@ -55,8 +56,9 @@ struct Doctor: AsyncParsableCommand {
   @Flag(
     name: .long,
     help: ArgumentHelp(
-      "Also re-hash every image blob's sha256 against its manifest (image_store_integrity).",
-      discussion: "Slow for large images, off by default."))
+      "Also re-hash every image blob's sha256 against its manifest (image_store_integrity), and "
+        + "boot a real instance end to end (smoke_test).",
+      discussion: "Slow -- a real cold boot, plus large images -- and off by default."))
   var deep = false
 
   func run() async throws {
