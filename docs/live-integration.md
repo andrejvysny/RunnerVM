@@ -304,3 +304,37 @@ Same conventions as `live-github-e2e.sh`: `--json-report` (default
 `<state-dir>/logs/builder-e2e-report-<timestamp>.json`), the report shape, `RUNNERVM_E2E_*`
 timeout overrides (`RUN_TIMEOUT`, `LEFTOVER_TIMEOUT`, `POLL_INTERVAL`), and `RUNNERCTL`/`--socket`
 for the daemon connection.
+
+## macOS base image provisioning (`scripts/provision-macos-tart.sh`)
+
+Not an E2E driver: a one-shot image build. There is no cloud-init for a macOS guest, so the Tart
+base image is provisioned once over SSH at build time (`docs/macos-guests.md`), then sealed for
+`runnerctl image import`.
+
+```sh
+tart pull ghcr.io/cirruslabs/macos-tahoe-base:latest   # ~27 GB, do this first
+
+scripts/provision-macos-tart.sh --name runnervm-macos-base \
+  --runner-version 2.337.0 \
+  --runner-sha256 5a2cd92908a93d7276a194e1de6008099f3e7946f3f8e14aa7a1a7b4a31fdec2
+
+# ... or let it resolve + verify the latest release itself, and import in the same run:
+scripts/provision-macos-tart.sh --force --import macos-26-base
+```
+
+It clones the pulled base, boots it headless, and runs `scripts/lib/macos-guest-provision.sh` as
+root inside the guest: a hidden `runner` account, the guest agent at `/usr/local/bin/` plus its
+LaunchDaemon, `actions/runner` osx-arm64 in `/Users/runner/actions-runner` (sha256 resolved from
+GitHub's release asset digest on the host and re-verified in the guest), Xcode Command Line Tools
+if absent, `sudo -H -u runner git config --global credential.helper ""`, and `/etc/sudoers.d/90-runner`.
+The guest prints an `RVM-SELFCHECK-V1` block the host asserts on — a non-empty credential helper
+or a missing `git` fails the build — then halts, and the host writes
+`<out>/<name>/metadata.json` beside `~/.tart/vms/<name>/{disk.img,nvram.bin}` and prints the exact
+`runnerctl image import` command (`--import <name>` runs it, and needs a reachable daemon).
+
+`--force` is the only thing that deletes a VM, and only the `--name` one. A VM whose
+`config.json` reports a non-raw `diskFormat` (tart's `asif`) is refused rather than sealed.
+SSH (`admin`/`admin` on Tart base images, driven by `/usr/bin/expect`; `--ssh-key` for key auth)
+is a build-time channel only — the finished image is managed over vsock.
+`scripts/tests/provision-macos-tart-test.sh` covers the metadata rendering, the asif refusal, the
+osx-arm64 asset resolution and the self-check parsing with no VM, tart or network.
