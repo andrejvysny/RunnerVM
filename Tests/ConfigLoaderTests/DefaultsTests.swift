@@ -15,6 +15,22 @@ struct DefaultsTests {
     #expect(config.host.maxVMs == .auto)
   }
 
+  /// `host.overcommit.disk` is newer than the rest of the block, so a document that predates it
+  /// must still load and mean "no disk overcommit" rather than failing to decode.
+  @Test func diskOvercommitDefaultsToOneAndParsesWhenGiven() throws {
+    #expect(try Self.loadMinimal().host.overcommit.disk == 1.0)
+
+    let yaml = Fixtures.minimalYAML.replacingOccurrences(
+      of: "version: 1",
+      with: "version: 1\nhost:\n  overcommit:\n    disk: 1.4\n")
+    let config = try ConfigLoader.load(yaml: yaml)
+    #expect(config.host.overcommit.disk == 1.4)
+    // The siblings keep their defaults rather than being zeroed by a partial block.
+    #expect(config.host.overcommit.cpu == 1.0)
+    #expect(config.host.overcommit.memory == 1.0)
+    #expect(config.host.reserve == HostConfig.Reserve())
+  }
+
   @Test func profileDefaultsToLinuxEphemeralWithSpecSizing() throws {
     let profile = try #require(Self.loadMinimal().profile(named: "ubuntu-24"))
     #expect(profile.guestOS == .linux)

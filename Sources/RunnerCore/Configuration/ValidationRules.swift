@@ -54,6 +54,18 @@ extension HostConfig {
         "guests touch their whole memory balloon; overcommit can swap the host"
       ))
     }
+    if !(overcommit.disk >= 1.0) {
+      issues.append(.error(
+        "HOST_OVERCOMMIT_DISK_TOO_LOW", "host.overcommit.disk", "must be at least 1.0"
+      ))
+    } else if overcommit.disk > 1.0 {
+      issues.append(.warning(
+        "HOST_DISK_OVERCOMMIT_ENABLED", "host.overcommit.disk",
+        "admission reserves each guest's apparent disk size, but an instance disk is an APFS "
+          + "clone that only grows as the job writes; above 1.0 a guest that does fill its disk "
+          + "can exhaust host storage under the daemon and every other VM"
+      ))
+    }
     return issues
   }
 }

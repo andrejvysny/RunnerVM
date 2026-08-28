@@ -83,7 +83,8 @@ enum Mapping {
       reservedCPUCount: reserve.cpu,
       reservedMemoryBytes: reserve.memoryBytes,
       reservedDiskBytes: reserve.diskBytes,
-      placeholder: false)
+      placeholder: false,
+      diskOvercommit: config?.host.overcommit.disk ?? HostConfig.Overcommit().disk)
   }
 
   /// Auth and scopes come from local state — the cached auth probe and the persisted scope health

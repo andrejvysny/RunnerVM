@@ -276,6 +276,29 @@ logging:
 If your host has less than ~66 GiB free, **lower `host.reserve.disk`** — the 50 GiB default will
 otherwise refuse image builds and VM starts on a machine that has plenty of room in practice.
 
+### When admission refuses a VM the host could actually run
+
+Admission reserves `max(profile.resources.disk, image.virtualBytes)` — the guest disk's *apparent*
+size. An instance disk is an APFS clone of the image, so it starts at nearly zero additional bytes
+and only grows as the job writes; the reservation is a worst case, not a measurement. For Linux
+that costs nothing (a 16 GiB image really occupies 16 GiB). For macOS it is a permanent ~16 GiB
+over-reservation per guest, because the Tart-derived image is 50 GB apparent against 30.6 GiB
+allocated and `resources.disk` must equal the apparent size exactly.
+
+If you hit that, and you know your jobs do not fill their disks:
+
+```yaml
+host:
+  overcommit:
+    disk: 1.5      # scales the post-floor disk budget; 1.0 (default) is fail-closed
+```
+
+`config validate` warns whenever this is above 1.0, and `runnerctl status` grows a
+`Disk overcommit` row so the state is visible without reading the config. **The risk is real**: a
+job that truly does fill its disk can exhaust host storage underneath the daemon and every other
+VM. Raise it only when you understand your workload, and prefer buying disk — an external APFS
+volume for `--state-dir` works and carries no such risk.
+
 ### Rules the validator enforces
 
 | rule | why |

@@ -85,7 +85,15 @@ struct Status: AsyncParsableCommand {
       ("Reserved CPU", "\(capacity.reservedCPUCount)"),
       ("Reserved RAM", Format.bytes(capacity.reservedMemoryBytes)),
       ("Reserved disk", Format.bytes(capacity.reservedDiskBytes)),
-    ]
+    ] + overcommitRow(capacity)
+  }
+
+  /// Only when it is on: a row reading "1.0x" on every host would train the eye to skip the one
+  /// line that says this host is admitting more disk than it has.
+  private static func overcommitRow(_ capacity: CapacitySummary) -> [(String, String)] {
+    guard capacity.diskOvercommit != 1.0 else { return [] }
+    return [("Disk overcommit", String(format: "%.2fx — admitting more disk than is free",
+                                       capacity.diskOvercommit))]
   }
 
   private static func githubFields(_ github: GitHubSummary) -> [(String, String)] {

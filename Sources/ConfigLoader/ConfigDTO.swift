@@ -20,6 +20,7 @@ struct ConfigDTO: Decodable {
     struct Overcommit: Decodable {
       var cpu: Double?
       var memory: Double?
+      var disk: Double?
     }
 
     struct Limits: Decodable {

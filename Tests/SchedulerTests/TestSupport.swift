@@ -54,6 +54,7 @@ enum Fixture {
     diskReserveGiB: UInt64 = 50,
     cpuOvercommit: Double = 1.0,
     memoryOvercommit: Double = 1.0,
+    diskOvercommit: Double = 1.0,
     maxVMs: HostConfig.MaxVMs = .auto
   ) -> HostConfig {
     HostConfig(
@@ -62,7 +63,8 @@ enum Fixture {
         memoryBytes: memoryReserveGiB * gib,
         diskBytes: diskReserveGiB * gib
       ),
-      overcommit: HostConfig.Overcommit(cpu: cpuOvercommit, memory: memoryOvercommit),
+      overcommit: HostConfig.Overcommit(
+        cpu: cpuOvercommit, memory: memoryOvercommit, disk: diskOvercommit),
       maxVMs: maxVMs
     )
   }

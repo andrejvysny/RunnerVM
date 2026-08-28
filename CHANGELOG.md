@@ -2,6 +2,29 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — `host.overcommit.disk`
+
+Admission reserves `max(profile.resources.disk, image.virtualBytes)` — the guest disk's **apparent**
+size — while an instance disk is an APFS clone of the image that starts at nearly zero additional
+bytes and only grows as the job writes. For Linux the gap is nil (a 16 GiB image really is 16 GiB).
+For macOS it is large and permanent: the Tart-derived image is 50 GB apparent against 30.6 GiB
+allocated, and the exact-size rule forbids a profile asking for less. Measured on the development
+Mac, a full macOS job left free disk unchanged at 83 GiB — the reservation was the only thing that
+could not fit.
+
+`host.overcommit.disk` is the opt-in, alongside the `cpu` and `memory` ratios that already existed.
+It scales the post-floor disk budget; the floor is subtracted first, deliberately, because the
+reserve is the space macOS and the daemon's own logs need. Default 1.0 keeps admission fail-closed
+against a guest that really does write every block, and `config validate` warns whenever it is
+raised (`HOST_DISK_OVERCOMMIT_ENABLED`).
+
+`runnerctl status` grows a `Disk overcommit` row **only when the ratio is not 1.0** — a host
+admitting more disk than it has should not require reading the configuration file to discover, and
+a row reading "1.0x" on every host would train the eye to skip it.
+
+`CapacitySummary.diskOvercommit` decodes leniently, so a payload from a daemon that predates the
+field still parses as "no overcommit".
+
 ## 2026-08-28 — first headless deployment (Mac mini)
 
 Deploying onto a Mac with no GUI login session — the configuration the LaunchDaemon variant and

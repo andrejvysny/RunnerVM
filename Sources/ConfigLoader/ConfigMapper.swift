@@ -33,7 +33,8 @@ enum ConfigMapper {
     )
     let overcommit = HostConfig.Overcommit(
       cpu: dto?.overcommit?.cpu ?? d.overcommit.cpu,
-      memory: dto?.overcommit?.memory ?? d.overcommit.memory
+      memory: dto?.overcommit?.memory ?? d.overcommit.memory,
+      disk: dto?.overcommit?.disk ?? d.overcommit.disk
     )
     let limits = HostConfig.Limits(
       concurrentImagePulls: dto?.limits?.concurrentImagePulls ?? d.limits.concurrentImagePulls,

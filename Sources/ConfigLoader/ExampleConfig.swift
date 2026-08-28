@@ -16,6 +16,10 @@ public enum ExampleConfig {
     overcommit:
       cpu: 1.0
       memory: 1.0
+      # Admission reserves each guest's *apparent* disk size, but an instance disk is an APFS
+      # clone that only grows as the job writes. Raise above 1.0 only if you accept that a guest
+      # which does fill its disk can exhaust host storage.
+      disk: 1.0
 
     maxVMs: auto
 

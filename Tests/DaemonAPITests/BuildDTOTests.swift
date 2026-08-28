@@ -131,7 +131,9 @@ import Testing
   }
 
   @Test func decodesAsNilWhenTheKeyIsAbsent() throws {
-    // A pre-Phase-6 daemon's JSON simply has no "builds" key at all -- not `null`.
+    // A pre-Phase-6 daemon's JSON simply has no "builds" key at all -- not `null`. The same is
+    // true of every field added after a DTO ships, so this fixture is deliberately the *oldest*
+    // shape we still accept.
     let json = """
       {
         "daemon": {"state": "healthy", "version": "1.2.3", "pid": 1, "hostId": "h",
@@ -154,6 +156,9 @@ import Testing
       """
     let status = try JSONDecoder().decode(SystemStatus.self, from: Data(json.utf8))
     #expect(status.builds == nil)
+    // Same fixture covers `capacity.diskOvercommit`, added later still: absent must mean 1.0
+    // (what a daemon without the field was doing), not a decode failure.
+    #expect(status.capacity.diskOvercommit == 1.0)
   }
 
   @Test func defaultInitLeavesBuildsNil() {

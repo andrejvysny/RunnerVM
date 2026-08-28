@@ -22,6 +22,9 @@ public struct HostBudget: Sendable, Hashable {
   /// Raw free space; the floor is subtracted at admission so both numbers stay reportable.
   public var freeDiskBytes: UInt64
   public var diskFloorBytes: UInt64
+  /// Ratio applied to the post-floor disk budget (`HostConfig.Overcommit.disk`). 1.0 keeps
+  /// admission fail-closed against a guest that writes every block of its disk.
+  public var diskOvercommit: Double
   /// `nil` = only the resource budget bounds the VM count (`HostConfig.MaxVMs.auto`).
   public var maxVMs: Int?
 
@@ -30,13 +33,15 @@ public struct HostBudget: Sendable, Hashable {
     memoryBudgetBytes: UInt64,
     freeDiskBytes: UInt64,
     diskFloorBytes: UInt64,
-    maxVMs: Int?
+    maxVMs: Int?,
+    diskOvercommit: Double = 1.0
   ) {
     self.cpuBudget = cpuBudget
     self.memoryBudgetBytes = memoryBudgetBytes
     self.freeDiskBytes = freeDiskBytes
     self.diskFloorBytes = diskFloorBytes
     self.maxVMs = maxVMs
+    self.diskOvercommit = diskOvercommit
   }
 
   public init(config: HostConfig, resources: HostResources) {
@@ -49,6 +54,7 @@ public struct HostBudget: Sendable, Hashable {
 
     freeDiskBytes = resources.freeDiskBytes
     diskFloorBytes = config.reserve.diskBytes
+    diskOvercommit = max(0, config.overcommit.disk)
 
     switch config.maxVMs {
     case .auto: maxVMs = nil
@@ -56,9 +62,13 @@ public struct HostBudget: Sendable, Hashable {
     }
   }
 
-  /// Disk actually schedulable once the absolute free-space floor is honoured (spec §17).
+  /// Disk actually schedulable once the absolute free-space floor is honoured (spec §17), scaled
+  /// by `host.overcommit.disk`.
+  ///
+  /// The floor is subtracted *before* the ratio deliberately: the reserve is the space macOS and
+  /// the daemon's own logs need, and overcommitting into it would defeat the point of having one.
   public var diskBudgetBytes: UInt64 {
-    SaturatingMath.sub(freeDiskBytes, diskFloorBytes)
+    SaturatingMath.scale(SaturatingMath.sub(freeDiskBytes, diskFloorBytes), by: diskOvercommit)
   }
 }
 

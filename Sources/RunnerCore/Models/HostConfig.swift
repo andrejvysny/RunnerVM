@@ -24,10 +24,24 @@ public struct HostConfig: Codable, Sendable, Hashable {
   public struct Overcommit: Codable, Sendable, Hashable {
     public var cpu: Double
     public var memory: Double
+    /// Ratio applied to the post-reserve *disk* budget (spec §17).
+    ///
+    /// Exists because admission reserves `max(profile.disk, image.virtualBytes)` — the guest disk's
+    /// **apparent** size — while an instance disk is an APFS clone of the image that starts at
+    /// nearly zero additional bytes and only grows as the job writes. The gap is small for Linux
+    /// (a 16 GiB image really is 16 GiB) and large for macOS, whose Tart-derived image is 50 GB
+    /// apparent against 30.6 GiB allocated and whose `resources.disk` must equal that apparent
+    /// size exactly. Measured: a full macOS job left free disk unchanged at 83 GiB.
+    ///
+    /// Left at 1.0 admission stays fail-closed — a job that writes every block of its disk still
+    /// fits. Above 1.0 you are asserting that your guests do not, and accepting that one which
+    /// does can exhaust host storage underneath the daemon and every other VM.
+    public var disk: Double
 
-    public init(cpu: Double = 1.0, memory: Double = 1.0) {
+    public init(cpu: Double = 1.0, memory: Double = 1.0, disk: Double = 1.0) {
       self.cpu = cpu
       self.memory = memory
+      self.disk = disk
     }
   }
 
@@ -100,6 +114,24 @@ extension HostConfig.MaxVMs: Codable {
     case .auto: try container.encode(Self.autoToken)
     case .count(let n): try container.encode(n)
     }
+  }
+}
+
+extension HostConfig.Overcommit {
+  private enum CodingKeys: String, CodingKey {
+    case cpu, memory, disk
+  }
+
+  /// Per-key leniency, like `HostConfig` itself: a configuration persisted before `disk` existed
+  /// must still load, and it means "no disk overcommit" rather than failing to decode.
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    let d = HostConfig.Overcommit()
+    self.init(
+      cpu: try c.decodeIfPresent(Double.self, forKey: .cpu) ?? d.cpu,
+      memory: try c.decodeIfPresent(Double.self, forKey: .memory) ?? d.memory,
+      disk: try c.decodeIfPresent(Double.self, forKey: .disk) ?? d.disk
+    )
   }
 }
 

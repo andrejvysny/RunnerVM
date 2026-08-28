@@ -38,7 +38,7 @@ enum ConfigSchema {
     "version": .scalar,
     "host": .object([
       "reserve": .object(["cpu": .scalar, "memory": .scalar, "disk": .scalar]),
-      "overcommit": .object(["cpu": .scalar, "memory": .scalar]),
+      "overcommit": .object(["cpu": .scalar, "memory": .scalar, "disk": .scalar]),
       "maxVMs": .scalar,
       "limits": .object(["concurrentImagePulls": .scalar, "concurrentVMStarts": .scalar]),
     ]),

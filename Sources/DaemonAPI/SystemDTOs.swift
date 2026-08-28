@@ -136,18 +136,45 @@ public struct CapacitySummary: Codable, Sendable, Hashable {
   public var reservedCPUCount: Int
   public var reservedMemoryBytes: UInt64
   public var reservedDiskBytes: UInt64
+  /// `host.overcommit.disk`. Surfaced because a host admitting more disk than it has is not
+  /// something an operator should have to read the configuration file to discover.
+  public var diskOvercommit: Double
   public var placeholder: Bool
 
   public init(
     runningVMs: Int, maxVMs: Int?, reservedCPUCount: Int, reservedMemoryBytes: UInt64,
-    reservedDiskBytes: UInt64, placeholder: Bool
+    reservedDiskBytes: UInt64, placeholder: Bool, diskOvercommit: Double = 1.0
   ) {
     self.runningVMs = runningVMs
     self.maxVMs = maxVMs
     self.reservedCPUCount = reservedCPUCount
     self.reservedMemoryBytes = reservedMemoryBytes
     self.reservedDiskBytes = reservedDiskBytes
+    self.diskOvercommit = diskOvercommit
     self.placeholder = placeholder
+  }
+}
+
+extension CapacitySummary {
+  private enum CodingKeys: String, CodingKey {
+    case runningVMs, maxVMs, reservedCPUCount, reservedMemoryBytes, reservedDiskBytes
+    case diskOvercommit, placeholder
+  }
+
+  /// `diskOvercommit` is newer than the rest of this DTO, so a payload from a daemon that predates
+  /// it must still decode -- `runnerctl` and `runnerd` are versioned independently. Absent means
+  /// "no overcommit", which is what such a daemon was doing.
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      runningVMs: try c.decode(Int.self, forKey: .runningVMs),
+      maxVMs: try c.decodeIfPresent(Int.self, forKey: .maxVMs),
+      reservedCPUCount: try c.decode(Int.self, forKey: .reservedCPUCount),
+      reservedMemoryBytes: try c.decode(UInt64.self, forKey: .reservedMemoryBytes),
+      reservedDiskBytes: try c.decode(UInt64.self, forKey: .reservedDiskBytes),
+      placeholder: try c.decode(Bool.self, forKey: .placeholder),
+      diskOvercommit: try c.decodeIfPresent(Double.self, forKey: .diskOvercommit) ?? 1.0
+    )
   }
 }
 
