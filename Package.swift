@@ -52,7 +52,12 @@ let package = Package(
     // Reusable host-side checks that boot a real instance (`runnerctl system smoke-test`,
     // `doctor --deep`'s `smoke_test`): depends only on the client-side wire types, never on
     // Orchestration, so it works the same way against any daemon on the other end of the socket.
-    .target(name: "HostSetup", dependencies: ["RunnerCore", "DaemonAPI", "GuestControl"]),
+    // Also the host provisioning layer behind `runnerctl setup` (phase D4): preflight, wizard,
+    // plan, service account, launchd, installer. ConfigLoader so a rendered plan can be proved to
+    // load before it is written; Scheduler for the concurrency recommendation's capacity math.
+    .target(name: "HostSetup", dependencies: [
+      "RunnerCore", "DaemonAPI", "GuestControl", "ConfigLoader", "Scheduler",
+    ]),
     .target(name: "Orchestration", dependencies: [
       "RunnerCore", "RunnerLogging", "RPC", "DaemonAPI", "Persistence", "Scheduler",
       "WorkerProtocol", "GuestControl", "ImageStore", "ImageBuild", "OCIRegistry", "GitHubControl",
@@ -81,8 +86,9 @@ let package = Package(
     .testTarget(name: "PersistenceTests", dependencies: ["Persistence"]),
     .testTarget(name: "ConfigLoaderTests", dependencies: ["ConfigLoader"]),
     .testTarget(name: "DaemonAPITests", dependencies: ["DaemonAPI", "GuestControl"]),
-    .testTarget(
-      name: "HostSetupTests", dependencies: ["HostSetup", "DaemonAPI", "GuestControl", "RunnerCore"]),
+    .testTarget(name: "HostSetupTests", dependencies: [
+      "HostSetup", "DaemonAPI", "GuestControl", "RunnerCore", "ConfigLoader", "Scheduler",
+    ]),
     .testTarget(name: "ImageStoreTests", dependencies: ["ImageStore"]),
     .testTarget(name: "SchedulerTests", dependencies: ["Scheduler"]),
     .testTarget(name: "MetricsTests", dependencies: ["Metrics"]),

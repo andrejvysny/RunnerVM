@@ -24,7 +24,7 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
       service account in install.sh
 - [x] D2 pkg: `scripts/build-package.sh`, `packaging/pkg/`, release-manifest.json, tests
 - [x] D3 `.github/workflows/release.yml` (tag == RunnerVMVersion gate, pkg install smoke, gh release)
-- [ ] D4 `scripts/bootstrap.sh` (published as install.sh) + `Sources/HostSetup` + `runnerctl setup`
+- [x] D4 `scripts/bootstrap.sh` (published as install.sh) + `Sources/HostSetup` + `runnerctl setup`
       (wizard, dscl account, launchd, PAT, pull, profiles-last flow, dry-run) + tests
 - [ ] D5 publish-images.yml (self-hosted) + docs; first `ubuntu-24-base:stable` publish = user step
 - [ ] D6 `ImageUpdateService` + schema v4 `managed_images` + promoted-digest resolution +

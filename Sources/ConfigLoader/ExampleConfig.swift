@@ -74,6 +74,25 @@ public enum ExampleConfig {
     collectRunnerDiagnostics: true
     diagnosticsTimeout: 60s
 
+  # Image update service (phase D6) and managed image sources (phase D7). Accepted and validated
+  # now, acted on once those phases land. Uncomment to declare them ahead of time.
+  # images:
+  #   prefetch: true            # pull every profile image at `config apply`, not at first job
+  #   updates:
+  #     enabled: true
+  #     interval: 6h            # at least 15m while enabled
+  #     jitter: 30m             # spread, so a fleet does not check in lockstep
+  #     keepPrevious: 1         # superseded digests kept; the only deletion trigger
+  #     smokeTest: true         # qualify a candidate before promoting it
+  #   managed:                  # sources RunnerVM keeps current on the host's own behalf
+  #     - name: macos-tahoe-base      # local alias a macOS profile names in `image:`
+  #       kind: macos-tart            # a Tart export: never runnable as pulled, always provisioned
+  #       source: ghcr.io/cirruslabs/macos-tahoe-base:latest
+  #       autoUpdate: true
+  #       resources:                  # the provisioning VM's sizing, not the runner's
+  #         cpu: 4
+  #         memory: 8GiB
+
   # In-daemon image builds (Phase 4/5). Uncomment to override the defaults.
   # build:
   #   cpu: 4

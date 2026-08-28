@@ -15,7 +15,7 @@ enum ConfigMapper {
       security: mapSecurity(dto.security),
       metrics: mapMetrics(dto.metrics),
       diagnostics: mapDiagnostics(dto.diagnostics),
-      images: mapImages(dto.images),
+      images: try mapImages(dto.images),
       imageUpdates: mapImageUpdates(dto.imageUpdates),
       logging: mapLogging(dto.logging),
       build: mapBuild(dto.build)
@@ -187,19 +187,76 @@ enum ConfigMapper {
     )
   }
 
-  private static func mapImages(_ dto: ConfigDTO.Images?) -> ImageCacheConfig {
+  private static func mapImages(
+    _ dto: ConfigDTO.Images?
+  ) throws(ConfigLoadError) -> ImageCacheConfig {
     let d = ImageCacheConfig()
     let dl = ImageLimitsConfig()
     let limits = ImageLimitsConfig(
       maxVirtualDiskBytes: dto?.limits?.maxVirtualDiskSize?.bytes ?? dl.maxVirtualDiskBytes,
       maxLayers: dto?.limits?.maxLayers ?? dl.maxLayers
     )
+    var managed: [ManagedImageSourceConfig] = []
+    for (index, entry) in (dto?.managed ?? []).enumerated() {
+      try managed.append(mapManagedImage(entry, index: index))
+    }
     return ImageCacheConfig(
       maxSizeBytes: dto?.cache?.maxSize?.bytes ?? d.maxSizeBytes,
       keepRecentlyUsed: dto?.cache?.keepRecentlyUsed ?? d.keepRecentlyUsed,
       limits: limits,
-      prefetch: dto?.prefetch ?? d.prefetch
+      prefetch: dto?.prefetch ?? d.prefetch,
+      updates: mapImageUpdatePolicy(dto?.updates),
+      managed: managed
     )
+  }
+
+  private static func mapImageUpdatePolicy(
+    _ dto: ConfigDTO.Images.Updates?
+  ) -> ImageUpdatePolicyConfig {
+    let d = ImageUpdatePolicyConfig()
+    return ImageUpdatePolicyConfig(
+      enabled: dto?.enabled ?? d.enabled,
+      interval: dto?.interval ?? d.interval,
+      jitter: dto?.jitter ?? d.jitter,
+      keepPrevious: dto?.keepPrevious ?? d.keepPrevious,
+      smokeTest: dto?.smokeTest ?? d.smokeTest
+    )
+  }
+
+  private static func mapManagedImage(
+    _ dto: ConfigDTO.Images.Managed, index: Int
+  ) throws(ConfigLoadError) -> ManagedImageSourceConfig {
+    let path = "images.managed[\(index)]"
+    guard let name = dto.name else { throw .missingKey(path: "\(path).name") }
+    guard let rawKind = dto.kind else { throw .missingKey(path: "\(path).kind") }
+    guard let kind = managedImageKind(rawKind) else {
+      throw .invalidValue(
+        path: "\(path).kind",
+        reason: "expected one of \(managedImageKindSpellings.keys.sorted().joined(separator: ", "))"
+      )
+    }
+    guard let source = dto.source else { throw .missingKey(path: "\(path).source") }
+    let d = ManagedImageSourceConfig.Resources()
+    let resources = dto.resources.map {
+      ManagedImageSourceConfig.Resources(
+        cpuCount: $0.cpu ?? d.cpuCount, memoryBytes: $0.memory?.bytes ?? d.memoryBytes
+      )
+    }
+    return ManagedImageSourceConfig(
+      name: name, kind: kind, source: source, autoUpdate: dto.autoUpdate ?? true,
+      resources: resources
+    )
+  }
+
+  /// The hyphenated YAML spelling is canonical (`docs/design/distribution.md`); the enum's own raw
+  /// value is accepted too so a document round-tripped through the daemon's JSON form still loads.
+  private static let managedImageKindSpellings: [String: ManagedImageKind] = [
+    "macos-tart": .macosTart,
+    "registry-tag": .registryTag,
+  ]
+
+  private static func managedImageKind(_ text: String) -> ManagedImageKind? {
+    managedImageKindSpellings[text] ?? ManagedImageKind(rawValue: text)
   }
 
   private static func mapBuild(_ dto: ConfigDTO.Build?) -> ImageBuildConfig {

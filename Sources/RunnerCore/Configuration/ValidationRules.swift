@@ -166,7 +166,10 @@ extension RunnerConfiguration {
     return issues
   }
 
-  static func isValidProfileName(_ name: String) -> Bool {
+  /// The grammar a profile name must satisfy so it can be used in instance names, runner names
+  /// and the scale-set name. Public because `HostSetup` validates an operator's override against
+  /// the same rule at the prompt, rather than letting `config apply` reject it later.
+  public static func isValidProfileName(_ name: String) -> Bool {
     guard let first = name.first, first.isNumber || (first.isLetter && first.isLowercase) else {
       return false
     }
@@ -255,7 +258,107 @@ extension ImageCacheConfig {
         "IMAGE_CACHE_KEEP_RECENTLY_USED_NEGATIVE", "images.keepRecentlyUsed", "must not be negative"
       ))
     }
+    issues += updates.validate()
     return issues
+  }
+}
+
+extension ImageUpdatePolicyConfig {
+  /// Bounds only. What an update *does* (resolve, build, qualify, promote) is phase D6; this phase
+  /// ships the keys and refuses the values that could never work.
+  func validate() -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if enabled, interval < Self.minimumInterval {
+      issues.append(.error(
+        "IMAGE_UPDATES_INTERVAL_TOO_SHORT", "images.updates.interval",
+        "must be at least \(Self.minimumInterval.seconds / 60)m while updates are enabled"
+      ))
+    }
+    if jitter < .zero {
+      issues.append(.error(
+        "IMAGE_UPDATES_JITTER_NEGATIVE", "images.updates.jitter", "must not be negative"
+      ))
+    }
+    if !(0...Self.maximumKeepPrevious).contains(keepPrevious) {
+      issues.append(.error(
+        "IMAGE_UPDATES_KEEP_PREVIOUS_INVALID", "images.updates.keepPrevious",
+        "must be between 0 and \(Self.maximumKeepPrevious); each retained digest is a whole image "
+          + "on disk"
+      ))
+    }
+    return issues
+  }
+}
+
+// MARK: - Managed image sources
+
+extension RunnerConfiguration {
+  /// `images.managed[]` rules that need the whole document: a managed name is promoted to a local
+  /// image alias, so it shares a namespace with profile names and with the other managed entries.
+  func validateManagedImages() -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    let profileNames = Set(profiles.map(\.name))
+    var seen = Set<String>()
+    for (index, managed) in images.managed.enumerated() {
+      let path = "images.managed[\(index)]"
+      if managed.name.isEmpty || !Self.isValidProfileName(managed.name) {
+        issues.append(.error(
+          "MANAGED_IMAGE_NAME_INVALID", "\(path).name",
+          "must match [a-z0-9][a-z0-9._-]* so it can be used as a local image alias"
+        ))
+      } else if !seen.insert(managed.name).inserted {
+        issues.append(.error(
+          "MANAGED_IMAGE_DUPLICATE_NAME", "\(path).name",
+          "duplicate managed image name '\(managed.name)'"
+        ))
+      }
+      // A profile named `x` and a managed image named `x` would both want to be resolved by name;
+      // `profiles[].image: x` could then mean either.
+      if profileNames.contains(managed.name) {
+        issues.append(.error(
+          "MANAGED_IMAGE_NAME_COLLIDES_WITH_PROFILE", "\(path).name",
+          "'\(managed.name)' is also a profile name; a managed image is resolved by name and "
+            + "would be ambiguous"
+        ))
+      }
+      issues += validateManagedSource(managed, path: path)
+      issues += validateManagedReferences(managed, path: path)
+    }
+    return issues
+  }
+
+  private func validateManagedSource(
+    _ managed: ManagedImageSourceConfig, path: String
+  ) -> [ConfigurationIssue] {
+    // A Tart source is always a registry reference (`<registry>/<repository>[:tag]`); there is no
+    // local-path form, so a bare word can only be a mistake.
+    let needsRegistry = managed.kind == .macosTart
+    guard managed.source.isEmpty || (needsRegistry && !managed.source.contains("/")) else {
+      return []
+    }
+    return [.error(
+      "MANAGED_IMAGE_SOURCE_INVALID", "\(path).source",
+      needsRegistry
+        ? "a \(ManagedImageKind.macosTart.rawValue) source must be a registry reference, "
+          + "e.g. ghcr.io/cirruslabs/macos-tahoe-base:latest"
+        : "must not be empty"
+    )]
+  }
+
+  /// A `macos-tart` source only ever produces a macOS image, so a Linux profile naming it would
+  /// never boot.
+  private func validateManagedReferences(
+    _ managed: ManagedImageSourceConfig, path _: String
+  ) -> [ConfigurationIssue] {
+    guard managed.kind == .macosTart else { return [] }
+    return profiles.enumerated().compactMap { index, profile in
+      guard profile.image == managed.name, profile.guestOS != .macos else { return nil }
+      return .error(
+        "MANAGED_IMAGE_REFERENCED_BY_NON_MACOS_PROFILE", "profiles[\(index)].image",
+        "managed image '\(managed.name)' is a \(ManagedImageKind.macosTart.rawValue) source and "
+          + "can only back a macOS profile"
+      )
+    }
   }
 }
 

@@ -119,15 +119,48 @@ public struct ImageCacheConfig: Codable, Sendable, Hashable {
   /// because otherwise the first job after a config change waits for the whole image and looks
   /// like a runner failure rather than a download.
   public var prefetch: Bool
+  /// Cadence and retention for the image update service (phase D6). Configuration surface only:
+  /// nothing reads this yet.
+  public var updates: ImageUpdatePolicyConfig
+  /// Upstream sources RunnerVM keeps up to date on the host's own behalf (phases D6/D7).
+  /// Configuration surface only: nothing reads this yet.
+  public var managed: [ManagedImageSourceConfig]
 
   public init(
     maxSizeBytes: UInt64? = nil, keepRecentlyUsed: DurationValue = .days(7),
-    limits: ImageLimitsConfig = ImageLimitsConfig(), prefetch: Bool = false
+    limits: ImageLimitsConfig = ImageLimitsConfig(), prefetch: Bool = false,
+    updates: ImageUpdatePolicyConfig = ImageUpdatePolicyConfig(),
+    managed: [ManagedImageSourceConfig] = []
   ) {
     self.maxSizeBytes = maxSizeBytes
     self.keepRecentlyUsed = keepRecentlyUsed
     self.prefetch = prefetch
     self.limits = limits
+    self.updates = updates
+    self.managed = managed
+  }
+}
+
+extension ImageCacheConfig {
+  private enum CodingKeys: String, CodingKey {
+    case maxSizeBytes, keepRecentlyUsed, limits, prefetch, updates, managed
+  }
+
+  /// Per-key leniency, like `HostConfig`: `updates`/`managed` are newer than the rest of the
+  /// block, so a configuration persisted before they existed still decodes and means "no managed
+  /// sources, updates off".
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    let d = ImageCacheConfig()
+    self.init(
+      maxSizeBytes: try c.decodeIfPresent(UInt64.self, forKey: .maxSizeBytes),
+      keepRecentlyUsed: try c.decodeIfPresent(DurationValue.self, forKey: .keepRecentlyUsed)
+        ?? d.keepRecentlyUsed,
+      limits: try c.decodeIfPresent(ImageLimitsConfig.self, forKey: .limits) ?? d.limits,
+      prefetch: try c.decodeIfPresent(Bool.self, forKey: .prefetch) ?? d.prefetch,
+      updates: try c.decodeIfPresent(ImageUpdatePolicyConfig.self, forKey: .updates) ?? d.updates,
+      managed: try c.decodeIfPresent([ManagedImageSourceConfig].self, forKey: .managed) ?? d.managed
+    )
   }
 }
 

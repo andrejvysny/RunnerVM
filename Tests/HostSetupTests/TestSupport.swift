@@ -1,3 +1,4 @@
+import ConfigLoader
 import DaemonAPI
 import Foundation
 import GuestControl
@@ -124,5 +125,185 @@ final class FakeClock: @unchecked Sendable {
   func advance(by duration: Duration) {
     let parts = duration.components
     current = current.addingTimeInterval(Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
+  }
+}
+
+// MARK: - Setup fixtures
+
+extension SetupHostFacts {
+  /// A base Mac mini M4: 10 logical CPUs, 24 GiB, 200 GiB free.
+  static func stub(
+    cpuCount: Int = 10,
+    memoryBytes: UInt64 = ByteSize.gibibytes(24).bytes,
+    freeDiskBytes: UInt64 = ByteSize.gibibytes(200).bytes,
+    hostID6: String = "ab12cd",
+    fileVault: FileVaultStatus = .off,
+    existingInstall: ExistingInstall = ExistingInstall()
+  ) -> SetupHostFacts {
+    SetupHostFacts(
+      model: "Mac16,10", cpuCount: cpuCount, memoryBytes: memoryBytes,
+      freeDiskBytes: freeDiskBytes, macOSVersion: "26.5.2", isAppleSilicon: true,
+      hostID6: hostID6, fileVault: fileVault, existingInstall: existingInstall)
+  }
+}
+
+extension SetupAnswers {
+  static func stub(
+    scope: SetupScope = .repository(owner: "acme", repository: "widgets"),
+    linuxEnabled: Bool = true,
+    macOSEnabled: Bool = false,
+    linuxConcurrency: Int = 2,
+    token: String = "ghp_token"
+  ) -> SetupAnswers {
+    SetupAnswers(
+      scope: scope, token: token, linuxEnabled: linuxEnabled, macOSEnabled: macOSEnabled,
+      linuxConcurrency: linuxConcurrency,
+      linuxProfileName: "rvm-ab12cd-ubuntu-24", macOSProfileName: "rvm-ab12cd-macos-tahoe")
+  }
+}
+
+/// A `SetupDaemon` scripted per test. The `SmokeTestDaemon` half behaves like
+/// `FakeSmokeTestDaemon`'s happy path — a smoke test is not what these tests are about — while
+/// every setup-specific call can be made to fail independently.
+actor FakeSetupDaemon: SetupDaemon {
+  var authLoginResult: FakeSmokeTestDaemon.Scripted<AuthLoginResponse>
+  var githubTestResult: FakeSmokeTestDaemon.Scripted<GitHubTestResponse>
+  var imagePullResult: FakeSmokeTestDaemon.Scripted<ImagePullResponse>
+  var operationStates: [String]
+  var configApplyResult: FakeSmokeTestDaemon.Scripted<ConfigApplyResponse>
+  var smokeTestPasses: Bool
+
+  private(set) var calls: [String] = []
+  private(set) var appliedYAML: String?
+  private(set) var loggedInToken: String?
+  private var operationCallCount = 0
+  private var deleted = false
+
+  init(
+    authLoginResult: FakeSmokeTestDaemon.Scripted<AuthLoginResponse> = .value(
+      AuthLoginResponse(location: "file /state/github-token", status: .stubHealthy())),
+    githubTestResult: FakeSmokeTestDaemon.Scripted<GitHubTestResponse> = .value(.stubHealthy()),
+    imagePullResult: FakeSmokeTestDaemon.Scripted<ImagePullResponse> = .value(
+      ImagePullResponse(
+        reference: "ghcr.io/andrejvysny/runnervm/ubuntu-24-base@sha256:abc",
+        manifestDigest: "sha256:abc", operationId: "op-1", alreadyPresent: false, digest: nil)),
+    operationStates: [String] = ["succeeded"],
+    configApplyResult: FakeSmokeTestDaemon.Scripted<ConfigApplyResponse> = .value(
+      ConfigApplyResponse(
+        diff: ConfigDiff(addedProfiles: ["rvm-ab12cd-ubuntu-24"]), operationId: "op-2",
+        issues: [], appliedAt: "2026-08-28T00:00:00.000Z")),
+    smokeTestPasses: Bool = true
+  ) {
+    self.authLoginResult = authLoginResult
+    self.githubTestResult = githubTestResult
+    self.imagePullResult = imagePullResult
+    self.operationStates = operationStates
+    self.configApplyResult = configApplyResult
+    self.smokeTestPasses = smokeTestPasses
+  }
+
+  func authLogin(token: String) async throws -> AuthLoginResponse {
+    calls.append("authLogin")
+    loggedInToken = token
+    return try authLoginResult.get()
+  }
+
+  func githubTest() async throws -> GitHubTestResponse {
+    calls.append("githubTest")
+    return try githubTestResult.get()
+  }
+
+  func imagePull(reference: String, format _: String?) async throws -> ImagePullResponse {
+    calls.append("imagePull(\(reference))")
+    return try imagePullResult.get()
+  }
+
+  func operationGet(id: String) async throws -> OperationInfo {
+    calls.append("operationGet")
+    let index = min(operationCallCount, operationStates.count - 1)
+    operationCallCount += 1
+    let state = operationStates[index]
+    return OperationInfo(
+      id: id, kind: "pull-image", resourceType: "image", resourceId: "img", state: state,
+      startedAt: "2026-08-28T00:00:00.000Z",
+      errorCode: state == "failed" ? "IMAGE_PULL_FAILED" : nil,
+      errorMessage: state == "failed" ? "registry unreachable" : nil)
+  }
+
+  func configApply(yaml: String) async throws -> ConfigApplyResponse {
+    calls.append("configApply")
+    appliedYAML = yaml
+    return try configApplyResult.get()
+  }
+
+  // MARK: - SmokeTestDaemon
+
+  func instanceCreate(
+    profile _: String, purpose _: String?, ttlMs _: Int64?, imageOverride _: String?
+  ) async throws -> InstanceInfoDTO {
+    calls.append("instanceCreate")
+    guard smokeTestPasses else { throw TestError("instance.create refused") }
+    return .stub()
+  }
+
+  func instanceGet(id: String) async throws -> InstanceInfoDTO {
+    .stub(id: id, state: deleted ? "deleted" : "idle")
+  }
+
+  func instanceExec(
+    _: InstanceExecRequest
+  ) async throws -> AsyncThrowingStream<InstanceExecEvent, any Error> {
+    AsyncThrowingStream { continuation in
+      continuation.yield(.chunk(InstanceExecChunk(stream: "stdout", data: Data("Linux".utf8))))
+      continuation.yield(.exited(0))
+      continuation.finish()
+    }
+  }
+
+  func instanceSelfTest(id _: String) async throws -> SelfTestResult { SelfTestResult() }
+
+  func instanceSSHInfo(id _: String) async throws -> InstanceSSHInfo {
+    InstanceSSHInfo(ipAddresses: [], user: "runner", sshEnabled: true)
+  }
+
+  func instanceDelete(id: String) async throws -> InstanceInfoDTO {
+    deleted = true
+    return .stub(id: id, state: "deleted")
+  }
+}
+
+extension AuthStatus {
+  static func stubHealthy() -> AuthStatus {
+    AuthStatus(
+      state: "healthy", provider: "pat", source: "file",
+      location: "file /state/github-token", login: "acme-bot")
+  }
+
+  static func stubInvalid() -> AuthStatus {
+    AuthStatus(
+      state: "invalid", provider: "pat", source: "file", location: "file /state/github-token",
+      problem: "GITHUB_UNAUTHORIZED: bad credentials",
+      hint: "the token is expired or was revoked")
+  }
+}
+
+extension GitHubTestResponse {
+  static func stubHealthy() -> GitHubTestResponse {
+    GitHubTestResponse(
+      auth: .stubHealthy(),
+      scopes: [ScopeHealthDTO(
+        name: "repo", slug: "acme/widgets", kind: "repository", status: "healthy",
+        schedulable: true)])
+  }
+
+  static func stubForbidden() -> GitHubTestResponse {
+    GitHubTestResponse(
+      auth: .stubInvalid(),
+      scopes: [ScopeHealthDTO(
+        name: "repo", slug: "acme/widgets", kind: "repository", status: "unhealthy",
+        schedulable: false,
+        problems: [ScopeProblemDTO(
+          code: "GITHUB_FORBIDDEN", errorClass: "permission",
+          detail: "the token cannot administer runners on acme/widgets")])])
   }
 }

@@ -136,9 +136,35 @@ struct ConfigDTO: Decodable {
       var maxLayers: Int?
     }
 
+    struct Updates: Decodable {
+      var enabled: Bool?
+      var interval: DurationValue?
+      var jitter: DurationValue?
+      var keepPrevious: Int?
+      var smokeTest: Bool?
+    }
+
+    /// `kind` stays a `String` here rather than `ManagedImageKind`: the YAML spelling is
+    /// hyphenated (`macos-tart`) while the enum's raw value is the camelCase form the
+    /// `managed_images.kind` column stores. `ConfigMapper` is where the two meet.
+    struct Managed: Decodable {
+      struct Resources: Decodable {
+        var cpu: Int?
+        var memory: ByteSize?
+      }
+
+      var name: String?
+      var kind: String?
+      var source: String?
+      var autoUpdate: Bool?
+      var resources: Resources?
+    }
+
     var cache: Cache?
     var limits: Limits?
     var prefetch: Bool?
+    var updates: Updates?
+    var managed: [Managed]?
   }
 
   struct ImageUpdates: Decodable {
