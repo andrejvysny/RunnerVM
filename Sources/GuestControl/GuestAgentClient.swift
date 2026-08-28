@@ -71,6 +71,11 @@ public actor GuestAgentClient {
     try decode(GuestMetrics.self, from: try await call(.getMetrics), method: .getMetrics)
   }
 
+  /// Spec: qualification/smoke tests. Read-only inside the guest and safe while a job runs.
+  public func selfTest() async throws -> SelfTestResult {
+    try decode(SelfTestResult.self, from: try await call(.selfTest), method: .selfTest)
+  }
+
   public func resizeDisk() async throws -> ResizeDiskResponse {
     try decode(ResizeDiskResponse.self, from: try await call(.resizeDisk), method: .resizeDisk)
   }

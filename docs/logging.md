@@ -85,6 +85,7 @@ Keys, all optional except `ts`, `event` and `host_id`: `instance_id`, `profile_i
 | `instance.transition` | Any committed VM state change. `from`/`to` are `InstanceState` values; `reason` is the failure code if one is set. |
 | `session.transition` | Any committed runner-session state change. `from`/`to` are `RunnerSessionState` values. |
 | `instance.diagnostics` | A guest `_diag` tarball was collected. `reason` is the byte count. |
+| `instance.maintenanceExpired` | A pinned maintenance instance (`instance.create {purpose: maintenance}`) outlived its ttl and was deleted. Nothing else ever reclaims one, so this is the only line that closes a pinned VM's life. |
 | `audit` | An `audit_events` row was written. `from` is the actor, `to` is the audit kind, `reason` is the detail JSON. |
 | `demand.changed`, `capacity.advertised`, `instance.started`, `instance.startFailed`, `instance.cancelled`, `session.assigned`, `session.assignmentFailed`, `provider.degraded` | The orchestrator's scheduling events, mirrored from its in-memory ring. `to` repeats the event name, `reason` carries the detail. |
 

@@ -180,7 +180,9 @@ enum Mapping {
       jobsConsumed: record.jobsConsumed,
       retireAfterSession: record.retireAfterSession,
       failureCode: record.failureCode,
-      failureMessage: record.failureMessage)
+      failureMessage: record.failureMessage,
+      purpose: record.purpose.rawValue,
+      pinnedUntil: record.pinnedUntil.map { RFC3339.string(from: $0.date) })
   }
 
   static func reconciliation(_ snapshot: Reconciler.Snapshot, now: Date) -> ReconciliationSummary {

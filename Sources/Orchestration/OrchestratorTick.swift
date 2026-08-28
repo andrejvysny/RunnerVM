@@ -25,6 +25,12 @@ struct SchedulingPass: Sendable {
   var reservations: [Reservation]
   var instances: [InstanceRecord]
   var bound: Set<InstanceID>
+  /// Instances the scheduler must not plan, cancel, reap, recycle or hand a session to
+  /// (`instances.purpose = 'maintenance'`, schema v4). Deliberately *not* folded into `bound`:
+  /// a bound instance is one `DesiredCapacity` counts as serving a job, and counting a smoke-test
+  /// VM that way would inflate `busyTarget` and start a second VM for demand nobody has.
+  /// Their `Reservation`s are untouched, so the host still charges cpu/memory/disk for them.
+  var maintenance: Set<InstanceID>
   var activeSessions: [RunnerProfileID: Int]
   var profiles: [ProfileEntry]
 }
@@ -57,13 +63,17 @@ extension Orchestrator {
     else { return nil }
     let live = ((try? await sessionRows.list(limit: nil)) ?? []).filter { !$0.state.isTerminal }
     let bound = Set(live.map(\.instanceId))
+    // Every record's reservation is kept: a maintenance VM holds real cpu, memory, disk and (on
+    // macOS) a guest slot, and admission has to refuse the runner VM that no longer fits behind it.
     guard let reservations = try? await InstanceAdmission.reservations(
       instances: instanceRows, profiles: profiles, bound: bound, builds: imageBuilds)
     else { return nil }
+    let maintenance = Set(records.filter { $0.purpose == .maintenance }.map(\.id))
     let budget = InstanceAdmission.budget(configuration: config, probe: probe, paths: paths)
     var entries: [SchedulingPass.ProfileEntry] = []
     for row in rows where row.enabled {
-      guard let entry = await entry(row, reservations: reservations, budget: budget, mode: mode)
+      guard let entry = await entry(
+        row, reservations: reservations, maintenance: maintenance, budget: budget, mode: mode)
       else { continue }
       entries.append(entry)
     }
@@ -71,20 +81,28 @@ extension Orchestrator {
     for session in live { active[session.profileId, default: 0] += 1 }
     return SchedulingPass(
       config: config, mode: mode, budget: budget, reservations: reservations, instances: records,
-      bound: bound, activeSessions: active, profiles: entries)
+      bound: bound, maintenance: maintenance, activeSessions: active, profiles: entries)
   }
 
   /// Advertises this profile's capacity and turns GitHub's `assignedJobs` into a desired plan.
   private func entry(
-    _ row: RunnerProfileRecord, reservations: [Reservation], budget: HostBudget, mode: HostMode
+    _ row: RunnerProfileRecord, reservations: [Reservation], maintenance: Set<InstanceID>,
+    budget: HostBudget, mode: HostMode
   ) async -> SchedulingPass.ProfileEntry? {
     guard let profile = try? row.decodedConfig() else { return nil }
+    // Both figures are computed against *every* reservation, so the maintenance VM's resources are
+    // charged; only the per-profile slice `DesiredCapacity` plans from drops it.
     let capacity = CapacityCalculator.profileCapacity(
       profileId: row.id, profile: profile, reservations: reservations, budget: budget,
       hostMode: mode)
-    let advertised = CapacityCalculator.advertisedCapacity(
+    let pinned = reservations.count { $0.profileId == row.id && maintenance.contains($0.instanceId) }
+    // `advertisedCapacity` is `currentInstances + cap`, and `currentInstances` counts the pinned
+    // VMs too — leaving them in would advertise a slot the scheduler can never fill, because the
+    // maintenance VM is not a runner and will never take a job. Subtracting them is what makes the
+    // advertised figure shrink for as long as a smoke test occupies the host.
+    let advertised = max(0, CapacityCalculator.advertisedCapacity(
       profileId: row.id, profile: profile, reservations: reservations, budget: budget,
-      hostMode: mode)
+      hostMode: mode) - pinned)
     await demand.advertise(profile: row.id, capacity: advertised)
     if lastAdvertised[row.id] != advertised {
       lastAdvertised[row.id] = advertised
@@ -93,7 +111,10 @@ extension Orchestrator {
     let snapshot = await demand.snapshot(profile: row.id)
     let plan = DesiredCapacity.compute(
       profile: profile, assignedJobs: snapshot.assignedJobs,
-      reservations: reservations.filter { $0.profileId == row.id }, capacity: capacity)
+      reservations: reservations.filter {
+        $0.profileId == row.id && !maintenance.contains($0.instanceId)
+      },
+      capacity: capacity)
     let inFlight = starting[row.id] ?? 0
     let startable = mode.admitsNewWork && !isHeldDown(row.id)
       ? max(0, plan.toStart - inFlight) : 0
@@ -216,7 +237,8 @@ extension Orchestrator {
             entry.assignedJobs <= (pass.activeSessions[entry.id] ?? 0)
       else { continue }
       for record in pass.instances
-      where record.profileId == entry.id && record.state == .idle && !pass.bound.contains(record.id) {
+      where record.profileId == entry.id && record.state == .idle
+        && !pass.bound.contains(record.id) && !pass.maintenance.contains(record.id) {
         let since = record.agentReadyAt?.date ?? record.createdAt.date
         guard now().timeIntervalSince(since) >= Double(ttl.seconds) else { continue }
         await cancel(record.id, profile: entry.name, reason: "idle ttl")
@@ -232,7 +254,7 @@ extension Orchestrator {
       pass.profiles.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     for record in pass.instances
     where record.state == .idle && (record.tainted || record.retireAfterSession)
-      && !pass.bound.contains(record.id) {
+      && !pass.bound.contains(record.id) && !pass.maintenance.contains(record.id) {
       await cancel(
         record.id, profile: names[record.profileId] ?? record.profileId.rawValue,
         reason: record.tainted ? "tainted" : "retired")
@@ -265,7 +287,7 @@ extension Orchestrator {
       let idle = pass.instances
         .filter {
           $0.profileId == entry.id && $0.state == .idle && !pass.bound.contains($0.id)
-            && !$0.tainted && !$0.retireAfterSession
+            && !pass.maintenance.contains($0.id) && !$0.tainted && !$0.retireAfterSession
         }
         .sorted { $0.createdAt.date < $1.createdAt.date }
       for record in idle where entry.assignedJobs > active {

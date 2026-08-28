@@ -122,4 +122,6 @@ extension LifecycleEventLog {
   public static let sessionTransition = "session.transition"
   public static let auditEvent = "audit"
   public static let diagnosticsCollected = "instance.diagnostics"
+  /// A pinned maintenance instance outlived its ttl and `MaintenanceInstanceReaper` deleted it.
+  public static let instanceMaintenanceExpired = "instance.maintenanceExpired"
 }

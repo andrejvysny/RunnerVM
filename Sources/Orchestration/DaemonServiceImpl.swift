@@ -376,13 +376,52 @@ actor DaemonServiceImpl: DaemonService {
   /// rejects a request whose own disk reservation does not fit the remaining budget, which is not
   /// the same guarantee once the *host* itself is already past its floor.
   func instanceCreate(_ request: InstanceCreateRequest) async throws -> InstanceInfoDTO {
+    let options = try Self.createOptions(request, now: Date())
     let pressure = await diskPressure.refresh(floorBytes: reserveDiskFloor())
     guard pressure.state != .critical else {
       throw OrchestrationError.diskPressureCritical(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes)
     }
-    let record = try await instances.create(profileName: request.profile)
+    let record = try await instances.create(profileName: request.profile, options: options)
     return await describe(record, names: try await profileNamesById())
+  }
+
+  /// Wire request -> `InstanceCreateOptions`, with the three refusals that belong to the protocol
+  /// rather than to the lifecycle: a maintenance instance must name a bounded ttl, and only a
+  /// maintenance instance may run something other than its profile's image.
+  ///
+  /// `purpose` is parsed leniently in exactly one direction: an unknown string is an error, never
+  /// a silent downgrade to `runner` — the caller asked for something this daemon does not know how
+  /// to pin, and quietly handing back an ordinary VM the scheduler will cancel is worse than a
+  /// refusal. Host mode is deliberately *not* special-cased: a draining host refuses a maintenance
+  /// create exactly as it refuses a runner one.
+  static func createOptions(
+    _ request: InstanceCreateRequest, now: Date
+  ) throws -> InstanceCreateOptions {
+    let purpose: InstancePurpose
+    if let raw = request.purpose {
+      guard let parsed = InstancePurpose(rawValue: raw) else {
+        throw DaemonServiceError.notFound(entity: "instance purpose", name: raw)
+      }
+      purpose = parsed
+    } else {
+      purpose = .runner
+    }
+    guard purpose == .maintenance else {
+      guard request.imageOverride == nil else {
+        throw OrchestrationError.imageOverrideMaintenanceOnly
+      }
+      return InstanceCreateOptions()
+    }
+    guard let ttlMs = request.ttlMs else { throw OrchestrationError.maintenanceTTLRequired }
+    guard MaintenanceTTL.range.contains(ttlMs) else {
+      throw OrchestrationError.maintenanceTTLInvalid(
+        ttlMs: ttlMs, minimumMs: MaintenanceTTL.minimumMs, maximumMs: MaintenanceTTL.maximumMs)
+    }
+    return InstanceCreateOptions(
+      purpose: .maintenance,
+      pinnedUntil: now.addingTimeInterval(Double(ttlMs) / 1_000),
+      imageOverride: request.imageOverride)
   }
 
   func instanceStop(_ request: InstanceStopRequest) async throws -> InstanceInfoDTO {
@@ -416,6 +455,12 @@ actor DaemonServiceImpl: DaemonService {
     return InstanceMetricsResponse(
       instanceId: id.rawValue, collectedAt: RFC3339.string(from: Date()), guest: guest,
       worker: record.workerPid.flatMap(HostProcessMetrics.sample))
+  }
+
+  /// Relays `agent.selfTest` the way `instanceMetrics` relays `agent.getMetrics`: the guest's own
+  /// answer, verbatim, with no host-side grading of what a failed check means.
+  func instanceSelfTest(_ request: InstanceSelfTestRequest) async throws -> SelfTestResult {
+    try await instances.selfTest(id: InstanceID(rawValue: request.id))
   }
 
   /// `sshEnabled` is the profile's policy, not a probe: a profile with ssh disabled must not hand

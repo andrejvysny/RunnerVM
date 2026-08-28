@@ -319,10 +319,28 @@ actor FakeDaemonService: DaemonService {
     return match
   }
 
+  var lastCreateRequest: InstanceCreateRequest?
+  var selfTestResult = SelfTestResult()
+  var lastSelfTestId: String?
+
+  func createRequest() -> InstanceCreateRequest? { lastCreateRequest }
+  func setSelfTestResult(_ result: SelfTestResult) { selfTestResult = result }
+  func selfTestId() -> String? { lastSelfTestId }
+
   func instanceCreate(_ request: InstanceCreateRequest) async throws -> InstanceInfoDTO {
-    let instance = FakeDaemonService.sampleInstance(profile: request.profile)
+    lastCreateRequest = request
+    var instance = FakeDaemonService.sampleInstance(profile: request.profile)
+    instance.purpose = request.purpose
     instances.append(instance)
     return instance
+  }
+
+  func instanceSelfTest(_ request: InstanceSelfTestRequest) async throws -> SelfTestResult {
+    lastSelfTestId = request.id
+    guard request.id != "missing" else {
+      throw DaemonServiceError.notFound(entity: "instance", name: request.id)
+    }
+    return selfTestResult
   }
 
   func instanceStop(_ request: InstanceStopRequest) async throws -> InstanceInfoDTO {

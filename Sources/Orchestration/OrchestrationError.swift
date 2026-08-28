@@ -32,6 +32,14 @@ public enum OrchestrationError: RunnerError {
   case demandNotScaleSet
   /// A scale-set operation was asked for before the profile had a registered scale set.
   case scaleSetNotRegistered(profile: String)
+  /// `instance.create {purpose: maintenance}` with no `ttlMs`. A pinned VM the scheduler will
+  /// never reclaim needs a deadline, or a forgotten smoke test holds host capacity forever.
+  case maintenanceTTLRequired
+  /// `ttlMs` outside `MaintenanceTTL.bounds`.
+  case maintenanceTTLInvalid(ttlMs: Int64, minimumMs: Int64, maximumMs: Int64)
+  /// `imageOverride` on a runner create. A runner VM must always be the image its profile names,
+  /// otherwise `scaleset.list` and the image-update machinery describe a fleet that is not there.
+  case imageOverrideMaintenanceOnly
 
   public var code: String {
     switch self {
@@ -56,6 +64,9 @@ public enum OrchestrationError: RunnerError {
     case .demandNotManual: "DEMAND_NOT_MANUAL"
     case .demandNotScaleSet: "DEMAND_NOT_SCALE_SET"
     case .scaleSetNotRegistered: "SCALE_SET_NOT_REGISTERED"
+    case .maintenanceTTLRequired: "MAINTENANCE_TTL_REQUIRED"
+    case .maintenanceTTLInvalid: "MAINTENANCE_TTL_INVALID"
+    case .imageOverrideMaintenanceOnly: "IMAGE_OVERRIDE_MAINTENANCE_ONLY"
     }
   }
 
@@ -103,6 +114,12 @@ public enum OrchestrationError: RunnerError {
       "demand is not driven by a GitHub scale set; there is no message session to reconnect"
     case let .scaleSetNotRegistered(profile):
       "profile '\(profile)' has no registered GitHub scale set yet"
+    case .maintenanceTTLRequired:
+      "a maintenance instance must carry a ttl; the scheduler never reclaims one on its own"
+    case let .maintenanceTTLInvalid(ttl, minimum, maximum):
+      "maintenance ttl \(ttl)ms is outside \(minimum)ms...\(maximum)ms"
+    case .imageOverrideMaintenanceOnly:
+      "an image override is only allowed with purpose 'maintenance'"
     }
   }
 

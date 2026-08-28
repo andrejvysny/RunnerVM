@@ -1,4 +1,5 @@
 import Foundation
+import GuestControl
 import RPC
 
 /// Typed `runnerctl`-side client. One connection, one method per catalogued call.
@@ -155,8 +156,15 @@ public actor DaemonClient {
     try await call(.instanceGet, InstanceGetRequest(id: id))
   }
 
-  public func instanceCreate(profile: String) async throws -> InstanceInfoDTO {
-    try await call(.instanceCreate, InstanceCreateRequest(profile: profile))
+  /// `purpose`/`ttlMs`/`imageOverride` are the maintenance-instance knobs; omitting all three is
+  /// exactly the ordinary `vm create` a runner instance comes from.
+  public func instanceCreate(
+    profile: String, purpose: String? = nil, ttlMs: Int64? = nil, imageOverride: String? = nil
+  ) async throws -> InstanceInfoDTO {
+    try await call(
+      .instanceCreate,
+      InstanceCreateRequest(
+        profile: profile, purpose: purpose, ttlMs: ttlMs, imageOverride: imageOverride))
   }
 
   public func instanceStop(id: String, force: Bool) async throws -> InstanceInfoDTO {
@@ -177,6 +185,10 @@ public actor DaemonClient {
 
   public func instanceSSHInfo(id: String) async throws -> InstanceSSHInfo {
     try await call(.instanceSSHInfo, InstanceSSHInfoRequest(id: id))
+  }
+
+  public func instanceSelfTest(id: String) async throws -> SelfTestResult {
+    try await call(.instanceSelfTest, InstanceSelfTestRequest(id: id))
   }
 
   /// Streams `instance.exec`. Output arrives as it is produced; `.exited` is yielded exactly once,

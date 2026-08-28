@@ -388,6 +388,10 @@ public actor DaemonRuntime {
         InstanceReconciler(
           instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
           retention: { await instances.failedInstanceRetention() }, images: images),
+        // Right after the instance sweep, and before the orchestrator plans: a pinned VM whose ttl
+        // has passed is capacity this pass should already see as free.
+        MaintenanceInstanceReaper(
+          instances: instanceRows, manager: instances, events: eventLog),
         // After the instance sweep: a VM the reconciler has just interrupted is what tells session
         // recovery the runner behind it is gone. Before the orchestrator: the sessions it closes
         // free the capacity that pass is about to plan against.

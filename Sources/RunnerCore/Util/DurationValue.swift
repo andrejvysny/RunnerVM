@@ -21,6 +21,13 @@ public struct DurationValue: Hashable, Sendable, Comparable, CustomStringConvert
   /// Whole seconds, truncating sub-second precision. Timeouts are compared in seconds everywhere.
   public var seconds: Int64 { duration.components.seconds }
 
+  /// Whole milliseconds. What the wire uses wherever a duration crosses an RPC boundary
+  /// (`timeoutMs`, `ttlMs`), which is finer than the `seconds` the configuration compares in.
+  public var milliseconds: Int64 {
+    let parts = duration.components
+    return parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000
+  }
+
   public var isPositive: Bool { duration > .zero }
 
   // MARK: - Units

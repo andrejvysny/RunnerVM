@@ -370,3 +370,103 @@ import Testing
     }
   }
 }
+
+/// `instance.create`'s maintenance fields (Phase D8). All three are optional on the wire, so a
+/// client that predates them keeps producing a payload this daemon accepts and a daemon that
+/// predates them keeps producing an `InstanceInfoDTO` this client accepts.
+@Suite struct InstanceCreateDTOTests {
+  @Test func theOldestShapeStillDecodes() throws {
+    let request = try JSONDecoder().decode(
+      InstanceCreateRequest.self, from: Data(#"{"profile":"ubuntu-24"}"#.utf8))
+    #expect(request == InstanceCreateRequest(profile: "ubuntu-24"))
+    #expect(request.purpose == nil)
+    #expect(request.ttlMs == nil)
+    #expect(request.imageOverride == nil)
+  }
+
+  /// A field this build does not know about must never be a decode failure: the daemon and the
+  /// CLI are upgraded separately.
+  @Test func unknownKeysAreTolerated() throws {
+    let json = """
+      {"profile":"ubuntu-24","purpose":"maintenance","ttlMs":900000,
+       "imageOverride":"ghcr.io/acme/candidate:rc1","somethingNewer":true}
+      """
+    let request = try JSONDecoder().decode(InstanceCreateRequest.self, from: Data(json.utf8))
+    #expect(request.profile == "ubuntu-24")
+    #expect(request.purpose == "maintenance")
+    #expect(request.ttlMs == 900_000)
+    #expect(request.imageOverride == "ghcr.io/acme/candidate:rc1")
+  }
+
+  @Test func absentFieldsAreOmittedFromTheEncodedPayload() throws {
+    let data = try JSONEncoder().encode(InstanceCreateRequest(profile: "ubuntu-24"))
+    let text = String(decoding: data, as: UTF8.self)
+    #expect(!text.contains("purpose"))
+    #expect(!text.contains("ttlMs"))
+    #expect(!text.contains("imageOverride"))
+    #expect(try JSONDecoder().decode(InstanceCreateRequest.self, from: data)
+      == InstanceCreateRequest(profile: "ubuntu-24"))
+  }
+
+  @Test func maintenanceFieldsRoundTrip() throws {
+    let request = InstanceCreateRequest(
+      profile: "mac", purpose: "maintenance", ttlMs: 600_000, imageOverride: "sha256:abc")
+    let data = try JSONEncoder().encode(request)
+    #expect(try JSONDecoder().decode(InstanceCreateRequest.self, from: data) == request)
+  }
+
+  /// The two fields `vm list` and `vm show` read. A daemon predating them omits both, and the
+  /// client must read that as "an ordinary runner" rather than refusing to decode.
+  @Test func instanceInfoDefaultsThePurposeFieldsWhenAbsent() throws {
+    let json = """
+      {"id":"i-1","name":"rvm-linux-1","profile":"linux","imageDigest":"sha256:a",
+       "state":"idle","lifecycle":"ephemeral","workerGeneration":1,"cpuCount":2,
+       "memoryBytes":1,"diskBytes":1,"diskReservationBytes":1,"tainted":false,
+       "jobsConsumed":0,"retireAfterSession":false,"createdAt":"2026-01-01T00:00:00.000Z"}
+      """
+    let info = try JSONDecoder().decode(InstanceInfoDTO.self, from: Data(json.utf8))
+    #expect(info.purpose == nil)
+    #expect(info.pinnedUntil == nil)
+    #expect(!info.isMaintenance)
+  }
+
+  @Test func instanceInfoCarriesThePurposeAndPin() throws {
+    var info = FakeDaemonService.sampleInstance(profile: "linux")
+    info.purpose = "maintenance"
+    info.pinnedUntil = "2026-01-01T00:15:00.000Z"
+    let decoded = try JSONDecoder().decode(
+      InstanceInfoDTO.self, from: try JSONEncoder().encode(info))
+    #expect(decoded == info)
+    #expect(decoded.isMaintenance)
+  }
+
+  /// The client wrapper has to put the three knobs on the wire; `runnerctl vm create --pinned` is
+  /// the only thing that ever sets them.
+  @Test func theClientForwardsTheMaintenanceKnobs() async throws {
+    let socket = try makeSocketPath()
+    defer { removeSocketDirectory(socket) }
+    let service = FakeDaemonService()
+    let server = DaemonServer(service: service, socketPath: socket)
+    try await server.start()
+    let client = try await DaemonClient.connect(socketPath: socket)
+    _ = try await client.instanceCreate(profile: "linux")
+    #expect(await service.createRequest() == InstanceCreateRequest(profile: "linux"))
+    let created = try await client.instanceCreate(
+      profile: "linux", purpose: "maintenance", ttlMs: 900_000, imageOverride: "sha256:abc")
+    #expect(await service.createRequest()?.purpose == "maintenance")
+    #expect(await service.createRequest()?.ttlMs == 900_000)
+    #expect(await service.createRequest()?.imageOverride == "sha256:abc")
+    #expect(created.isMaintenance)
+    await client.close()
+    await server.stop()
+  }
+
+  @Test func ttlBoundsAreThePublishedOnes() {
+    #expect(MaintenanceTTL.minimumMs == 10_000)
+    #expect(MaintenanceTTL.maximumMs == 86_400_000)
+    #expect(MaintenanceTTL.defaultMs == 900_000)
+    #expect(MaintenanceTTL.range.contains(MaintenanceTTL.defaultMs))
+    #expect(!MaintenanceTTL.range.contains(9_999))
+    #expect(!MaintenanceTTL.range.contains(86_400_001))
+  }
+}

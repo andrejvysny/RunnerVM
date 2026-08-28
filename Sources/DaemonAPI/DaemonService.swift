@@ -1,4 +1,5 @@
 import Foundation
+import GuestControl
 
 /// What `runnerd` must provide for the M1 slice of the catalogue. `DaemonServer` routes decoded
 /// envelopes here; `DaemonClient` mirrors it over the socket.
@@ -60,6 +61,8 @@ public protocol DaemonService: Sendable {
   func instanceTaint(_ request: InstanceTaintRequest) async throws -> InstanceInfoDTO
   func instanceMetrics(_ request: InstanceMetricsRequest) async throws -> InstanceMetricsResponse
   func instanceSSHInfo(_ request: InstanceSSHInfoRequest) async throws -> InstanceSSHInfo
+  /// Relays `agent.selfTest` to the guest. Read-only in the guest and safe during a job.
+  func instanceSelfTest(_ request: InstanceSelfTestRequest) async throws -> SelfTestResult
 
   /// Streams `instance.exec`. `emit` is called once per output chunk, in order; the returned
   /// exit code becomes the terminal payload-bearing chunk.

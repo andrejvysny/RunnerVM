@@ -142,7 +142,7 @@ import Testing
   @Test func catalogueMatchesTheProtocolTable() {
     let expected: [GuestMethod: MethodClass] = [
       .hello: .readOnly, .health: .readOnly, .getInfo: .readOnly, .getMetrics: .readOnly,
-      .runnerStatus: .readOnly,
+      .selfTest: .readOnly, .runnerStatus: .readOnly,
       .resizeDisk: .idempotentMutation, .stopRunner: .idempotentMutation,
       .cleanup: .idempotentMutation,
       .startRunner: .singleShot, .exec: .singleShot, .shutdown: .singleShot,
@@ -153,7 +153,7 @@ import Testing
     }
     #expect(GuestMethod.allCases.map(\.rawValue).sorted() == [
       "agent.cleanup", "agent.exec", "agent.getInfo", "agent.getMetrics", "agent.health",
-      "agent.hello", "agent.resizeDisk", "agent.runnerStatus", "agent.shutdown",
+      "agent.hello", "agent.resizeDisk", "agent.runnerStatus", "agent.selfTest", "agent.shutdown",
       "agent.startRunner", "agent.stopRunner",
     ])
     #expect(GuestMethod.allCases.filter(\.isStreaming) == [.exec])
@@ -168,5 +168,64 @@ import Testing
     #expect(GuestCoding.date(from: text) == date)
     // The agent may gain sub-second precision later; the host must still parse it.
     #expect(GuestCoding.date(from: "2026-08-25T12:00:00.250Z") != nil)
+  }
+}
+
+/// `agent.selfTest` (Proto/guest_agent.md). The Go agent owns the wire shape; these expectations
+/// are the literals from the protocol document, so a renamed key fails the build rather than a
+/// qualification run.
+@Suite struct SelfTestWireTests {
+  @Test func resultPinsTheDocumentedShape() throws {
+    let result = SelfTestResult(checks: [
+      SelfTestCheck(name: "keychain.create", ok: true),
+      SelfTestCheck(name: "codesign.verify", ok: false, detail: "no identity found"),
+    ])
+    #expect(try GuestCoding.payload(result).encodedString() == """
+      {"checks":[{"detail":"","name":"keychain.create","ok":true},\
+      {"detail":"no identity found","name":"codesign.verify","ok":false}]}
+      """)
+  }
+
+  @Test func resultRoundTrips() throws {
+    let result = SelfTestResult(checks: [SelfTestCheck(name: "sign", ok: true, detail: "ok")])
+    let decoded = try GuestCoding.decode(
+      SelfTestResult.self, from: try GuestCoding.payload(result))
+    #expect(decoded == result)
+    #expect(decoded.passed)
+  }
+
+  /// A Linux guest answers `{checks: []}`, which is a pass, not an error.
+  @Test func anEmptyResultIsAPass() throws {
+    let decoded = try GuestCoding.decode(
+      SelfTestResult.self, from: try StrictJSON.parse(Array(#"{"checks":[]}"#.utf8)))
+    #expect(decoded.checks.isEmpty)
+    #expect(decoded.passed)
+  }
+
+  /// Lenient in one direction only: a missing `checks` or `detail` decodes to the empty value a
+  /// guest that omitted it meant, while an unknown key is simply ignored.
+  @Test func decodeToleratesAbsentAndUnknownKeys() throws {
+    let decoded = try GuestCoding.decode(
+      SelfTestResult.self,
+      from: try StrictJSON.parse(Array("""
+        {"checks":[{"name":"sign","ok":true,"durationMs":12}],"extra":"ignored"}
+        """.utf8)))
+    #expect(decoded.checks == [SelfTestCheck(name: "sign", ok: true, detail: "")])
+    let empty = try GuestCoding.decode(
+      SelfTestResult.self, from: try StrictJSON.parse(Array("{}".utf8)))
+    #expect(empty == SelfTestResult())
+  }
+
+  @Test func oneFailedCheckFailsTheWholeResult() {
+    let result = SelfTestResult(checks: [
+      SelfTestCheck(name: "a", ok: true), SelfTestCheck(name: "b", ok: false, detail: "boom"),
+    ])
+    #expect(!result.passed)
+  }
+
+  @Test func selfTestIsCataloguedAsReadOnly() {
+    #expect(GuestMethod.selfTest.rawValue == "agent.selfTest")
+    #expect(GuestMethod.selfTest.methodClass == .readOnly)
+    #expect(!GuestMethod.selfTest.isStreaming)
   }
 }

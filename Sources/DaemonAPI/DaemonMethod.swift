@@ -51,6 +51,8 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   case instanceExec = "instance.exec"
   case instanceSSHInfo = "instance.sshInfo"
   case instanceMetrics = "instance.metrics"
+  /// Relays `agent.selfTest`: the guest's own qualification checks (Proto/guest_agent.md).
+  case instanceSelfTest = "instance.selfTest"
 
   case runnerList = "runner.list"
   case runnerGet = "runner.get"
@@ -103,7 +105,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .registryLogin, .registryLogout, .registryStatus,
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,
     .instanceTaint,
-    .instanceExec, .instanceMetrics, .instanceSSHInfo,
+    .instanceExec, .instanceMetrics, .instanceSSHInfo, .instanceSelfTest,
     .runnerList, .runnerGet, .scaleSetList,
     .authStatus, .authLogin, .authLogout, .githubTest, .debugRunJIT, .debugDemandSet,
     .debugScaleSetReconnect,

@@ -92,6 +92,17 @@ public struct WorkerProcessMetrics: Codable, Sendable, Hashable {
   }
 }
 
+// MARK: - instance.selfTest
+
+/// `instance.selfTest`. Relays `agent.selfTest` to the instance's guest agent exactly as
+/// `instance.metrics` relays `agent.getMetrics`; the answer is the guest's `SelfTestResult`
+/// verbatim, so runnerctl and the daemon can never disagree about what the guest reported.
+public struct InstanceSelfTestRequest: Codable, Sendable, Hashable {
+  public var id: String
+
+  public init(id: String) { self.id = id }
+}
+
 // MARK: - instance.sshInfo
 
 public struct InstanceSSHInfoRequest: Codable, Sendable, Hashable {

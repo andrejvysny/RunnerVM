@@ -6,6 +6,33 @@ import Persistence
 import RunnerCore
 import RunnerLogging
 
+/// Everything `instance.create` can ask for beyond "one VM of this profile".
+///
+/// Defaulted throughout, so the scheduler's own `create(profileName:)` and every pre-existing
+/// call site keep meaning exactly what they meant before: an ordinary, unpinned runner VM.
+public struct InstanceCreateOptions: Sendable, Hashable {
+  /// `runner` (the scheduler owns it) or `maintenance` (pinned; the scheduler never plans it).
+  public var purpose: InstancePurpose
+  /// Absolute deadline `MaintenanceInstanceReaper` deletes the instance at. Required for
+  /// `maintenance`, meaningless for `runner` — the daemon handler is what enforces that.
+  public var pinnedUntil: Date?
+  /// Replaces the profile's `image:` for this instance only. The override goes through the same
+  /// `images.reserve` resolution/pin path the profile reference would, so a registry reference is
+  /// pulled and a digest is pinned exactly as usual.
+  public var imageOverride: String?
+
+  public init(
+    purpose: InstancePurpose = .runner, pinnedUntil: Date? = nil, imageOverride: String? = nil
+  ) {
+    self.purpose = purpose
+    self.pinnedUntil = pinnedUntil
+    self.imageOverride = imageOverride
+  }
+
+  /// What the scheduler asks for.
+  public static let runner = InstanceCreateOptions()
+}
+
 /// `InstanceManager.create` and its lifecycle-ladder helpers. Split out of `InstanceManager.swift`
 /// to keep that file under its line budget; every member below runs actor-isolated on
 /// `InstanceManager` exactly as if it were declared there.
@@ -19,7 +46,9 @@ extension InstanceManager {
   /// the same serialization point `prune`/`delete` run on -- so a concurrent `image.prune` cannot
   /// delete the image between inspection and use. Any failure before the row lands releases that
   /// pin; success converts it into the permanent `instance` pin (`plan(instanceId:...)`).
-  public func create(profileName: String) async throws -> InstanceRecord {
+  public func create(
+    profileName: String, options: InstanceCreateOptions = .runner
+  ) async throws -> InstanceRecord {
     guard let profileRow = try await profiles.get(name: profileName) else {
       throw SchedulerError.unknownProfile(name: profileName)
     }
@@ -27,13 +56,16 @@ extension InstanceManager {
     let profile = try profileRow.decodedConfig()
 
     let instanceId = InstanceID.generate()
+    // The override stands in for the profile's reference here and nowhere else: every later check
+    // (guest OS, macOS platform floors, runner freshness, admission) grades the image that was
+    // actually reserved, which is the whole point of qualifying a candidate image this way.
     let (digest, image) = try await images.reserve(
-      reference: profile.image, for: instanceId, profile: profile.name)
+      reference: options.imageOverride ?? profile.image, for: instanceId, profile: profile.name)
     let planned: (record: InstanceRecord, macos: MacOSInstancePlatformSpec?)
     do {
       planned = try await plan(
         instanceId: instanceId, digest: digest, image: image, profile: profile,
-        profileRow: profileRow)
+        profileRow: profileRow, options: options)
     } catch {
       try? await images.release(planning: instanceId)
       throw error
@@ -46,7 +78,7 @@ extension InstanceManager {
   /// `planning` pin if anything here throws.
   private func plan(
     instanceId: InstanceID, digest: ImageDigest, image: ImageInfo, profile: RunnerProfileConfig,
-    profileRow: RunnerProfileRecord
+    profileRow: RunnerProfileRecord, options: InstanceCreateOptions
   ) async throws -> (record: InstanceRecord, macos: MacOSInstancePlatformSpec?) {
     guard image.metadata.os == profile.guestOS else {
       throw ImageError.incompatibleGuestOS(expected: profile.guestOS, actual: image.metadata.os)
@@ -57,7 +89,7 @@ extension InstanceManager {
       for: profile.resources.diskBytes, image: image)
     let record = makeRecord(
       id: instanceId, profile: profile, profileId: profileRow.id, digest: digest,
-      reservation: reservation)
+      reservation: reservation, options: options)
     try await admit(record, profile: profile, profileId: profileRow.id, reservation: reservation)
     // Convert: add the permanent pin before dropping the temporary one, so the digest is never
     // observably unpinned.
@@ -181,7 +213,7 @@ extension InstanceManager {
 
   private func makeRecord(
     id: InstanceID, profile: RunnerProfileConfig, profileId: RunnerProfileID, digest: ImageDigest,
-    reservation: UInt64
+    reservation: UInt64, options: InstanceCreateOptions
   ) -> InstanceRecord {
     InstanceRecord(
       id: id, profileId: profileId, imageDigest: digest, hostId: hostId,
@@ -190,7 +222,8 @@ extension InstanceManager {
       cpuCount: profile.resources.cpuCount, memoryBytes: profile.resources.memoryBytes,
       diskBytes: profile.resources.diskBytes, diskReservationBytes: reservation,
       macAddress: InstanceSpecFile.randomMACAddress(),
-      instancePath: paths.instanceDir(id).path(percentEncoded: false), createdAt: .now)
+      instancePath: paths.instanceDir(id).path(percentEncoded: false), createdAt: .now,
+      purpose: options.purpose, pinnedUntil: options.pinnedUntil.map(DatabaseDate.init))
   }
 
   private func bringUp(

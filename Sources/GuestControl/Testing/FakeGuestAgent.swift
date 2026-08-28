@@ -39,6 +39,8 @@ public actor FakeGuestAgent {
     public var health: [HealthResponse]
     public var info: GuestInfo
     public var metrics: GuestMetrics
+    /// `agent.selfTest`. Defaults to the Linux answer -- nothing to test, which is a pass.
+    public var selfTest: SelfTestResult
     public var resizeDisk: ResizeDiskResponse
     public var exec: [ExecStep]
     /// Consulted before `exec`; see `ExecRoute`.
@@ -61,6 +63,7 @@ public actor FakeGuestAgent {
       health: [HealthResponse] = [HealthResponse(state: .ready)],
       info: GuestInfo = Script.defaultInfo,
       metrics: GuestMetrics = Script.defaultMetrics,
+      selfTest: SelfTestResult = SelfTestResult(),
       resizeDisk: ResizeDiskResponse = ResizeDiskResponse(grown: true, rootBytes: 42 << 30),
       exec: [ExecStep] = [.stdout("ok\n"), .exit(0)],
       execRoutes: [ExecRoute] = [],
@@ -75,6 +78,7 @@ public actor FakeGuestAgent {
       self.health = health
       self.info = info
       self.metrics = metrics
+      self.selfTest = selfTest
       self.resizeDisk = resizeDisk
       self.exec = exec
       self.execRoutes = execRoutes
@@ -157,6 +161,8 @@ public actor FakeGuestAgent {
 
   public func setMetrics(_ metrics: GuestMetrics) { script.metrics = metrics }
 
+  public func setSelfTest(_ result: SelfTestResult) { script.selfTest = result }
+
   public func setInfo(_ info: GuestInfo) { script.info = info }
 
   public func setBootId(_ bootId: String) { script.hello.bootId = bootId }
@@ -201,6 +207,7 @@ public actor FakeGuestAgent {
     await unary(.health) { [self] _ in try GuestCoding.payload(await nextHealth()) }
     await unary(.getInfo) { [self] _ in try GuestCoding.payload(await currentInfo()) }
     await unary(.getMetrics) { [self] _ in try GuestCoding.payload(await currentMetrics()) }
+    await unary(.selfTest) { [self] _ in try GuestCoding.payload(await currentSelfTest()) }
     await unary(.resizeDisk) { [self] _ in try GuestCoding.payload(await currentResize()) }
     await unary(.startRunner) { [self] envelope in
       try GuestCoding.payload(
@@ -257,6 +264,8 @@ public actor FakeGuestAgent {
   private func currentInfo() -> GuestInfo { script.info }
 
   private func currentMetrics() -> GuestMetrics { script.metrics }
+
+  private func currentSelfTest() -> SelfTestResult { script.selfTest }
 
   private func currentResize() -> ResizeDiskResponse { script.resizeDisk }
 

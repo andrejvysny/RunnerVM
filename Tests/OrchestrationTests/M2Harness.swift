@@ -44,6 +44,9 @@ struct M2Harness {
   let hostId = HostID(rawValue: "test-host")
 
   static let linuxImageName = "test-linux"
+  /// A second Linux image, for the cases that need two distinct digests on one host: an
+  /// `imageOverride` has to be provably *not* the one the profile names.
+  static let alternateLinuxImageName = "test-linux-alt"
   static let macImageName = "test-mac"
   static let imageClock = Date(timeIntervalSince1970: 1_756_000_000)
 
@@ -234,6 +237,15 @@ struct M2Harness {
     let disk = try sparseFile(named: "linux.img", bytes: 32 << 20)
     return try await images.importLocal(
       disk: disk, nvram: nil, os: .linux, name: Self.linuxImageName)
+  }
+
+  /// Same shape as `importLinuxImage`, one page larger: `ImageStore` derives the content digest
+  /// from the bytes, so a different size is the cheapest way to get a different image.
+  @discardableResult
+  func importAlternateLinuxImage() async throws -> ManagedImage {
+    let disk = try sparseFile(named: "linux-alt.img", bytes: (32 << 20) + 4_096)
+    return try await images.importLocal(
+      disk: disk, nvram: nil, os: .linux, name: Self.alternateLinuxImageName)
   }
 
   /// A macOS image only passes admission when it declares its platform *and* its sizing floors,

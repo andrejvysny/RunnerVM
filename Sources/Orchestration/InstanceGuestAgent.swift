@@ -24,6 +24,10 @@ extension InstanceManager {
     try await agentClient(id).getInfo()
   }
 
+  public func selfTest(id: InstanceID) async throws -> SelfTestResult {
+    try await agentClient(id).selfTest()
+  }
+
   public func exec(
     id: InstanceID, _ request: ExecRequest
   ) async throws -> AsyncThrowingStream<ExecEvent, any Error> {

@@ -78,6 +78,64 @@ public struct GuestInfo: Codable, Sendable, Equatable {
   }
 }
 
+// MARK: - agent.selfTest
+
+/// One step of `agent.selfTest`, in the order the agent ran it (Proto/guest_agent.md).
+///
+/// The agent stops at the first failure, so at most the last check of a result has `ok: false`.
+/// `detail` is always present on the wire -- `""` when there is nothing to add -- but decoding
+/// tolerates its absence so a guest that omits an empty string is not a protocol error.
+public struct SelfTestCheck: Codable, Sendable, Equatable, Hashable {
+  public var name: String
+  public var ok: Bool
+  public var detail: String
+
+  public init(name: String, ok: Bool, detail: String = "") {
+    self.name = name
+    self.ok = ok
+    self.detail = detail
+  }
+}
+
+extension SelfTestCheck {
+  private enum CodingKeys: String, CodingKey {
+    case name, ok, detail
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      name: try c.decode(String.self, forKey: .name),
+      ok: try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false,
+      detail: try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+    )
+  }
+}
+
+/// `agent.selfTest` → the checks the guest ran on itself. A Linux guest has none to run and
+/// answers `{checks: []}`, which is a pass rather than an error.
+public struct SelfTestResult: Codable, Sendable, Equatable, Hashable {
+  public var checks: [SelfTestCheck]
+
+  public init(checks: [SelfTestCheck] = []) {
+    self.checks = checks
+  }
+
+  /// No check failed. Vacuously true for a guest with nothing to test.
+  public var passed: Bool { checks.allSatisfy(\.ok) }
+}
+
+extension SelfTestResult {
+  private enum CodingKeys: String, CodingKey {
+    case checks
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(checks: try c.decodeIfPresent([SelfTestCheck].self, forKey: .checks) ?? [])
+  }
+}
+
 // MARK: - agent.resizeDisk
 
 /// `agent.resizeDisk` → whether the root filesystem grew into the space the host allocated.

@@ -379,6 +379,11 @@ public struct InstanceInfoDTO: Codable, Sendable, Hashable {
   public var retireAfterSession: Bool
   public var failureCode: String?
   public var failureMessage: String?
+  /// `InstancePurpose` raw value. `nil` from a daemon that predates the field, which only ever
+  /// created runner instances -- read it as `runner`.
+  public var purpose: String?
+  /// RFC 3339. When the maintenance reaper deletes this instance; `nil` for a runner instance.
+  public var pinnedUntil: String?
 
   public init(
     id: String, name: String, profile: String, imageDigest: String, state: String,
@@ -388,7 +393,8 @@ public struct InstanceInfoDTO: Codable, Sendable, Hashable {
     startedAt: String? = nil, agentReadyAt: String? = nil, stoppedAt: String? = nil,
     bootId: String? = nil, tainted: Bool = false, taintReason: String? = nil,
     jobsConsumed: Int = 0, retireAfterSession: Bool = false,
-    failureCode: String? = nil, failureMessage: String? = nil
+    failureCode: String? = nil, failureMessage: String? = nil, purpose: String? = nil,
+    pinnedUntil: String? = nil
   ) {
     self.id = id
     self.name = name
@@ -414,7 +420,12 @@ public struct InstanceInfoDTO: Codable, Sendable, Hashable {
     self.retireAfterSession = retireAfterSession
     self.failureCode = failureCode
     self.failureMessage = failureMessage
+    self.purpose = purpose
+    self.pinnedUntil = pinnedUntil
   }
+
+  /// True only for an explicitly maintenance-purpose instance; an absent field is a runner.
+  public var isMaintenance: Bool { purpose == InstancePurpose.maintenance.rawValue }
 }
 
 public struct InstanceListResponse: Codable, Sendable, Hashable {
@@ -423,10 +434,62 @@ public struct InstanceListResponse: Codable, Sendable, Hashable {
   public init(instances: [InstanceInfoDTO]) { self.instances = instances }
 }
 
+/// Bounds on `instance.create {purpose: maintenance, ttlMs}`. Part of the wire contract, not of
+/// the lifecycle: `runnerctl` defaults `--ttl` to `defaultMs` and the daemon refuses anything
+/// outside `range` with `MAINTENANCE_TTL_INVALID`.
+///
+/// The floor exists because a ttl shorter than a boot is a create that reaps itself before the
+/// guest agent ever answers; the ceiling exists because the whole point of the pin is that the
+/// scheduler will never take the VM back, so the ttl is the only thing that ever does.
+public enum MaintenanceTTL {
+  public static let minimumMs: Int64 = 10_000
+  public static let maximumMs: Int64 = 24 * 60 * 60 * 1_000
+  public static let range: ClosedRange<Int64> = minimumMs...maximumMs
+  /// What `runnerctl vm create --pinned` asks for when no `--ttl` is given.
+  public static let defaultMs: Int64 = 15 * 60 * 1_000
+}
+
+/// `instance.create`. Everything past `profile` is optional on decode, so a client that predates
+/// the maintenance fields keeps producing a valid payload (see `ImageBuildRequest` for the same
+/// lenient-decode convention).
 public struct InstanceCreateRequest: Codable, Sendable, Hashable {
   public var profile: String
+  /// `InstancePurpose` raw value: `runner` (the default) or `maintenance`. A maintenance instance
+  /// is pinned -- the scheduler never plans it away -- and exists to qualify an image or run a
+  /// smoke test rather than to take a job.
+  public var purpose: String?
+  /// How long a maintenance instance may live before the reaper deletes it. Mandatory with
+  /// `purpose: maintenance`, refused without it, and bounded to 10s...24h.
+  public var ttlMs: Int64?
+  /// Replaces the profile's `image:` for this one instance -- any reference the profile itself
+  /// could carry (digest, local name, registry reference). Maintenance purpose only: a runner VM
+  /// must always be the image its profile names.
+  public var imageOverride: String?
 
-  public init(profile: String) { self.profile = profile }
+  public init(
+    profile: String, purpose: String? = nil, ttlMs: Int64? = nil, imageOverride: String? = nil
+  ) {
+    self.profile = profile
+    self.purpose = purpose
+    self.ttlMs = ttlMs
+    self.imageOverride = imageOverride
+  }
+}
+
+extension InstanceCreateRequest {
+  private enum CodingKeys: String, CodingKey {
+    case profile, purpose, ttlMs, imageOverride
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      profile: try c.decode(String.self, forKey: .profile),
+      purpose: try c.decodeIfPresent(String.self, forKey: .purpose),
+      ttlMs: try c.decodeIfPresent(Int64.self, forKey: .ttlMs),
+      imageOverride: try c.decodeIfPresent(String.self, forKey: .imageOverride)
+    )
+  }
 }
 
 public struct InstanceGetRequest: Codable, Sendable, Hashable {

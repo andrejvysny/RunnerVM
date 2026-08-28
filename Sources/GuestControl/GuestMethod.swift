@@ -7,6 +7,7 @@ public enum GuestMethod: String, CaseIterable, Sendable, Hashable {
   case health = "agent.health"
   case getInfo = "agent.getInfo"
   case getMetrics = "agent.getMetrics"
+  case selfTest = "agent.selfTest"
   case resizeDisk = "agent.resizeDisk"
   case startRunner = "agent.startRunner"
   case runnerStatus = "agent.runnerStatus"
@@ -19,7 +20,7 @@ public enum GuestMethod: String, CaseIterable, Sendable, Hashable {
   /// and re-running an arbitrary argv after a transport failure is never safe.
   public var methodClass: MethodClass {
     switch self {
-    case .hello, .health, .getInfo, .getMetrics, .runnerStatus: .readOnly
+    case .hello, .health, .getInfo, .getMetrics, .selfTest, .runnerStatus: .readOnly
     case .resizeDisk, .stopRunner, .cleanup: .idempotentMutation
     case .startRunner, .exec, .shutdown: .singleShot
     }

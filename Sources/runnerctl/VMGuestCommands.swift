@@ -121,6 +121,41 @@ extension VM {
     }
   }
 
+  struct SelfTest: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+      commandName: "self-test",
+      abstract: "Ask the guest agent to prove the guest can do what the image promises.",
+      discussion: """
+        Relays `agent.selfTest`. Read-only inside the guest and safe to run while a job is going. \
+        A macOS guest reports one row per codesigning step, in the order it ran them, stopping at \
+        the first failure; a Linux guest has nothing to test and reports no rows, which is a pass. \
+        Exits 1 if any check failed.
+        """)
+
+    @OptionGroup var options: GlobalOptions
+
+    @Argument(help: "Instance id.")
+    var id: String
+
+    func run() async throws {
+      let result = try await options.withDaemon { try await $0.instanceSelfTest(id: id) }
+      switch options.output {
+      case .json: try JSONOut.print(result)
+      case .human: print(SelfTest.render(result))
+      }
+      guard result.passed else { throw ExitCode(1) }
+    }
+
+    static func render(_ result: SelfTestResult) -> String {
+      guard !result.checks.isEmpty else {
+        return "no self-test checks on this guest (nothing to verify)"
+      }
+      return Table.render(
+        headers: ["", "CHECK", "DETAIL"],
+        rows: result.checks.map { [$0.ok ? "✓" : "✗", $0.name, Format.optional($0.detail)] })
+    }
+  }
+
   struct SSH: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "ssh",

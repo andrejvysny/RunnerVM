@@ -86,6 +86,7 @@ public actor DaemonServer {
     await request(.instanceTaint) { try await service.instanceTaint($0) }
     await request(.instanceMetrics) { try await service.instanceMetrics($0) }
     await request(.instanceSSHInfo) { try await service.instanceSSHInfo($0) }
+    await request(.instanceSelfTest) { try await service.instanceSelfTest($0) }
     await request(.runnerGet) { try await service.runnerGet($0) }
     await request(.authLogin) { try await service.authLogin($0) }
     await request(.debugRunJIT) { try await service.debugRunJIT($0) }

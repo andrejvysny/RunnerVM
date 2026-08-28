@@ -29,12 +29,43 @@ import Testing
     await server.stop()
   }
 
-  @Test func theThreeGuestMethodsAreImplemented() {
+  @Test func theGuestBackedMethodsAreImplemented() {
     #expect(DaemonMethod.instanceExec.isImplemented)
     #expect(DaemonMethod.instanceMetrics.isImplemented)
     #expect(DaemonMethod.instanceSSHInfo.isImplemented)
+    #expect(DaemonMethod.instanceSelfTest.isImplemented)
     #expect(DaemonMethod.instanceExec.isStreaming)
     #expect(DaemonMethod.instanceExec.methodClass == .singleShot)
+    // Relaying a guest self-test changes nothing on either side, so it is safe to retry.
+    #expect(DaemonMethod.instanceSelfTest.rawValue == "instance.selfTest")
+    #expect(DaemonMethod.instanceSelfTest.methodClass == .readOnly)
+    #expect(!DaemonMethod.instanceSelfTest.isStreaming)
+  }
+
+  /// The daemon adds nothing and grades nothing: what the guest reported is what the caller sees.
+  @Test func selfTestRelaysTheGuestResultVerbatim() async throws {
+    try await withDaemon { client, service in
+      #expect(try await client.instanceSelfTest(id: "vm-1") == SelfTestResult())
+      #expect(await service.selfTestId() == "vm-1")
+
+      let checks = SelfTestResult(checks: [
+        SelfTestCheck(name: "keychain.create", ok: true),
+        SelfTestCheck(name: "codesign.sign", ok: false, detail: "no identity"),
+      ])
+      await service.setSelfTestResult(checks)
+      let relayed = try await client.instanceSelfTest(id: "vm-2")
+      #expect(relayed == checks)
+      #expect(!relayed.passed)
+    }
+  }
+
+  @Test func selfTestForAnUnknownInstanceIsNotFound() async throws {
+    try await withDaemon { client, _ in
+      let error = await #expect(throws: DaemonClientError.self) {
+        try await client.instanceSelfTest(id: "missing")
+      }
+      #expect(error?.code == DaemonErrorCode.notFound)
+    }
   }
 
   @Test func metricsPassGuestTelemetryThroughUnchanged() async throws {

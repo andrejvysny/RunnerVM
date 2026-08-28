@@ -35,7 +35,7 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
 - [ ] D8 pinned maintenance instances (`purpose`/`pinned_until`, orchestrator exemptions, TTL
       reaper) + `runnerctl system smoke-test` + fix qualify-macos-image.sh (H2) + move shared
       helpers into lib/live-common.sh (live-macos-e2e.sh bug)
-- [ ] D9 guest CI keychain: `GuestAgent/internal/keychain`, startRunner fail-closed env,
+- [x] D9 guest CI keychain (Go + Swift selfTest wiring done; live e2e workflow pending docs sweep): `GuestAgent/internal/keychain`, startRunner fail-closed env,
       `agent.selfTest`, capability, Proto + Swift DTOs, e2e keychain job
 - [ ] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged)
 - [ ] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/

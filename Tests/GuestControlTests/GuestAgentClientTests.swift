@@ -52,6 +52,31 @@ import Testing
     }
   }
 
+  @Test func selfTestRelaysWhateverTheGuestReports() async throws {
+    let checks = SelfTestResult(checks: [
+      SelfTestCheck(name: "keychain.create", ok: true),
+      SelfTestCheck(name: "codesign.sign", ok: false, detail: "no identity"),
+    ])
+    try await withAgent { client, agent in
+      // The default script is the Linux answer: nothing to test, which passes.
+      #expect(try await client.selfTest() == SelfTestResult())
+      await agent.setSelfTest(checks)
+      let result = try await client.selfTest()
+      #expect(result == checks)
+      #expect(!result.passed)
+      #expect(await agent.callCount(.selfTest) == 2)
+    }
+  }
+
+  @Test func aGuestThatRefusesSelfTestSurfacesTheWireError() async throws {
+    try await withAgent { client, agent in
+      await agent.fail(
+        .selfTest, with: RPCErrorPayload(code: "NOT_SUPPORTED", message: "no such capability"))
+      let error = await #expect(throws: GuestAgentError.self) { try await client.selfTest() }
+      #expect(error?.message.contains("NOT_SUPPORTED") == true)
+    }
+  }
+
   @Test func infoMetricsAndResizeRoundTrip() async throws {
     try await withAgent { client, _ in
       let info = try await client.getInfo()
