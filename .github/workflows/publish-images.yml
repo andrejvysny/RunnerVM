@@ -1,0 +1,134 @@
+name: publish-images
+# Publishes a RunnerVM image to ghcr.io/andrejvysny/runnervm -- the catalogue documented in
+# docs/published-images.md.
+#
+# Why this cannot run on a GitHub-hosted runner: the build step (`runnerctl image build`) boots a
+# builder VM under Virtualization.framework, and GitHub-hosted macOS runners cannot nest VZ inside
+# their own hypervisor -- the same reason .github/workflows/github-integration.yml is self-hosted.
+# There is no hosted-runner path that could ever produce or push one of these images; see
+# scripts/publish-images.sh's own header comment.
+#
+# What the `runnervm-publisher`-labelled machine must have, registered as a bare-metal self-hosted
+# runner OUTSIDE any of RunnerVM's own scale sets (this is the publisher, not a job RunnerVM
+# schedules for itself), before this workflow is ever dispatched:
+#   - RunnerVM installed, with `runnerd` reachable via `runnerctl status` -- as a LaunchDaemon in
+#     production, or any long-lived process this runner's own environment can see. If runnerd is
+#     not at the default socket path, the runner service's own environment (not this workflow)
+#     must export RUNNERVM_SOCKET.
+#   - a stored ghcr.io credential with `write:packages`:
+#       echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u <user> --password-stdin
+#   - jq on PATH (scripts/publish-images.sh requires it).
+#
+# The very first push of a brand-new package additionally needs two one-time, by-hand steps in
+# GitHub's package settings (make it public, connect the repository) that this workflow does not
+# and cannot perform -- see docs/published-images.md, "First publish of a new package".
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package name under ghcr.io/andrejvysny/runnervm"
+        required: true
+        default: ubuntu-24-base
+      recipe:
+        description: "Recipe path (directory or Runnerfile) to build"
+        required: true
+        default: images/recipes/ubuntu-24
+      extraTag:
+        description: "Optional extra tag to publish alongside <date>/r<runner-version>/stable/v1"
+        required: false
+        default: ""
+  schedule:
+    # Monthly. docs/published-images.md "These images are perishable": a build goes tooOld 30 days
+    # after the first actions/runner release it misses, so a monthly rebuild+republish keeps
+    # `:stable` inside that window even across a month with zero runner releases.
+    - cron: "17 6 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-images-${{ inputs.package || 'ubuntu-24-base' }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.package || 'ubuntu-24-base' }}
+    runs-on: [self-hosted, macOS, ARM64, runnervm-publisher]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve run inputs
+        id: resolve
+        env:
+          PACKAGE_INPUT: ${{ inputs.package }}
+          RECIPE_INPUT: ${{ inputs.recipe }}
+          EXTRA_TAG_INPUT: ${{ inputs.extraTag }}
+        run: |
+          {
+            echo "package=${PACKAGE_INPUT:-ubuntu-24-base}"
+            echo "recipe=${RECIPE_INPUT:-images/recipes/ubuntu-24}"
+            echo "extraTag=${EXTRA_TAG_INPUT:-}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: "Guard: runnerd reachable and ghcr.io credential present"
+        run: |
+          command -v runnerctl >/dev/null 2>&1 || {
+            echo "::error::runnerctl not found on PATH -- install RunnerVM on this runnervm-publisher host first" >&2
+            exit 1
+          }
+          runnerctl status >/dev/null || {
+            echo "::error::'runnerctl status' failed -- runnerd is not reachable. Is it running? Does this runner's own environment export RUNNERVM_SOCKET?" >&2
+            exit 1
+          }
+          logged_in=$(runnerctl registry status --output json 2>/dev/null \
+            | jq -r '[.registries[]? | select(.registry=="ghcr.io" and .provider!=null)] | length') || logged_in=0
+          if [ "$logged_in" = "0" ]; then
+            echo "::error::no ghcr.io credential on this host -- run: echo \"\$GHCR_PAT\" | runnerctl registry login ghcr.io -u <user> --password-stdin" >&2
+            exit 1
+          fi
+
+      - name: Build image
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          RECIPE: ${{ steps.resolve.outputs.recipe }}
+        run: runnerctl image build "$RECIPE" --name "${PACKAGE}-build"
+
+      - name: Resolve the actions/runner version baked into the build
+        id: runner-version
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+        run: |
+          version=$(runnerctl image inspect "${PACKAGE}-build" --output json | jq -r '.runnerVersion // empty')
+          if [ -z "$version" ] || [ "$version" = "unknown" ]; then
+            echo "::error::could not resolve .runnerVersion from 'runnerctl image inspect' -- see scripts/publish-images.sh resolve_image()" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          EXTRA_TAG: ${{ steps.resolve.outputs.extraTag }}
+          RUNNER_VERSION: ${{ steps.runner-version.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/publish-report"
+          tags=(--tag "$(date -u +%Y-%m-%d)" --tag "r${RUNNER_VERSION}" --tag stable --tag v1)
+          if [ -n "$EXTRA_TAG" ]; then
+            tags+=(--tag "$EXTRA_TAG")
+          fi
+          bash scripts/publish-images.sh \
+            --image "${PACKAGE}-build" \
+            --package "$PACKAGE" \
+            --repo ghcr.io/andrejvysny/runnervm \
+            "${tags[@]}" \
+            --json-report "$RUNNER_TEMP/publish-report/report.json"
+
+      - name: Upload publish report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publish-report-${{ steps.resolve.outputs.package }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/publish-report/report.json
+          if-no-files-found: warn
+          retention-days: 90

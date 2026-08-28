@@ -38,7 +38,11 @@ public enum ExampleConfig {
     - name: ubuntu-24
       scope: engineering
 
-      image: ghcr.io/acme/runners/ubuntu-24:stable
+      # A tag resolves to a digest before any VM starts, and the digest is what lands on the
+      # instance record -- but the profile itself still points at a moving target. Pin the
+      # digest in production (`runnerctl image pull ...:stable` prints it):
+      #   image: ghcr.io/andrejvysny/runnervm/ubuntu-24-base@sha256:...
+      image: ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
 
       lifecycle: ephemeral
 
@@ -74,10 +78,12 @@ public enum ExampleConfig {
     collectRunnerDiagnostics: true
     diagnosticsTimeout: 60s
 
+  images:
+    prefetch: true              # pull every profile's registry image at config apply and at daemon start
+
   # Image update service (phase D6) and managed image sources (phase D7). Accepted and validated
   # now, acted on once those phases land. Uncomment to declare them ahead of time.
   # images:
-  #   prefetch: true            # pull every profile image at `config apply`, not at first job
   #   updates:
   #     enabled: true
   #     interval: 6h            # at least 15m while enabled

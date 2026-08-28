@@ -4,10 +4,12 @@ Prebuilt RunnerVM images, published as OCI artifacts under
 `ghcr.io/andrejvysny/runnervm`. A host that pulls one of these does not need the
 guest-agent binary, a recipe root, or a builder VM — see [Using one](#using-one).
 
-These are built by hand on an Apple Silicon Mac and pushed with
-[`scripts/publish-images.sh`](../scripts/publish-images.sh). There is no CI job that builds them and
-there cannot be one: GitHub-hosted macOS runners cannot nest Virtualization.framework, so no hosted
-runner can boot the builder VM ([`.github/workflows/github-integration.yml`](../.github/workflows/github-integration.yml)).
+These are built on an Apple Silicon Mac and pushed with
+[`scripts/publish-images.sh`](../scripts/publish-images.sh), either by hand or via
+[`.github/workflows/publish-images.yml`](../.github/workflows/publish-images.yml) on a self-hosted
+runner. There is no *hosted*-runner path that builds them and there cannot be one: GitHub-hosted
+macOS runners cannot nest Virtualization.framework, so no hosted runner can boot the builder VM
+([`.github/workflows/github-integration.yml`](../.github/workflows/github-integration.yml)).
 
 ## The catalogue
 
@@ -155,6 +157,29 @@ verified are re-fetched.
 | `<yyyy-mm-dd>` | the build date; immutable in practice, the tag to quote in a changelog |
 | `r<version>` | which `actions/runner` is baked in, e.g. `r2.337.0` |
 | `stable` | moving — points at the newest build. Never reference it from a profile. |
+| `v1` | moving — the major channel; walks forward across every v1.x rebuild the same way `stable` does. Kept distinct from `stable` so a future breaking change gets a `v2` without disturbing `stable`'s meaning. |
+
+## Automatic updates on hosts
+
+A host does not have to notice a stale image by hand. With `images.updates.enabled: true`, it
+re-resolves every tracked reference — `:stable` on a profile, or a managed macOS source — on an
+interval (`images.updates.interval`, jittered by `images.updates.jitter` so a fleet does not all
+check in lockstep), pulls whatever digest that tag now points at, qualifies the candidate with the
+same smoke test a manual build or pull would run, and only then promotes it: the local alias is
+repointed at the new digest in one atomic step.
+
+Two invariants that follow from this, spelled out fully in
+[`docs/design/distribution.md`](design/distribution.md) ("Update invariants"):
+
+- **An update never terminates a running VM.** An existing instance keeps the digest it was created
+  with; nothing forces it onto the newly promoted one.
+- **A failed update never replaces the currently promoted image.** A download, verify, or
+  qualification failure leaves the alias exactly where it was — the failure is recorded and retried
+  on the next interval, not surfaced as an outage.
+
+`runnerctl setup`'s wizard and `install.sh` default a fresh profile to `image: …:stable` with
+`images.updates.enabled: true` — a new install stays current with no operator intervention, while
+every VM already running keeps the digest it booted with until its own lifecycle recycles it.
 
 ## These images are perishable
 
@@ -175,12 +200,26 @@ will ignore.
 
 ## Publishing (maintainer)
 
+The automated path is
+[`.github/workflows/publish-images.yml`](../.github/workflows/publish-images.yml): dispatch it by
+hand (choose `package`/`recipe`/an optional extra tag) or let its monthly schedule fire. It runs on
+a self-hosted, bare-metal `runnervm-publisher`-labelled machine — the same "no hosted macOS runner
+can nest Virtualization.framework" constraint as everywhere else in this document, spelled out in
+the workflow's own header comment — builds the recipe, derives the `r<version>` tag from the
+build's own `actions/runner`, and pushes `<date>`/`r<version>`/`stable`/`v1` with
+[`scripts/publish-images.sh`](../scripts/publish-images.sh), uploading its JSON report as a build
+artifact. It assumes the publisher machine already has RunnerVM installed, `runnerd` running, and a
+ghcr.io credential stored; it does not create any of those, and it does not do the one-time package
+setup below — see the runbook.
+
+The underlying commands, for a one-off push or to debug a workflow failure by hand:
+
 ```bash
 echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u <user> --password-stdin
 
 scripts/publish-images.sh --image ubuntu-24 --package ubuntu-24-base \
   --repo ghcr.io/andrejvysny/runnervm \
-  --tag "$(date -u +%Y-%m-%d)" --tag r2.337.0 --tag stable --dry-run
+  --tag "$(date -u +%Y-%m-%d)" --tag r2.337.0 --tag stable --tag v1 --dry-run
 ```
 
 Drop `--dry-run` to push. The script refuses an image that is not `ready`, one with no guest agent,
@@ -189,11 +228,25 @@ already graded `stale`/`tooOld`; each refusal names the flag that overrides it. 
 uploads every chunk, the rest reuse those blobs. (The macOS SSH refusal is kept even though no
 macOS image is published from here — it is the check that would matter if one ever were.)
 
-Two one-time steps in the GitHub package settings after a package's first push: make it **public**
-(new packages default to private, and anonymous pull only works once it is public), and **connect
-it to this repository** — RunnerVM's manifest carries its own annotations plus
-`org.opencontainers.image.created`, not `org.opencontainers.image.source`, so the link is not
-inferred.
+### First publish of a new package (operator runbook, once)
+
+Neither the workflow above nor a bare `scripts/publish-images.sh` invocation can make a brand-new
+package (`ubuntu-24-base` today) pullable on its own — someone has to do this once, by hand:
+
+1. **Log in**, with a PAT scoped `write:packages`, on the machine that will run the publish:
+   ```bash
+   echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u <user> --password-stdin
+   ```
+2. **Run the publish** — the manual command above with `--dry-run` dropped, or a dispatch of
+   `publish-images.yml`.
+3. **Make the package public**, in the GitHub package's settings: new packages default to
+   **private**, and anonymous `runnerctl image pull` only works once it is public.
+4. **Connect it to this repository**, in the same settings page: RunnerVM's manifest carries its
+   own annotations plus `org.opencontainers.image.created`, not `org.opencontainers.image.source`,
+   so the package↔repo link is not inferred and has to be set by hand.
+
+Steps 3 and 4 are per-*package*, not per-push: once `ubuntu-24-base` is public and connected, every
+later publish — scripted or via the workflow — reuses the same settings without repeating them.
 
 Prove the round trip with the driver that already covers it end to end — build, real GitHub job,
 push, delete the local copy, pull back by immutable digest, second job on the re-pulled image:

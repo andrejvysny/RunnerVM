@@ -26,7 +26,8 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
 - [x] D3 `.github/workflows/release.yml` (tag == RunnerVMVersion gate, pkg install smoke, gh release)
 - [x] D4 `scripts/bootstrap.sh` (published as install.sh) + `Sources/HostSetup` + `runnerctl setup`
       (wizard, dscl account, launchd, PAT, pull, profiles-last flow, dry-run) + tests
-- [ ] D5 publish-images.yml (self-hosted) + docs; first `ubuntu-24-base:stable` publish = user step
+- [x] D5 publish-images.yml (self-hosted) + docs; first `ubuntu-24-base:stable` publish = user step
+      (operator-run: registry login, dispatch/schedule, make public + connect repo — unexecuted)
 - [ ] D6 `ImageUpdateService` + schema v4 `managed_images` + promoted-digest resolution +
       `image update check|run|status` + retention (keepPrevious)
 - [ ] D7 native managed macOS provisioning: `ImagePullPurpose.provisioningBase`,

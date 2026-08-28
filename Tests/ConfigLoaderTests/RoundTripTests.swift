@@ -78,6 +78,7 @@ struct RoundTripTests {
       failedInstanceRetention: 2h
 
     images:
+      prefetch: true
       cache:
         keepRecentlyUsed: 7d
 
@@ -113,7 +114,7 @@ struct RoundTripTests {
       - scope: engineering
         name: ubuntu-24
         os: linux
-        image: ghcr.io/acme/runners/ubuntu-24:stable
+        image: ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
         limits:
           maxInstances: 4
         ssh:
