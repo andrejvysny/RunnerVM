@@ -43,6 +43,9 @@ extension ImageBuilder {
   // MARK: - Physical teardown
 
   private func teardown(_ run: BuildRun) async {
+    // First: a macOS qualification VM is a second worker with a second directory, and leaving it
+    // running would hold host capacity nothing in the database accounts for.
+    await tearDownQualification(run)
     if let agent = run.agent {
       try? await agent.shutdown()
       await agent.close()
@@ -53,6 +56,8 @@ extension ImageBuilder {
       run.worker = nil
     }
     var lockReleased = true
+    // `run.layout` is `nil` when a macOS provisioning build already released its VM directory at
+    // seal time; there is then nothing left to wait on or move.
     if let layout = run.layout {
       lockReleased = await BuilderWorker.waitForExit(
         lock: layout.workerLock, interval: tuning.workerExitPollInterval,
@@ -78,7 +83,7 @@ extension ImageBuilder {
 
   /// `serial.log` and `worker.log` outlive the build directory, mirroring `instanceLogsDir`:
   /// `build.log` is already written straight into the log directory, so only these two move.
-  private func preserveDiagnostics(_ layout: VMBuildLayout, id: ImageBuildID) {
+  func preserveDiagnostics(_ layout: VMBuildLayout, id: ImageBuildID) {
     let destination = paths.buildLogDir(id)
     try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
     for source in [layout.serialLog, layout.workerLog] {
@@ -167,7 +172,7 @@ extension ImageBuilder {
       boot: ImageMetadata.Boot(type: .efi),
       capabilities: ImageMetadata.Capabilities(
         docker: report.dockerVersion != nil, ssh: report.sshEnabled, guestAgent: true,
-        labels: input.plan.labels.isEmpty ? nil : input.plan.labels),
+        labels: (input.plan?.labels).flatMap { $0.isEmpty ? nil : $0 }),
       provenance: provenance(run, base: base, report: report))
   }
 
@@ -199,9 +204,11 @@ extension ImageBuilder {
       docker: report.dockerVersion.map { ImageMetadata.Provenance.Docker(version: $0) },
       packages: report.packages.isEmpty ? nil : report.packages,
       kernelVersion: report.kernelVersion,
-      recipe: ImageMetadata.Provenance.Recipe(
-        path: input.recipe.path, sha256: input.recipe.sha256, from: base.reference,
-        args: input.args.isEmpty ? nil : input.args),
+      recipe: input.recipe.map {
+        ImageMetadata.Provenance.Recipe(
+          path: $0.path, sha256: $0.sha256, from: base.reference,
+          args: input.args.isEmpty ? nil : input.args)
+      },
       parentImageDigest: base.imageDigest?.rawValue)
   }
 }

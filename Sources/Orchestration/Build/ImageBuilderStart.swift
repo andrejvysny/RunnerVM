@@ -147,8 +147,12 @@ extension ImageBuilder {
   /// The capacity critical section (B3). Concurrency gate, free space, host budget and the two
   /// inserts all happen with nothing else admitted in between, so two builds -- or a build and a
   /// `vm create` -- can never both be admitted against the same snapshot.
+  /// `guestOS` is `.linux` for every Runnerfile build; a managed macOS provisioning build passes
+  /// `.macos`, so it is charged against `HostConstants.macOSGuestLimit` alongside the macOS runner
+  /// instances it shares the host with.
   func admit(
-    record: ImageBuildRecord, operation: OperationRecord, input: BuildInput
+    record: ImageBuildRecord, operation: OperationRecord, input: BuildInput,
+    guestOS: GuestOS = .linux
   ) async throws {
     let builds = builds
     let paths = paths
@@ -168,7 +172,7 @@ extension ImageBuilder {
           instances: instances, profiles: profiles,
           builds: RepositoryBuildReservations(builds: builds))
         let request = ResourceRequest(
-          guestOS: .linux, cpuCount: input.cpuCount, memoryBytes: input.memoryBytes,
+          guestOS: guestOS, cpuCount: input.cpuCount, memoryBytes: input.memoryBytes,
           diskReservationBytes: input.reservationBytes)
         let budget = InstanceAdmission.budget(
           configuration: configuration, probe: probe, paths: paths)

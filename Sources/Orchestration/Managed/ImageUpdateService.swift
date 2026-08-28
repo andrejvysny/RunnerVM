@@ -1,4 +1,5 @@
 import Foundation
+import ImageStore
 import Logging
 import Metrics
 import Persistence
@@ -7,13 +8,18 @@ import RunnerLogging
 
 /// What a `macosTart` track does once its upstream source digest has moved.
 ///
-/// Phase D6 only *notices*: a Tart export carries no RunnerVM guest agent, so it can never be
-/// promoted by pulling it -- it has to be provisioned into a new, locally sealed image first
-/// (`docs/design/distribution.md`, "Managed image sources"). D7 supplies that launcher; until it
-/// does, `ImageUpdateService` is constructed with `nil` here and the moved digest is recorded and
-/// reported rather than acted on.
+/// A Tart export carries no RunnerVM guest agent, so it can never be promoted by pulling it -- it
+/// has to be provisioned into a new, locally sealed image first (`docs/design/distribution.md`,
+/// "Managed image sources"). Phase D7's implementation (`MacOSProvisionLaunching`) runs that as an
+/// ordinary `image_builds` row and answers with the digest it sealed *and* cold-boot-qualified.
+///
+/// A seam rather than a direct call so this service never has to know what an image build is; it
+/// stays optional so the M1-M5 test harness -- and any daemon assembled without a builder -- can
+/// still track a macOS source and report why it cannot act on it.
 public protocol MacOSProvisionLauncher: Sendable {
-  func provision(_ track: ManagedImageRecord) async
+  /// - Returns: the local content digest of a sealed, qualified candidate, ready to promote.
+  /// - Throws: whatever failed the run. Nothing has been promoted when it does.
+  func provision(_ track: ManagedImageRecord, sourceDigest: String) async throws -> ImageDigest
 }
 
 /// The image update cycle (`images.updates`, phase D6): resolve every tracked source, pull what
@@ -43,9 +49,10 @@ public actor ImageUpdateService {
     public init() {}
   }
 
-  /// What a `macosTart` track reports while its source has moved and nothing can act on it yet.
+  /// What a `macosTart` track reports while its source has moved and nothing can act on it: a
+  /// daemon assembled without an image builder has no way to provision one.
   static let provisioningPending =
-    "source changed; local macOS provisioning arrives in phase D7"
+    "source changed; this daemon has no macOS provisioning launcher wired in"
 
   let managed: any ManagedImageRepository
   let imageRows: any ImageRepository

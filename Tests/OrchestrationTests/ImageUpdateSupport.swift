@@ -1,4 +1,5 @@
 import Foundation
+import ImageStore
 import Logging
 import OCIRegistry
 import Persistence
@@ -53,13 +54,35 @@ extension M2Harness {
   var registryRequestCount: Int { registry.recorded.count }
 }
 
-/// Records what D7's provisioning launcher would have been asked to do.
+/// Stands in for the provisioning builder: records what it was asked to provision and answers
+/// with a digest the test has already put in the store (or throws).
 final class RecordingProvisionLauncher: MacOSProvisionLauncher, Sendable {
-  private let calls = Mutex<[String]>([])
-
-  func provision(_ track: ManagedImageRecord) async {
-    calls.withLock { $0.append(track.name) }
+  struct Call: Sendable, Equatable {
+    var name: String
+    var sourceDigest: String
   }
 
-  var provisioned: [String] { calls.withLock { $0 } }
+  private let calls = Mutex<[Call]>([])
+  private let outcome: Result<ImageDigest, ProvisionLauncherError>
+
+  init(result: ImageDigest) {
+    outcome = .success(result)
+  }
+
+  init(failure: String) {
+    outcome = .failure(ProvisionLauncherError(reason: failure))
+  }
+
+  func provision(_ track: ManagedImageRecord, sourceDigest: String) async throws -> ImageDigest {
+    calls.withLock { $0.append(Call(name: track.name, sourceDigest: sourceDigest)) }
+    return try outcome.get()
+  }
+
+  var recorded: [Call] { calls.withLock { $0 } }
+  var provisioned: [String] { recorded.map(\.name) }
+}
+
+struct ProvisionLauncherError: Error, CustomStringConvertible {
+  let reason: String
+  var description: String { reason }
 }

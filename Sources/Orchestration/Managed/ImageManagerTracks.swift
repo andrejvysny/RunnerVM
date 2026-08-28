@@ -27,6 +27,19 @@ extension ImageManager {
     return record
   }
 
+  /// Points a managed image's local alias at `digest` (phase D7 promotion).
+  ///
+  /// On this actor rather than through the repository directly, for the same reason `sealBuild`
+  /// is: `ImageManager` is the serialization point `prune`/`delete` also run on, so an alias can
+  /// never be moved onto a digest a concurrent prune is in the middle of deleting.
+  ///
+  /// Only the `macosTart` kind uses it. A `registryTag` track is promoted by its row alone --
+  /// `promotedRecord` resolves the reference straight from `current_image_digest`, and giving that
+  /// kind an alias too would put two sources of truth in front of the same image.
+  public func setManagedAlias(name: String, digest: ImageDigest) async throws {
+    try await images.setAlias(name: name, digest: digest)
+  }
+
   /// The manifest digest `reference` resolves to *right now*, bypassing `tagResolutions`.
   ///
   /// `inspectRemote` deliberately caches and reuses a five-minute-old answer, which is right for

@@ -86,9 +86,12 @@ import Testing
 
   // MARK: - macOS Tart sources
 
-  /// D6 tracks a Tart source and nothing else: no transfer, no build, no image row -- the digest
-  /// is recorded and the row says why it stops there.
-  @Test func aMacOSTartSourceRecordsItsDigestWithoutPullingOrBuilding() async throws {
+  /// With no provisioning launcher wired in -- the M1-M5 harness shape -- a Tart source is tracked
+  /// and nothing else: no transfer, no build, no image row, and the row says why it stops there.
+  ///
+  /// `lastSourceDigest` deliberately stays `nil`: it is written at promotion and nowhere else, so
+  /// the next sweep still sees the move and retries instead of believing it was handled.
+  @Test func aMacOSTartSourceWithNoLauncherIsRecordedButNotActedOn() async throws {
     let registry = FakeRegistry()
     let source = try registry.reference("cirruslabs/macos-tahoe-base", tag: "latest").description
     let config = M2Harness.updateConfiguration(
@@ -107,7 +110,7 @@ import Testing
       let track = try await harness.managedTrack("macos-tahoe")
       #expect(track.kind == .macosTart)
       #expect(track.state == .idle)
-      #expect(track.lastSourceDigest == published.manifestDigest.rawValue)
+      #expect(track.lastSourceDigest == nil)
       #expect(track.lastCheckedAt != nil)
       #expect(track.currentImageDigest == nil)
       #expect(track.lastError == ImageUpdateService.provisioningPending)
@@ -116,14 +119,79 @@ import Testing
       #expect(
         await harness.metrics.counter(
           name: RunnerVMMetrics.imageUpdateChecksTotal, labels: ["kind": "macosTart"]) == 1)
+    }
+  }
 
-      // With D7's launcher wired, the same moved digest is handed on instead of parked.
-      let launcher = RecordingProvisionLauncher()
-      let wired = await harness.imageUpdates(configuration: config, provisioning: launcher)
-      await wired.runCycle()
+  /// With a launcher wired, the moved digest becomes a provisioning run whose sealed, qualified
+  /// candidate is promoted onto the managed alias -- the D7 shape, with the build itself faked.
+  @Test func aMacOSTartSourceIsProvisionedAndPromotedOntoItsAlias() async throws {
+    let registry = FakeRegistry()
+    let source = try registry.reference("cirruslabs/macos-tahoe-base", tag: "latest").description
+    let config = M2Harness.updateConfiguration(
+      image: M2Harness.linuxImageName,
+      managed: [
+        ManagedImageSourceConfig(name: "macos-tahoe", kind: .macosTart, source: source),
+      ])
+    try await withHarness(configuration: config, registry: registry) { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "tart"),
+        repository: "cirruslabs/macos-tahoe-base", tag: "latest", guestAgent: false)
+      // What the provisioning build would have sealed: a real, locally stored macOS image.
+      let sealed = try await harness.importMacImage()
+      let launcher = RecordingProvisionLauncher(result: sealed.record.digest)
+      let updates = await harness.imageUpdates(configuration: config, provisioning: launcher)
 
-      #expect(launcher.provisioned == ["macos-tahoe"])
-      #expect(try await harness.managedTrack("macos-tahoe").lastError == nil)
+      await updates.runCycle()
+
+      #expect(
+        launcher.recorded
+          == [
+            RecordingProvisionLauncher.Call(
+              name: "macos-tahoe", sourceDigest: published.manifestDigest.rawValue),
+          ])
+      let track = try await harness.managedTrack("macos-tahoe")
+      #expect(track.state == .idle)
+      #expect(track.currentImageDigest == sealed.record.digest)
+      #expect(track.candidateImageDigest == nil)
+      // Written at promotion, so the next sweep knows this exact upstream has been acted on.
+      #expect(track.lastSourceDigest == published.manifestDigest.rawValue)
+      #expect(track.lastError == nil)
+      // The alias is what a macOS profile's `image: macos-tahoe` resolves through.
+      #expect(try await harness.imageRows.alias(name: "macos-tahoe") == sealed.record.digest)
+      #expect(
+        await harness.metrics.counter(
+          name: RunnerVMMetrics.imageUpdatePromotionsTotal, labels: ["kind": "macosTart"]) == 1)
+
+      // A second sweep sees an unmoved digest and does nothing.
+      await updates.runCycle()
+      #expect(launcher.recorded.count == 1)
+    }
+  }
+
+  /// A provisioning run that fails never repoints the alias, and the reason is on the row.
+  @Test func aFailedProvisioningRunLeavesTheAliasAlone() async throws {
+    let registry = FakeRegistry()
+    let source = try registry.reference("cirruslabs/macos-tahoe-base", tag: "latest").description
+    let config = M2Harness.updateConfiguration(
+      image: M2Harness.linuxImageName,
+      managed: [
+        ManagedImageSourceConfig(name: "macos-tahoe", kind: .macosTart, source: source),
+      ])
+    try await withHarness(configuration: config, registry: registry) { harness in
+      try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "tart"),
+        repository: "cirruslabs/macos-tahoe-base", tag: "latest", guestAgent: false)
+      let launcher = RecordingProvisionLauncher(failure: "SSH is still open in the sealed guest")
+      let updates = await harness.imageUpdates(configuration: config, provisioning: launcher)
+
+      await updates.runCycle()
+
+      let track = try await harness.managedTrack("macos-tahoe")
+      #expect(track.state == .failed)
+      #expect(track.currentImageDigest == nil)
+      #expect(track.lastSourceDigest == nil)
+      #expect(track.lastError?.contains("SSH is still open") == true)
+      #expect(try await harness.imageRows.alias(name: "macos-tahoe") == nil)
     }
   }
 
@@ -140,17 +208,19 @@ import Testing
       try await PublishedImage.publish(
         into: harness.registry, at: harness.tree.root.appending(path: "tart"),
         repository: "cirruslabs/macos-tahoe-base", tag: "latest", guestAgent: false)
-      let launcher = RecordingProvisionLauncher()
+      let sealed = try await harness.importMacImage()
+      let launcher = RecordingProvisionLauncher(result: sealed.record.digest)
       let updates = await harness.imageUpdates(configuration: config, provisioning: launcher)
 
-      // The scheduled sweep skips it entirely; an explicit run still records the digest.
+      // The scheduled sweep skips it entirely.
       await updates.runScheduledCycle()
       #expect(try await harness.managedTrack("macos-tahoe").lastCheckedAt == nil)
 
+      // An explicit run is the operator asking for one, so it provisions and promotes.
       await updates.runCycle(only: "macos-tahoe")
 
       #expect(try await harness.managedTrack("macos-tahoe").lastSourceDigest != nil)
-      #expect(launcher.provisioned.isEmpty)
+      #expect(launcher.provisioned == ["macos-tahoe"])
     }
   }
 

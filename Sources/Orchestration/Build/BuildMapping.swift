@@ -43,7 +43,10 @@ enum BuildMapping {
       finishedAt: record.finishedAt.map { RFC3339.string(from: $0.date) },
       recoverySince: record.recoverySince.map { RFC3339.string(from: $0.date) },
       args: args(record.argsJson),
-      updatedAt: RFC3339.string(from: record.updatedAt.date))
+      updatedAt: RFC3339.string(from: record.updatedAt.date),
+      kind: record.kind.rawValue,
+      managedName: record.managedName,
+      sourceDigest: record.sourceDigest)
   }
 
   /// `args_json` is written by `argsJSON` below; anything else in the column is treated as

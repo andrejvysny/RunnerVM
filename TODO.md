@@ -30,7 +30,7 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
       (operator-run: registry login, dispatch/schedule, make public + connect repo — unexecuted)
 - [x] D6 `ImageUpdateService` + schema v4 `managed_images` + promoted-digest resolution +
       `image update check|run|status` + retention (keepPrevious)
-- [ ] D7 native managed macOS provisioning: `ImagePullPurpose.provisioningBase`,
+- [x] D7 native managed macOS provisioning: `ImagePullPurpose.provisioningBase`,
       `image_builds.kind = macosProvision`, `MacOSProvisionStages`, DHCP-lease IP, script
       `--attach` mode, qualify-then-promote via alias
 - [x] D8 pinned maintenance instances (`purpose`/`pinned_until`, orchestrator exemptions, TTL

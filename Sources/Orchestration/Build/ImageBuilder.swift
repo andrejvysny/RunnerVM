@@ -41,6 +41,28 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     /// case where even that did not happen. 15 min leaves margin over it.
     public var recoveryDeadline: Duration = .seconds(900)
     public var pumpPollInterval: Duration = .milliseconds(200)
+    /// macOS provisioning (D7). How long the builder waits for the provisioning guest -- which has
+    /// no guest agent yet -- to appear in `bootpd`'s lease file.
+    public var macosLeaseTimeout: Duration = .seconds(300)
+    public var macosLeasePollInterval: Duration = .seconds(2)
+    /// Reads `bootpd`'s lease file. A closure rather than a path so a test can stand in for the
+    /// host's DHCP server without one; there is no configuration key either way, because
+    /// `/var/db/dhcpd_leases` is macOS's location, not RunnerVM's.
+    public var dhcpLeases: @Sendable () -> String? = {
+      DHCPLeaseResolver.read(URL(fileURLWithPath: DHCPLeaseResolver.defaultLeasePath))
+    }
+    /// How long the guest may take to power *itself* down after the seal-time lockdown.
+    public var macosGuestStopTimeout: Duration = .seconds(120)
+    public var macosGuestStopPollInterval: Duration = .seconds(2)
+    /// Ceiling on the cold-boot qualification's agent handshake. A macOS guest's first boot after
+    /// sealing runs the login window and the agent's LaunchDaemon; minutes, not seconds.
+    public var macosQualifyTimeout: Duration = .seconds(600)
+    public var macosSSHProbeTimeout: Duration = .seconds(3)
+    /// The "is port 22 open?" check the qualification gate runs. A seam so a test can point it at
+    /// a real local listener (or at nothing) without needing a guest.
+    public var sshProbe: @Sendable (String, UInt16, Duration) -> Bool = {
+      TCPPortProbe.isOpen(host: $0, port: $1, timeout: $2)
+    }
     public var worker = BuilderWorkerDefaults()
     /// Assumed size of a cloud base before it has been downloaded, for the disk reservation (N3).
     public var assumedBaseImageBytes: UInt64 = ByteSize.gibibytes(4).bytes
@@ -98,6 +120,10 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
   var baseCache: BaseImageCache?
   var tasks: [ImageBuildID: Task<Void, Never>] = [:]
   var runs: [ImageBuildID: BuildRun] = [:]
+  /// Build ids owned by an in-flight macOS *qualification* VM. They have a `builds/<id>/` directory
+  /// and deliberately no `image_builds` row, so `sweepOrphanDirectories` has to be told to leave
+  /// them alone for the window between materializing the clone and vmworker taking its lock.
+  var qualifying: Set<ImageBuildID> = []
   /// Set by `stop`: refuses new builds while the daemon is going down, without needing the host
   /// row to have been moved to `draining` first.
   var stopped = false
@@ -248,7 +274,11 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     rows.filter { $0.state.consumesCapacity }.map {
       Reservation.imageBuild(
         id: $0.id.rawValue, cpuCount: $0.cpuCount, memoryBytes: $0.memoryBytes,
-        diskBytes: $0.diskReservationBytes, createdAt: $0.createdAt.date)
+        diskBytes: $0.diskReservationBytes, createdAt: $0.createdAt.date,
+        // A `macosProvision` build owns a macOS VM for its whole run, so it counts against
+        // `HostConstants.macOSGuestLimit` for as long as it holds capacity -- not only at the
+        // moment it was admitted.
+        guestOS: $0.kind == .macosProvision ? .macos : .linux)
     }
   }
 
@@ -334,7 +364,7 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
 
   /// A draining or offline host admits no new work of any kind; a daemon already tearing down
   /// admits none either.
-  private func refuseWhenClosed() async throws {
+  func refuseWhenClosed() async throws {
     guard !stopped else {
       throw DaemonServiceError.unavailable(reason: "the daemon is shutting down")
     }

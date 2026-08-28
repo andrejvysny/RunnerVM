@@ -124,6 +124,14 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
   /// daemons that predate the field.
   public var args: [String: String]?
   public var updatedAt: String
+  /// `ImageBuildKind`: `runnerfile`, or `macosProvision` for a managed macOS provisioning run.
+  /// Absent from daemons that predate the field, where every build is a Runnerfile build.
+  public var kind: String?
+  /// The `images.managed[]` name a `macosProvision` build is producing. `nil` for every other kind.
+  public var managedName: String?
+  /// The upstream manifest digest a `macosProvision` build is qualifying -- distinct from
+  /// `baseDigest` (the local base it cloned) and `imageDigest` (what it sealed).
+  public var sourceDigest: String?
 
   public init(
     buildId: String, name: String? = nil, state: String, operationId: String? = nil,
@@ -135,7 +143,8 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     currentStep: Int = 0, currentInstruction: String? = nil, imageDigest: String? = nil,
     failureCode: String? = nil, failureMessage: String? = nil, createdAt: String,
     startedAt: String? = nil, finishedAt: String? = nil, recoverySince: String? = nil,
-    args: [String: String]? = nil, updatedAt: String
+    args: [String: String]? = nil, updatedAt: String, kind: String? = nil,
+    managedName: String? = nil, sourceDigest: String? = nil
   ) {
     self.buildId = buildId
     self.name = name
@@ -171,6 +180,9 @@ public struct BuildInfoDTO: Codable, Sendable, Hashable {
     self.recoverySince = recoverySince
     self.args = args
     self.updatedAt = updatedAt
+    self.kind = kind
+    self.managedName = managedName
+    self.sourceDigest = sourceDigest
   }
 }
 

@@ -13,6 +13,17 @@ public enum ImageBuildError: RunnerError {
   case baseFormatUnsupported(reason: String)
   case baseNoGuestAgent(reference: String)
   case guestAgentMissing(tried: [String])
+  /// No `provision-macos-tart.sh` (or no darwin guest agent) at any of the candidate locations.
+  case macosScriptMissing(what: String, tried: [String])
+  /// The provisioning script ran to completion but its result JSON says the guest is not sealable.
+  case macosProvisionFailed(reason: String)
+  /// The provisioning VM never appeared in `/var/db/dhcpd_leases`, so the host has no address to
+  /// drive it at.
+  case macosLeaseNotFound(macAddress: String, seconds: Int)
+  /// The guest was asked to halt itself and the VM was still running when the wait ran out.
+  case macosGuestDidNotStop(seconds: Int)
+  /// The sealed candidate failed its cold-boot qualification. The managed alias is untouched.
+  case macosQualificationFailed(reason: String)
   case stepFailed(step: Int, line: String, exitCode: Int32, tail: String)
   case stepTimeout(step: Int)
   case stepOutputTooLarge(step: Int)
@@ -57,6 +68,11 @@ public enum ImageBuildError: RunnerError {
     case .baseFormatUnsupported: "BUILD_BASE_FORMAT_UNSUPPORTED"
     case .baseNoGuestAgent: "BUILD_BASE_NO_GUEST_AGENT"
     case .guestAgentMissing: "BUILD_GUEST_AGENT_MISSING"
+    case .macosScriptMissing: "BUILD_MACOS_SCRIPT_MISSING"
+    case .macosProvisionFailed: "BUILD_MACOS_PROVISION_FAILED"
+    case .macosLeaseNotFound: "BUILD_MACOS_LEASE_NOT_FOUND"
+    case .macosGuestDidNotStop: "BUILD_MACOS_GUEST_DID_NOT_STOP"
+    case .macosQualificationFailed: "BUILD_MACOS_QUALIFICATION_FAILED"
     case .stepFailed: "BUILD_STEP_FAILED"
     case .stepTimeout: "BUILD_STEP_TIMEOUT"
     case .stepOutputTooLarge: "BUILD_STEP_OUTPUT_TOO_LARGE"
@@ -100,6 +116,16 @@ public enum ImageBuildError: RunnerError {
     case let .baseNoGuestAgent(reference): "base image \(reference) carries no RunnerVM guest agent"
     case let .guestAgentMissing(tried):
       "no guest agent binary found (tried: \(tried.joined(separator: ", ")))"
+    case let .macosScriptMissing(what, tried):
+      "no \(what) found (tried: \(tried.joined(separator: ", ")))"
+    case let .macosProvisionFailed(reason): "macOS guest provisioning failed: \(reason)"
+    case let .macosLeaseNotFound(macAddress, seconds):
+      "no DHCP lease for \(macAddress) in /var/db/dhcpd_leases after \(seconds)s; the "
+        + "provisioning guest never brought its network up"
+    case let .macosGuestDidNotStop(seconds):
+      "the provisioning guest was still running \(seconds)s after it was told to halt"
+    case let .macosQualificationFailed(reason):
+      "the sealed macOS image failed its cold-boot qualification: \(reason)"
     case let .stepFailed(step, line, exitCode, tail):
       "step \(step) (\(line)) exited \(exitCode): \(tail)"
     case let .stepTimeout(step): "step \(step) timed out"
@@ -139,14 +165,16 @@ public enum ImageBuildError: RunnerError {
   public var retryable: Bool {
     switch self {
     case .agentUnreachable, .probeFailed, .atMaxConcurrent, .insufficientDisk, .timeout,
-         .stepTimeout, .interrupted, .recoveryAbandoned, .buildWorkerUnverifiable:
+         .stepTimeout, .interrupted, .recoveryAbandoned, .buildWorkerUnverifiable,
+         .macosLeaseNotFound, .macosGuestDidNotStop:
       true
     case .recipeUnreadable, .contextUnreadable, .contextTooLarge, .contextUnsafeEntry,
          .baseUnverified, .baseDigestMismatch, .baseNotPartitioned, .baseFormatUnsupported,
          .baseNoGuestAgent, .guestAgentMissing, .stepFailed, .stepOutputTooLarge, .imageNotReady,
          .sealFailed, .cancelled, .notFound, .nameRequired, .toolMissing, .tooManySteps,
          .runnerVersionUnresolved, .runnerDigestUnavailable, .runnerDigestMismatch,
-         .notCancellable, .unavailable, .argumentLooksLikeSecret:
+         .notCancellable, .unavailable, .argumentLooksLikeSecret, .macosScriptMissing,
+         .macosProvisionFailed, .macosQualificationFailed:
       false
     }
   }

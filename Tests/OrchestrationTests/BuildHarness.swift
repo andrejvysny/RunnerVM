@@ -3,6 +3,7 @@ import GuestControl
 import ImageBuild
 import ImageStore
 import Logging
+import OCIRegistry
 import Persistence
 import RunnerCore
 import Scheduler
@@ -46,10 +47,11 @@ struct BuildHarness {
 
   init(
     configuration: RunnerConfiguration = BuildHarness.configuration(),
+    registry: FakeRegistry = FakeRegistry(),
     customize: ((inout ImageBuilder.Tuning) -> Void)? = nil
   ) async throws {
     self.configuration = configuration
-    base = try await M2Harness(configuration: configuration)
+    base = try await M2Harness(configuration: configuration, registry: registry)
     buildRows = GRDBImageBuildRepository(db: base.database)
     operations = GRDBOperationRepository(db: base.database)
     processes = RecordingProcessRunner()
@@ -222,7 +224,8 @@ struct BuildHarness {
   @discardableResult
   func seedBuildRow(
     state: ImageBuildState, name: String? = nil, imageDigest: ImageDigest? = nil,
-    withDirectory: Bool = true, workerNonce: String? = nil
+    withDirectory: Bool = true, workerNonce: String? = nil,
+    kind: ImageBuildKind = .runnerfile
   ) async throws -> ImageBuildID {
     let id = ImageBuildID.generate()
     if withDirectory {
@@ -237,7 +240,8 @@ struct BuildHarness {
         memoryBytes: 1 << 30, diskBytes: 64 << 20, diskReservationBytes: 64 << 20,
         timeoutMs: 60_000, buildPath: paths.buildDir(id).path(percentEncoded: false),
         logPath: paths.buildLogFile(id).path(percentEncoded: false), workerNonce: workerNonce,
-        imageDigest: imageDigest, createdAt: .now, updatedAt: .now))
+        imageDigest: imageDigest, createdAt: .now, updatedAt: .now, kind: kind,
+        managedName: kind == .macosProvision ? name : nil))
     return id
   }
 
@@ -250,10 +254,12 @@ struct BuildHarness {
 /// cancelled and awaited before the temp tree goes away, so nothing is still writing into it.
 func withBuildHarness(
   configuration: RunnerConfiguration = BuildHarness.configuration(),
+  registry: FakeRegistry = FakeRegistry(),
   customize: ((inout ImageBuilder.Tuning) -> Void)? = nil,
   _ body: (BuildHarness) async throws -> Void
 ) async throws {
-  let harness = try await BuildHarness(configuration: configuration, customize: customize)
+  let harness = try await BuildHarness(
+    configuration: configuration, registry: registry, customize: customize)
   do {
     try await body(harness)
   } catch {

@@ -27,7 +27,7 @@ Confirmed during planning, 2026-08-28:
 
 | Topic | Decision |
 | --- | --- |
-| macOS provisioning | Native, no Tart binary on the host: boot the read-only `image pull --format tart` import as a provisioning VM under `vmworker`, find its IP from `/var/db/dhcpd_leases` by instance MAC, drive the existing hardened SSH provisioning (`scripts/lib/macos-guest-provision.sh`) from the host, seal through the builder's `ImageSealing`. |
+| macOS provisioning | Native, no Tart binary on the host: boot the read-only `image pull --format tart` import as a provisioning VM under `vmworker`, find its IP from `/var/db/dhcpd_leases` by instance MAC (`bootpd` writes unpadded octets behind a `1,` hardware type, so both sides are normalized), drive `scripts/provision-macos-tart.sh --attach` from the host, wait for the guest to halt *itself*, seal through the builder's `ImageSealing`. |
 | Operator access | `runnerd` accepts uid 0 in addition to its own uid; socket stays 0600. Operators use `sudo runnerctl …`. |
 | License | `LICENSE` = Apache-2.0 for RunnerVM code; `NOTICE`/`PROVENANCE.md` keep FSL attribution for Tart-derived files, unchanged. |
 | Release process | Commits land per phase on `master`. Pushing, tagging `v0.2.0`, creating the GitHub release, and the first GHCR publish are operator actions, done with the operator's own `write:packages` PAT. |
@@ -178,11 +178,25 @@ up to date on the host's own behalf, distinct from a profile pointing straight a
 2. **Build/provision**: Linux — pull the candidate registry blob; macOS — clone the Tart base into
    a builder VM, drive `scripts/provision-macos-tart.sh --attach` over SSH (guest-agent install,
    `actions/runner`, seal-time SSH lockdown), through the existing `ImageBuilder` stage ladder.
-3. **Qualify**: the shared smoke test (`SmokeTest.swift`) boots a synthetic pinned instance from the
-   *candidate* digest, checks agent hello, `uname -a`/`sw_vers`, and — macOS only — `agent.selfTest`
-   (CI keychain) and that SSH stays closed, then destroys the instance.
-4. **Promote**: only on qualification success, `images.setAlias(name, digest)` — a single upsert,
-   atomic. The previous digest is kept as "previous," not deleted.
+3. **Qualify**: Linux — a pinned `maintenance` instance created from the *candidate* digest has to
+   reach `idle` (`ImageUpdateService.smokeTest`). macOS — the qualification runs inside the
+   provisioning build itself, on a **clone of what was just sealed** booted with a fresh machine
+   identity: agent reachable and ready, `sw_vers`, `agent.selfTest` all-ok (CI keychain), and a TCP
+   probe proving port 22 is *closed* after a cold boot, i.e. that the seal-time lockdown survived a
+   reboot rather than merely having been applied once. It is a clone rather than the provisioning
+   VM because that is what an ordinary instance will be. It runs inside the build because it needs
+   the build's own reservation and `vmworker` plumbing, and because a candidate that fails it must
+   fail the build rather than leaving a "succeeded" build nothing may use.
+4. **Promote**: only on qualification success, and only through `ImageUpdateService.promote` —
+   one implementation for both kinds. For `macosTart` it additionally upserts
+   `image_aliases[managed.name] = digest`, which is what a macOS profile's `image:` resolves
+   through; for `registryTag` the `current_image_digest` row write is the whole promotion
+   (`ImageManager.promotedRecord`). The previous digest is kept as "previous," not deleted.
+
+   A failure anywhere above leaves the alias and `current_image_digest` exactly where they were.
+   The sealed-but-unqualified digest stays recorded on the `image_builds` row (`image_digest`) so
+   it is inspectable with `runnerctl build show`, and the managed row records the reason; the
+   candidate column is cleared, so nothing downstream can mistake it for a promotable image.
 
 ### Update invariants
 

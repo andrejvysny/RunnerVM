@@ -59,6 +59,12 @@ public struct ImageBuildConfig: Codable, Sendable, Hashable {
   public var cacheDir: String?
   /// `nil` resolves the bundled guest agent at its default location.
   public var guestAgentPath: String?
+  /// Override for the darwin guest-agent binary a managed macOS provisioning run installs.
+  /// `nil` resolves the bundled `guest-agent/darwin-arm64/runnervm-guest-agent`.
+  public var macosGuestAgentPath: String?
+  /// Override for `provision-macos-tart.sh`. `nil` resolves the packaged
+  /// `share/runnervm/scripts/provision-macos-tart.sh` (or the repository copy in a dev tree).
+  public var macosProvisionScript: String?
   public var recipeFileName: String
   public var maxContextBytes: UInt64
   public var maxLogBytes: UInt64
@@ -70,7 +76,8 @@ public struct ImageBuildConfig: Codable, Sendable, Hashable {
     cpuCount: Int = 4, memoryBytes: UInt64 = ByteSize.gibibytes(4).bytes,
     diskBytes: UInt64 = ByteSize.gibibytes(16).bytes, timeout: DurationValue = .minutes(60),
     stepTimeout: DurationValue = .minutes(30), maxConcurrent: Int = 1, cacheDir: String? = nil,
-    guestAgentPath: String? = nil, recipeFileName: String = "Runnerfile",
+    guestAgentPath: String? = nil, macosGuestAgentPath: String? = nil,
+    macosProvisionScript: String? = nil, recipeFileName: String = "Runnerfile",
     maxContextBytes: UInt64 = ByteSize.gibibytes(1).bytes,
     maxLogBytes: UInt64 = ByteSize.mebibytes(64).bytes, maxSteps: Int = 256,
     cache: BaseImageCachePolicy = BaseImageCachePolicy()
@@ -83,6 +90,8 @@ public struct ImageBuildConfig: Codable, Sendable, Hashable {
     self.maxConcurrent = maxConcurrent
     self.cacheDir = cacheDir
     self.guestAgentPath = guestAgentPath
+    self.macosGuestAgentPath = macosGuestAgentPath
+    self.macosProvisionScript = macosProvisionScript
     self.recipeFileName = recipeFileName
     self.maxContextBytes = maxContextBytes
     self.maxLogBytes = maxLogBytes
@@ -94,7 +103,8 @@ public struct ImageBuildConfig: Codable, Sendable, Hashable {
 extension ImageBuildConfig {
   private enum CodingKeys: String, CodingKey {
     case cpuCount, memoryBytes, diskBytes, timeout, stepTimeout, maxConcurrent, cacheDir
-    case guestAgentPath, recipeFileName, maxContextBytes, maxLogBytes, maxSteps, cache
+    case guestAgentPath, macosGuestAgentPath, macosProvisionScript
+    case recipeFileName, maxContextBytes, maxLogBytes, maxSteps, cache
   }
 
   public init(from decoder: any Decoder) throws {
@@ -109,6 +119,8 @@ extension ImageBuildConfig {
       maxConcurrent: try c.decodeIfPresent(Int.self, forKey: .maxConcurrent) ?? d.maxConcurrent,
       cacheDir: try c.decodeIfPresent(String.self, forKey: .cacheDir),
       guestAgentPath: try c.decodeIfPresent(String.self, forKey: .guestAgentPath),
+      macosGuestAgentPath: try c.decodeIfPresent(String.self, forKey: .macosGuestAgentPath),
+      macosProvisionScript: try c.decodeIfPresent(String.self, forKey: .macosProvisionScript),
       recipeFileName: try c.decodeIfPresent(String.self, forKey: .recipeFileName) ?? d.recipeFileName,
       maxContextBytes: try c.decodeIfPresent(UInt64.self, forKey: .maxContextBytes) ?? d.maxContextBytes,
       maxLogBytes: try c.decodeIfPresent(UInt64.self, forKey: .maxLogBytes) ?? d.maxLogBytes,

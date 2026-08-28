@@ -71,7 +71,8 @@ enum ConfigSchema {
     "build": .object([
       "cpu": .scalar, "memory": .scalar, "disk": .scalar, "timeout": .scalar,
       "stepTimeout": .scalar, "maxConcurrent": .scalar, "cacheDir": .scalar,
-      "guestAgentPath": .scalar, "recipeFileName": .scalar, "maxContextSize": .scalar,
+      "guestAgentPath": .scalar, "macosGuestAgentPath": .scalar,
+      "macosProvisionScript": .scalar, "recipeFileName": .scalar, "maxContextSize": .scalar,
       "maxLogSize": .scalar, "maxSteps": .scalar,
       "cache": .object([
         "maxBytes": .scalar, "minimumHostFreeBytes": .scalar, "maxEntries": .scalar,

@@ -270,6 +270,8 @@ enum ConfigMapper {
       maxConcurrent: dto?.maxConcurrent ?? d.maxConcurrent,
       cacheDir: dto?.cacheDir ?? d.cacheDir,
       guestAgentPath: dto?.guestAgentPath ?? d.guestAgentPath,
+      macosGuestAgentPath: dto?.macosGuestAgentPath ?? d.macosGuestAgentPath,
+      macosProvisionScript: dto?.macosProvisionScript ?? d.macosProvisionScript,
       recipeFileName: dto?.recipeFileName ?? d.recipeFileName,
       maxContextBytes: dto?.maxContextSize?.bytes ?? d.maxContextBytes,
       maxLogBytes: dto?.maxLogSize?.bytes ?? d.maxLogBytes,

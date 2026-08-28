@@ -30,11 +30,14 @@ extension ImageBuilder {
     await Task { await self.finish(id) }.value
   }
 
-  private func runStages(_ run: BuildRun) async throws -> ImageDigest {
+  func runStages(_ run: BuildRun) async throws -> ImageDigest {
     run.log = try? BuildLogWriter(
       url: paths.buildLogFile(run.id), maxBytes: buildConfig.maxLogBytes)
     await run.log?.line("=== build \(run.id.rawValue) (\(run.input.name ?? "-"))")
     await hook(.queued, run.id)
+    // A managed macOS provisioning build shares every state, every transition and every teardown
+    // path with a Runnerfile build; only what happens *inside* the stages differs (D7).
+    if run.input.kind == .macosProvision { return try await runMacOSStages(run) }
     try await transition(run, to: .resolving) { $0.startedAt = .now }
     await hook(.resolvingBase, run.id)
     let base = try await resolveBase(run)
@@ -68,7 +71,8 @@ extension ImageBuilder {
   // MARK: - resolveBase
 
   private func resolveBase(_ run: BuildRun) async throws -> ResolvedBase {
-    switch run.input.plan.from.source {
+    guard let plan = run.input.plan else { throw ImageBuildError.interrupted }
+    switch plan.from.source {
     case let .localImage(reference):
       return try await localBase(run, reference: reference)
     case let .registry(reference):
@@ -177,7 +181,7 @@ extension ImageBuilder {
   // MARK: - provision
 
   private func provision(_ run: BuildRun) async throws {
-    let plan = run.input.plan
+    guard let plan = run.input.plan else { throw ImageBuildError.interrupted }
     if run.input.hasContext {
       _ = try await exec(
         run, display: "mount build context", argv: ["/bin/sh", "-c", BuildScripts.mountContext],
@@ -231,9 +235,9 @@ extension ImageBuilder {
   // MARK: - sealAndRegister
 
   private func sealAndRegister(_ run: BuildRun, base: ResolvedBase) async throws -> ImageDigest {
-    guard let layout = run.layout, let agent = run.agent, let worker = run.worker else {
-      throw ImageBuildError.interrupted
-    }
+    guard let layout = run.layout, let agent = run.agent, let worker = run.worker,
+          let plan = run.input.plan
+    else { throw ImageBuildError.interrupted }
     do {
       // Now the full production gate: an image whose runner never installed would boot into a VM
       // that can never take a job (B1).
@@ -244,14 +248,14 @@ extension ImageBuilder {
     }
     let probe = try await exec(
       run, display: "probe", argv: ["/bin/sh", "-c", BuildScripts.probe], env: nil, cwd: nil,
-      step: run.input.plan.totalSteps, timeout: tuning.probeTimeout, capture: true)
+      step: plan.totalSteps, timeout: tuning.probeTimeout, capture: true)
     guard probe.exitCode == 0 else { throw ImageBuildError.probeFailed }
     let report = try BuildProbeReport.parse(probe.stdout)
     run.probeReport = report
 
     let sealed = try await exec(
       run, display: "seal", argv: ["/bin/sh", "-c", BuildScripts.seal], env: nil, cwd: nil,
-      step: run.input.plan.totalSteps, timeout: tuning.sealTimeout, capture: false)
+      step: plan.totalSteps, timeout: tuning.sealTimeout, capture: false)
     guard sealed.exitCode == 0 else {
       throw ImageBuildError.sealFailed(reason: sealed.tail.joined(separator: "\n"))
     }

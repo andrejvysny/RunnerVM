@@ -188,6 +188,8 @@ struct ConfigDTO: Decodable {
     var maxConcurrent: Int?
     var cacheDir: String?
     var guestAgentPath: String?
+    var macosGuestAgentPath: String?
+    var macosProvisionScript: String?
     var recipeFileName: String?
     var maxContextSize: ByteSize?
     var maxLogSize: ByteSize?

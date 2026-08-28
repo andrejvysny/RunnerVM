@@ -97,22 +97,31 @@ extension BuildCommand {
 
   static func table(_ builds: [BuildInfoDTO]) -> String {
     Table.render(
-      headers: ["ID", "NAME", "STATE", "STEP", "FROM", "AGE"],
+      headers: ["ID", "KIND", "NAME", "STATE", "STEP", "FROM", "AGE"],
       rows: builds.map {
         [
-          String($0.buildId.prefix(8)), Format.optional($0.name), $0.state, step($0),
+          String($0.buildId.prefix(8)), kind($0), Format.optional($0.name), $0.state, step($0),
           $0.fromReference, age($0.createdAt),
         ]
       })
   }
 
+  /// A daemon predating the field reports no kind at all, and every build on one is a Runnerfile
+  /// build -- so the column is honest rather than blank in that case.
+  private static func kind(_ build: BuildInfoDTO) -> String {
+    build.kind ?? "runnerfile"
+  }
+
   static func fields(_ build: BuildInfoDTO) -> [(String, String)] {
     var rows: [(String, String)] = [
       ("id", build.buildId),
+      ("kind", kind(build)),
       ("name", Format.optional(build.name)),
       ("state", build.state),
       ("from", "\(build.fromKind): \(build.fromReference)"),
       ("base digest", Format.optional(build.baseDigest)),
+      // A `macosProvision` build has no Runnerfile: `recipe path` is the provisioning script it
+      // shelled out to, and its sha256 pins exactly which version of it ran.
       ("recipe path", build.recipePath),
       ("recipe sha256", Format.shortDigest(build.recipeSHA256)),
       ("context path", build.contextPath),
@@ -136,6 +145,11 @@ extension BuildCommand {
       ("finished", Format.optional(build.finishedAt)),
       ("updated", build.updatedAt),
     ]
+    // Only on a managed provisioning run, where they are the whole point of the build.
+    if let managedName = build.managedName {
+      rows.append(("managed image", managedName))
+      rows.append(("source digest", Format.optional(build.sourceDigest)))
+    }
     // Only when set, so its presence is the signal: this build's VM could not be proven dead, and
     // it is still holding host capacity because of it.
     if let since = build.recoverySince {

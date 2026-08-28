@@ -308,6 +308,8 @@ build:
   maxConcurrent: 1           # shares the host's one AdmissionQueue with `vm create` (0-4)
   cacheDir: null             # nil uses RunnerPaths.baseImageCacheDir (<rootDir>/cache/base-images)
   guestAgentPath: null       # nil resolves the bundled guest agent (see below)
+  macosGuestAgentPath: null  # nil resolves the bundled darwin/arm64 guest agent (managed macOS)
+  macosProvisionScript: null # nil resolves the packaged provision-macos-tart.sh (managed macOS)
   recipeFileName: Runnerfile
   maxContextBytes: 1073741824   # 1GiB
   maxLogBytes: 67108864         # 64MiB; a step that would exceed it fails BUILD_STEP_OUTPUT_TOO_LARGE
@@ -372,6 +374,26 @@ Four metrics report the cache:
 
 `build.cache` is **not** `images.cache`: that one governs the content-addressed image store and its
 pin/reference rules, this one bounds a pure download cache keyed by the digest a recipe named.
+
+### macOS provisioning assets
+
+A managed macOS source (`images.managed[kind: macos-tart]`) is turned into a runnable image by a
+`kind = macosProvision` build, which shells out to two files the daemon ships alongside itself.
+Both are resolved with the same chain `BuildSeed.resolveAgent` uses, and both are resolved
+*synchronously* when the build is started, so a missing one is a refusal rather than a build that
+fails after a multi-gigabyte pull:
+
+| | `provision-macos-tart.sh` | darwin/arm64 guest agent |
+| --- | --- | --- |
+| 1. configuration | `build.macosProvisionScript` | `build.macosGuestAgentPath` |
+| 2. environment | `RUNNERVM_MACOS_PROVISION_SCRIPT` | `RUNNERVM_MACOS_GUEST_AGENT` |
+| 3. state tree | `<rootDir>/scripts/provision-macos-tart.sh` | `<rootDir>/guest-agent/darwin-arm64/runnervm-guest-agent` |
+| 4. packaged | `<exe>/../share/runnervm/scripts/…` | `<exe>/../share/runnervm/guest-agent/darwin-arm64/…` |
+| 5. dev checkout | `<repo>/scripts/provision-macos-tart.sh` | `<repo>/GuestAgent/bin/darwin-arm64/runnervm-guest-agent` |
+
+Neither found anywhere fails `BUILD_MACOS_SCRIPT_MISSING`, naming every path that was tried. The
+repository root in step 5 is found by walking up from the running binary to the `Package.swift` at
+the top of this repository, which is what makes `swift run runnerd` work from a checkout.
 
 ### Guest agent resolution
 

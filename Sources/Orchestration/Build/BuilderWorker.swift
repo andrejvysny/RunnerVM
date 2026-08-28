@@ -146,6 +146,17 @@ public actor BuilderWorker {
     return try WorkerCoding.decode(VMStateResponse.self, from: payload).vmState
   }
 
+  /// What the worker says its VM is doing right now.
+  ///
+  /// Polled rather than event-driven, unlike the instance path: a build owns exactly one worker
+  /// for the length of one `Task` and has no `WorkerSupervisor` subscription to hang a
+  /// `vm.stateChanged` handler off, so the one caller that needs to notice a guest halting itself
+  /// (a macOS provisioning run, D7) asks.
+  public func vmState() async throws -> WorkerVMState {
+    let payload = try await call(.vmState, payload: nil)
+    return try WorkerCoding.decode(VMStateResponse.self, from: payload).vmState
+  }
+
   /// The worker answers and then exits on its own; runnerd never signals it. A transport failure
   /// here means it already went away, which is the outcome we wanted.
   public func shutdown(gracefulTimeoutMs: Int64) async {

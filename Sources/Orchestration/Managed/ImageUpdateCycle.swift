@@ -182,10 +182,23 @@ extension ImageUpdateService {
   /// The atomic half. One row write moves `current_image_digest`, and from that instant
   /// `ImagePulling.resolveRecord` answers every `vm create` with the new digest -- no alias
   /// rewrite, no cache invalidation, no window in which half the host is on each image.
-  private func promote(
+  func promote(
     _ track: ManagedImageRecord, source: ImageDigest, candidate: ImageDigest
   ) async throws {
     _ = try await managed.transition(name: track.name, from: .qualifying, to: .promoting) { _ in }
+    // The one kind-dependent step, and the reason both kinds share this method rather than each
+    // owning a promotion of its own. A `registryTag` track *is* a registry reference, and
+    // `ImageManager.promotedRecord` resolves it straight off the row below. A `macosTart` track's
+    // name is a local alias -- there is no upstream reference to resolve -- so the alias is what a
+    // profile's `image:` looks up, and moving it is what makes the promotion visible.
+    //
+    // Deliberately inside the `promoting` state and before the row write: a crash between the two
+    // leaves the alias on a digest that is pinned, qualified and on disk, and `recoverInterrupted`
+    // moves the row to `failed` so the next cycle re-promotes it. The reverse order could leave
+    // `current_image_digest` naming a digest no profile resolves to.
+    if track.kind == .macosTart {
+      try await images.setManagedAlias(name: track.name, digest: candidate)
+    }
     // Before anything is unpinned: the candidate must never be observably unpinnable, and this
     // pin is what makes `image.prune` leave the promoted image alone.
     try await imageRows.pin(ownerType: .managed, ownerId: track.name, digest: candidate)
@@ -248,9 +261,15 @@ extension ImageUpdateService {
 
   // MARK: - macOS Tart source
 
-  /// Phase D6 tracks a Tart source without acting on it: the export carries no guest agent, so
-  /// there is nothing to pull-and-promote -- the candidate has to be *provisioned* into a new,
-  /// locally sealed image first, which is D7's `MacOSProvisionLauncher`.
+  /// The macOS path: the upstream artifact is *not* runnable, so the candidate is a local build.
+  ///
+  /// Structurally the registry-tag pass with `pullCandidate` swapped for `provision`: resolve,
+  /// stop if nothing moved, produce a candidate, promote it. `ManagedImageState.building` is what
+  /// the two differ by, and `image.update.status` is what makes that visible.
+  ///
+  /// The qualification gates live inside the build (`ImageBuilder.qualifyMacOS`), which is where
+  /// they have to be: they cold-boot a clone of the sealed image, which needs the build's
+  /// reservation and its `vmworker` plumbing. This side only records that the phase happened.
   private func runMacOSTart(
     _ track: ManagedImageRecord, reserved: Bool, resolveOnly: Bool
   ) async throws {
@@ -261,25 +280,58 @@ extension ImageUpdateService {
     }
     let source = try await images.resolveSourceDigest(reference: track.sourceReference)
     await noteCheck(kind: .macosTart)
-    let changed = source.rawValue != track.lastSourceDigest || track.currentImageDigest == nil
-    let pending = changed && track.autoUpdate && provisioning == nil
-    _ = try await managed.transition(name: track.name, from: .checking, to: .idle) { row in
-      row.lastSourceDigest = source.rawValue
-      row.lastCheckedAt = .now
-      // The breadcrumb *is* the state: it survives a restart, `image.update.status` reports it,
-      // and a promotion is the only thing that clears it.
-      row.lastError = pending ? ImageUpdateService.provisioningPending : nil
+    // `lastSourceDigest` is written at promotion and nowhere else -- exactly as for a registry tag.
+    // Recording it on a check instead would make the next sweep believe a move it never acted on
+    // had already been handled, and a provisioning run that failed would never be retried.
+    let unchanged = source.rawValue == track.lastSourceDigest && track.currentImageDigest != nil
+    guard !unchanged, !resolveOnly else {
+      _ = try await managed.transition(name: track.name, from: .checking, to: .idle) { row in
+        row.lastCheckedAt = .now
+      }
+      return
     }
-    guard changed, track.autoUpdate, !resolveOnly else { return }
+    guard let provisioning else {
+      // Nothing on this daemon can turn a Tart export into a runnable image. The breadcrumb *is*
+      // the state: it survives a restart and `image.update.status` reports it.
+      _ = try await managed.transition(name: track.name, from: .checking, to: .idle) { row in
+        row.lastCheckedAt = .now
+        row.lastError = ImageUpdateService.provisioningPending
+      }
+      logger.notice(
+        "managed macOS source moved but cannot be provisioned",
+        metadata: [
+          "managed": .string(track.name), "source": .string(track.sourceReference),
+          "source_digest": .string(source.rawValue),
+        ])
+      return
+    }
+    let candidate = try await provision(track, source: source, launcher: provisioning)
+    try await promote(track, source: source, candidate: candidate)
+  }
+
+  /// Runs the provisioning build and moves the row through `building -> qualifying`.
+  ///
+  /// The row reaches `qualifying` only *after* the build has already qualified the candidate: the
+  /// state names the phase the candidate has reached, and `promote` requires it as its `from`.
+  private func provision(
+    _ track: ManagedImageRecord, source: ImageDigest, launcher: any MacOSProvisionLauncher
+  ) async throws -> ImageDigest {
+    _ = try await managed.transition(name: track.name, from: .checking, to: .building) { row in
+      row.lastCheckedAt = .now
+    }
     logger.notice(
-      "managed macOS source moved",
+      "provisioning a managed macOS image",
       metadata: [
         "managed": .string(track.name), "source": .string(track.sourceReference),
         "source_digest": .string(source.rawValue),
-        "provisioning": .string(provisioning == nil ? "unavailable (phase D7)" : "queued"),
       ])
-    guard let provisioning else { return }
-    await provisioning.provision((try? await managed.get(name: track.name)) ?? track)
+    let candidate = try await launcher.provision(track, sourceDigest: source.rawValue)
+    // Recorded before the promotion, so a candidate whose promotion is interrupted is still
+    // findable: `recoverInterrupted` clears it, and the retry re-provisions from scratch.
+    _ = try await managed.transition(name: track.name, from: .building, to: .qualifying) { row in
+      row.candidateImageDigest = candidate
+    }
+    return candidate
   }
 
   // MARK: - Failure

@@ -27,6 +27,18 @@ extension ImageManager {
     return (digest, info)
   }
 
+  /// Pins an image this build has already resolved, without re-resolving it.
+  ///
+  /// The managed macOS provisioning path (D7) needs this because `reserve(reference:forBuild:)`
+  /// resolves under `.buildBase`, and `.buildBase` is exactly the purpose that refuses an
+  /// agentless Tart export -- the artifact that path exists to provision. It pulls under
+  /// `.provisioningBase` first and pins the digest that came back here.
+  public func pin(base digest: ImageDigest, forBuild buildId: ImageBuildID) async throws -> ImageInfo {
+    let info = try await store.inspect(digest: digest)
+    try await images.pin(ownerType: .build, ownerId: buildId.rawValue, digest: digest)
+    return info
+  }
+
   /// Idempotent: releasing a build that never pinned anything is success.
   public func release(build buildId: ImageBuildID) async throws {
     try await images.unpinOwner(ownerType: .build, ownerId: buildId.rawValue)

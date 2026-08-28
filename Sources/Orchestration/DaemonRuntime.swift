@@ -392,10 +392,12 @@ public actor DaemonRuntime {
       runnerVersions: runnerVersions)
     self.builder = builder
     // After the instance manager: qualification boots a maintenance VM through it, and promotion
-    // retires the reusable VMs the superseded digest left behind (spec §138).
+    // retires the reusable VMs the superseded digest left behind (spec §138). After the builder:
+    // a `macosTart` track is promoted by running an actual provisioning build through it (D7).
     let imageUpdates = ImageUpdateService(
       managed: managedRows, imageRows: imageRows, images: images, instances: instances,
-      instanceRows: instanceRows, runnerVersions: runnerVersions, metrics: metrics)
+      instanceRows: instanceRows, runnerVersions: runnerVersions,
+      provisioning: MacOSProvisionLaunching(builder: builder), metrics: metrics)
     self.imageUpdates = imageUpdates
     // Both admission paths and the scheduler must charge for a running build, so the builder is
     // registered with them the moment it exists (spec §121).

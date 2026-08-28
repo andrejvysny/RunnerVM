@@ -111,18 +111,9 @@ extension InstanceManager {
     profile: RunnerProfileConfig, image: ImageInfo
   ) throws -> MacOSInstancePlatformSpec? {
     guard profile.guestOS == .macos else { return nil }
-    guard let platform = image.metadata.macos, !platform.hardwareModel.isEmpty else {
-      throw VMError.macOSHardwareModelMissing
-    }
-    // Mandatory on macOS, unlike the `nil`-tolerant model the fields were introduced with: an
-    // image that states no floor pushes the first real compatibility failure out of admission and
-    // into `VZVirtualMachineConfiguration.validate()`, inside a worker, after a clone and a boot.
-    guard let minimumCPU = platform.minimumCPUCount else {
-      throw VMError.macOSImageMinimumsMissing(field: "minimumCPUCount")
-    }
-    guard let minimumMemory = platform.minimumMemoryBytes else {
-      throw VMError.macOSImageMinimumsMissing(field: "minimumMemoryBytes")
-    }
+    let platform = try macOSPlatform(image: image)
+    let minimumCPU = platform.minimumCPUCount ?? 0
+    let minimumMemory = platform.minimumMemoryBytes ?? 0
     if profile.resources.cpuCount < minimumCPU {
       throw VMError.macOSProfileCPUTooSmall(
         requested: profile.resources.cpuCount, minimum: minimumCPU)
@@ -132,6 +123,28 @@ extension InstanceManager {
         requestedBytes: profile.resources.memoryBytes, minimumBytes: minimumMemory)
     }
     try checkMacOSDiskContract(profile: profile, image: image)
+    return platform
+  }
+
+  /// The `spec.json` platform block a macOS image describes, and the refusals that go with it.
+  ///
+  /// Split out of `macOSPlatformSpec` so the managed macOS provisioning builder (D7) applies the
+  /// exact same image-side contract to the builder VM it boots -- the platform facts are the
+  /// image's, and only the sizing comparison below them belongs to a profile.
+  ///
+  /// The minimums are mandatory, unlike the `nil`-tolerant model the fields were introduced with:
+  /// an image that states no floor pushes the first real compatibility failure out of admission
+  /// and into `VZVirtualMachineConfiguration.validate()`, inside a worker, after a clone and a boot.
+  static func macOSPlatform(image: ImageInfo) throws -> MacOSInstancePlatformSpec {
+    guard let platform = image.metadata.macos, !platform.hardwareModel.isEmpty else {
+      throw VMError.macOSHardwareModelMissing
+    }
+    guard platform.minimumCPUCount != nil else {
+      throw VMError.macOSImageMinimumsMissing(field: "minimumCPUCount")
+    }
+    guard platform.minimumMemoryBytes != nil else {
+      throw VMError.macOSImageMinimumsMissing(field: "minimumMemoryBytes")
+    }
     return MacOSInstancePlatformSpec(platform)
   }
 

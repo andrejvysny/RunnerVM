@@ -96,9 +96,14 @@ extension ImageBuilder {
   /// landed. `image_digest` was written to the build row first precisely so this is recoverable:
   /// the disk it hashed is gone, so re-sealing is impossible, but registering it is not.
   private func replaySeal(_ row: ImageBuildRecord, quiet: Bool) async -> Bool {
+    // `name: nil` for a macOS provisioning build, always: its `name` is a *managed* alias, and
+    // pointing that alias at a digest whose cold-boot qualification never ran is exactly the
+    // promotion of an unqualified image that `docs/design/distribution.md` forbids. The digest is
+    // re-registered all the same, so the managed track's next cycle can find it as a candidate.
+    let alias = row.kind == .macosProvision ? nil : row.name
     guard row.state == .sealing, let digest = row.imageDigest,
           await imageStore.exists(digest),
-          (try? await images.sealBuildReplay(digest: digest, name: row.name)) != nil
+          (try? await images.sealBuildReplay(digest: digest, name: alias)) != nil
     else { return false }
     if quiet { discard(row.id) }
     try? await images.release(build: row.id)
@@ -123,7 +128,10 @@ extension ImageBuilder {
     else { return }
     for directory in directories where !directory.lastPathComponent.hasPrefix(".") {
       let id = ImageBuildID(rawValue: directory.lastPathComponent)
-      guard !known.contains(id), tasks[id] == nil else { continue }
+      // `qualifying` holds the ids of macOS cold-boot qualification VMs, which own a directory and
+      // deliberately no row; without it this sweep would delete one out from under a live build in
+      // the window before its vmworker takes the lock.
+      guard !known.contains(id), tasks[id] == nil, !qualifying.contains(id) else { continue }
       let lock = VMInstanceLayout.workerLockPath(in: paths.buildVMDir(id))
       guard ((try? WorkerLock.holderPID(at: lock)) ?? nil) == nil else { continue }
       try? FileManager.default.removeItem(at: directory)

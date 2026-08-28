@@ -16,6 +16,15 @@ public enum ImagePullPurpose: Sendable {
   case storage
   case instance
   case buildBase
+  /// The base of a *managed macOS provisioning* run (phase D7): the one purpose that admits an
+  /// agentless image, and only a macOS `tart` one.
+  ///
+  /// The whole point of that run is to install the guest agent this artifact does not have, so
+  /// refusing it here would refuse the only path by which a Tart export ever becomes runnable. It
+  /// stays narrow deliberately: a *Linux* tart import has no such path (Linux images are built
+  /// from a Runnerfile, not provisioned over SSH), and an agentless *RunnerVM* artifact is a
+  /// RunnerVM image someone sealed without an agent -- a mistake to report, not a base to boot.
+  case provisioningBase
 }
 
 /// A parsed remote artifact in whichever schema it turned out to be.
@@ -287,6 +296,15 @@ public enum RunnerVMImageTransfer {
     switch purpose {
     case .storage:
       return
+    case .provisioningBase:
+      // A macOS tart export is the input to the provisioning run that *installs* the agent, so it
+      // is admitted without one. Anything else on this purpose is refused exactly as `.instance`
+      // would refuse it.
+      if image.format == .tart, image.metadata.os == .macos { return }
+      guard !image.metadata.hasGuestAgent else { return }
+      throw ImageError.noGuestAgent(
+        digest: image.digest, reference: image.resolved.reference.description
+      )
     case .instance, .buildBase:
       guard !image.metadata.hasGuestAgent else { return }
       throw ImageError.noGuestAgent(
