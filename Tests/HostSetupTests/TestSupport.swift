@@ -101,6 +101,20 @@ actor FakeSmokeTestDaemon: SmokeTestDaemon {
   }
 }
 
+extension ImageInfoDTO {
+  /// A promoted macOS image whose virtual size is deliberately not a round GiB multiple: the
+  /// profile has to carry the exact byte count, and a tidy number would hide a rounding bug.
+  static func stub(
+    digest: String = "sha256:macos",
+    virtualSizeBytes: UInt64 = 68_719_479_808
+  ) -> ImageInfoDTO {
+    ImageInfoDTO(
+      digest: digest, name: SetupDefaults.managedImageName, os: "macos", architecture: "arm64",
+      state: "ready", virtualSizeBytes: virtualSizeBytes, allocatedSizeBytes: 12_884_901_888,
+      localPath: "/images/\(digest)", pinCount: 0, createdAt: "2026-08-28T00:00:00.000Z")
+  }
+}
+
 struct TestError: Error, CustomStringConvertible {
   let description: String
   init(_ description: String) { self.description = description }
@@ -172,11 +186,21 @@ actor FakeSetupDaemon: SetupDaemon {
   var operationStates: [String]
   var configApplyResult: FakeSmokeTestDaemon.Scripted<ConfigApplyResponse>
   var smokeTestPasses: Bool
+  /// The `managed_images` states `image.update.status` walks through, one per poll, repeating the
+  /// last -- the same shape `bootStates` has for an instance.
+  var updateStates: [String]
+  var updateRunResult: FakeSmokeTestDaemon.Scripted<Void>
+  var promotedDigest: String?
+  var updateError: String?
+  var imageGetResult: FakeSmokeTestDaemon.Scripted<ImageInfoDTO>
 
   private(set) var calls: [String] = []
   private(set) var appliedYAML: String?
+  /// Every document handed to `config.apply`, in order: the macOS activation is a second apply.
+  private(set) var appliedDocuments: [String] = []
   private(set) var loggedInToken: String?
   private var operationCallCount = 0
+  private var updateCallCount = 0
   private var deleted = false
 
   init(
@@ -192,8 +216,18 @@ actor FakeSetupDaemon: SetupDaemon {
       ConfigApplyResponse(
         diff: ConfigDiff(addedProfiles: ["rvm-ab12cd-ubuntu-24"]), operationId: "op-2",
         issues: [], appliedAt: "2026-08-28T00:00:00.000Z")),
-    smokeTestPasses: Bool = true
+    smokeTestPasses: Bool = true,
+    updateStates: [String] = ["idle"],
+    updateRunResult: FakeSmokeTestDaemon.Scripted<Void> = .value(()),
+    promotedDigest: String? = "sha256:macos",
+    updateError: String? = nil,
+    imageGetResult: FakeSmokeTestDaemon.Scripted<ImageInfoDTO> = .value(.stub())
   ) {
+    self.updateStates = updateStates
+    self.updateRunResult = updateRunResult
+    self.promotedDigest = promotedDigest
+    self.updateError = updateError
+    self.imageGetResult = imageGetResult
     self.authLoginResult = authLoginResult
     self.githubTestResult = githubTestResult
     self.imagePullResult = imagePullResult
@@ -233,7 +267,36 @@ actor FakeSetupDaemon: SetupDaemon {
   func configApply(yaml: String) async throws -> ConfigApplyResponse {
     calls.append("configApply")
     appliedYAML = yaml
+    appliedDocuments.append(yaml)
     return try configApplyResult.get()
+  }
+
+  // MARK: - Managed image updates
+
+  func imageUpdateRun(managed: String?) async throws -> ImageUpdateStatusResponse {
+    calls.append("imageUpdateRun(\(managed ?? "all"))")
+    try updateRunResult.get()
+    return ImageUpdateStatusResponse(tracks: [track(state: "checking")])
+  }
+
+  func imageUpdateStatus() async throws -> ImageUpdateStatusResponse {
+    calls.append("imageUpdateStatus")
+    let index = min(updateCallCount, updateStates.count - 1)
+    updateCallCount += 1
+    return ImageUpdateStatusResponse(tracks: [track(state: updateStates[index])])
+  }
+
+  func imageGet(ref: String) async throws -> ImageInfoDTO {
+    calls.append("imageGet(\(ref))")
+    return try imageGetResult.get()
+  }
+
+  private func track(state: String) -> ImageUpdateTrackDTO {
+    ImageUpdateTrackDTO(
+      name: SetupDefaults.managedImageName, kind: "macosTart",
+      sourceReference: SetupDefaults.macOSSource,
+      currentImageDigest: state == "idle" ? promotedDigest : nil,
+      state: state, lastError: updateError)
   }
 
   // MARK: - SmokeTestDaemon
@@ -243,6 +306,9 @@ actor FakeSetupDaemon: SetupDaemon {
   ) async throws -> InstanceInfoDTO {
     calls.append("instanceCreate")
     guard smokeTestPasses else { throw TestError("instance.create refused") }
+    // A fresh instance is not the deleted one: an install can run two smoke tests (Linux, then
+    // macOS), and the second must not inherit the first one's teardown.
+    deleted = false
     return .stub()
   }
 

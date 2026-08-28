@@ -13,6 +13,13 @@ public protocol SetupDaemon: SmokeTestDaemon {
   func imagePull(reference: String, format: String?) async throws -> ImagePullResponse
   func operationGet(id: String) async throws -> OperationInfo
   func configApply(yaml: String) async throws -> ConfigApplyResponse
+  /// Drives the managed macOS source's build → qualify → promote run, and follows it. The run
+  /// outlives the call, so `imageUpdateStatus` is the half that reports progress.
+  func imageUpdateRun(managed: String?) async throws -> ImageUpdateStatusResponse
+  func imageUpdateStatus() async throws -> ImageUpdateStatusResponse
+  /// Reads the promoted image's exact virtual size, which is what a macOS profile's `disk` must
+  /// equal — a macOS guest cannot resize its APFS container.
+  func imageGet(ref: String) async throws -> ImageInfoDTO
 }
 
 extension DaemonClient: SetupDaemon {}
@@ -76,5 +83,8 @@ public struct SetupReport: Sendable, Hashable, Codable {
     public static let imagePull = "linux image"
     public static let configApply = "profiles applied"
     public static let smokeTest = "smoke test"
+    public static let macOSImage = "macos image"
+    public static let macOSProfile = "macos profile"
+    public static let macOSSmokeTest = "macos smoke test"
   }
 }

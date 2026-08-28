@@ -35,6 +35,10 @@ public struct SetupPlan: Sendable, Hashable {
   public var stateDir: String
   public var runtimeDir: String
   public var account: ServiceAccountSpec
+  /// Kept so a third document can be rendered later, once the macOS image exists and its exact
+  /// virtual size is known. Everything else in the plan is derived from these two.
+  public var answers: SetupAnswers
+  public var facts: SetupHostFacts
   /// Written before the daemon first starts. Carries no `profiles:` block: a profile whose image
   /// is not in the store yet would make `config apply` fail or stall on a pull at boot.
   public var configWithoutProfiles: String
@@ -50,6 +54,25 @@ public struct SetupPlan: Sendable, Hashable {
   public var socketPath: String { "\(runtimeDir)/runnerd.sock" }
   /// The profiles that will be live after `config apply`, as opposed to the deferred macOS one.
   public var activeProfiles: [PlannedProfile] { profiles.filter { !$0.deferred } }
+
+  /// The macOS profile the plan declared but could not activate yet, if any.
+  public var macOSProfile: PlannedProfile? {
+    profiles.first { $0.deferred && $0.guestOS == .macos }
+  }
+
+  /// The third document: `configFinal` with the macOS profile emitted as a live entry, sized to the
+  /// promoted image's exact virtual size.
+  ///
+  /// It cannot be computed up front — the number does not exist until a provisioning run has built,
+  /// qualified and promoted an image — which is the whole reason the macOS profile ships commented
+  /// out and is rewritten afterwards.
+  public func configActivatingMacOS(diskBytes: UInt64) -> String {
+    SetupYAML.render(
+      SetupYAML.Context(
+        answers: answers, facts: facts, stateDir: stateDir, profiles: profiles, managed: managed,
+        macOSDiskBytes: diskBytes),
+      includeProfiles: true)
+  }
 }
 
 /// `SetupAnswers` + `SetupHostFacts` -> `SetupPlan`.
@@ -95,6 +118,8 @@ public enum SetupPlanner {
       stateDir: stateDir,
       runtimeDir: runtimeDir,
       account: ServiceAccountSpec(home: "\(stateDir)/home"),
+      answers: answers,
+      facts: facts,
       configWithoutProfiles: SetupYAML.render(context, includeProfiles: false),
       configFinal: SetupYAML.render(context, includeProfiles: true),
       profiles: profiles,

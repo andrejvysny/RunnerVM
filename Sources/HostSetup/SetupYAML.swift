@@ -15,6 +15,22 @@ enum SetupYAML {
     var stateDir: String
     var profiles: [PlannedProfile]
     var managed: [ManagedImageSourceConfig]
+    /// The promoted macOS image's exact virtual size. `nil` until a provisioning run has produced
+    /// one, which is what keeps the macOS profile commented out.
+    var macOSDiskBytes: UInt64?
+
+    init(
+      answers: SetupAnswers, facts: SetupHostFacts, stateDir: String,
+      profiles: [PlannedProfile], managed: [ManagedImageSourceConfig],
+      macOSDiskBytes: UInt64? = nil
+    ) {
+      self.answers = answers
+      self.facts = facts
+      self.stateDir = stateDir
+      self.profiles = profiles
+      self.managed = managed
+      self.macOSDiskBytes = macOSDiskBytes
+    }
   }
 
   static func render(_ context: Context, includeProfiles: Bool) -> String {
@@ -144,7 +160,10 @@ enum SetupYAML {
   // MARK: - profiles
 
   private static func profilesBlock(_ context: Context) -> String {
-    let active = context.profiles.filter { !$0.deferred }
+    // A deferred macOS profile becomes a live one the moment its image's size is known: that
+    // number is the only thing that was missing.
+    let diskBytes = context.macOSDiskBytes
+    let active = context.profiles.filter { !$0.deferred || diskBytes != nil }
     var lines: [String] = []
     if active.isEmpty {
       lines.append("# No runner profiles: no environment was selected at setup time.")
@@ -152,9 +171,14 @@ enum SetupYAML {
     } else {
       lines.append("profiles:")
       for profile in active {
-        lines.append(contentsOf: linuxProfileLines(profile, context: context))
+        if profile.guestOS == .macos, let diskBytes {
+          lines.append(contentsOf: macOSProfileLines(profile, context: context, diskBytes: diskBytes))
+        } else {
+          lines.append(contentsOf: linuxProfileLines(profile, context: context))
+        }
       }
     }
+    guard diskBytes == nil else { return lines.joined(separator: "\n") }
     for profile in context.profiles where profile.deferred {
       lines.append("")
       lines.append(contentsOf: macOSProfileBlock(profile, context: context))
@@ -182,17 +206,46 @@ enum SetupYAML {
     ]
   }
 
-  /// The macOS profile is emitted commented out, not active.
+  /// The live macOS profile, written only after a provisioning run has promoted an image.
+  ///
+  /// `disk` is the promoted image's exact virtual size in bytes, not a rounded unit: a macOS guest
+  /// cannot resize its APFS container, so a profile whose `disk` differs from the image's by a
+  /// single byte is a profile no instance can boot. It is spelled with the `B` suffix so it stays
+  /// a string YAML resolves the same way `16GiB` is resolved.
+  static func macOSProfileLines(
+    _ profile: PlannedProfile, context: Context, diskBytes: UInt64
+  ) -> [String] {
+    [
+      commented("  - name: \(profile.name)", "also the runs-on label and the scale-set name"),
+      "    scope: \(context.answers.scope.configName)",
+      commented("    image: \(profile.image)", "the images.managed[] alias, above"),
+      "    os: macos",
+      commented("    lifecycle: ephemeral", "one job per VM, then destroyed"),
+      "    resources:",
+      "      cpu: \(profile.resources.cpuCount)",
+      "      memory: \(bytes(profile.resources.memoryBytes))",
+      commented(
+        "      disk: \(bytes(diskBytes))", "the promoted image's exact virtual size"),
+      "    limits:",
+      "      maxInstances: \(profile.maxInstances)",
+    ]
+  }
+
+  /// The macOS profile as it is emitted *before* an image exists: commented out.
   ///
   /// Two reasons, both hard: the managed image does not exist until a local provisioning run has
-  /// produced and promoted it (phase D7), and a macOS guest cannot resize its APFS container, so
+  /// produced and promoted it, and a macOS guest cannot resize its APFS container, so
   /// `resources.disk` must equal the produced image's exact virtual size — a number nobody has
   /// before that run. An active profile pointing at a missing alias would fail every job on it.
+  ///
+  /// `setup --macos` normally never leaves this in place: it runs the provisioning itself and
+  /// re-renders the document through `macOSProfileLines`. This block is what a host is left with
+  /// when that run failed or was not asked for.
   static func macOSProfileBlock(_ profile: PlannedProfile, context: Context) -> [String] {
     [
       "# macOS profile — activate after the managed image has been provisioned and promoted.",
       "#",
-      "# macOS image provisioning lands with the managed-image service (phase D7). Once it ships:",
+      "# Provision it, which builds, qualifies and promotes a local image:",
       "#   sudo runnerctl image update run --managed \(context.answers.managedImageName)",
       "# then uncomment this block, set `disk` to the image's exact virtual size (macOS guests",
       "# cannot resize their APFS container, so the profile must match the image), and apply:",
@@ -225,13 +278,17 @@ enum SetupYAML {
     return code + String(repeating: " ", count: padding) + "# " + note
   }
 
-  /// Exact binary multiples only: every size this renderer emits is one by construction, and a
-  /// rounded "3.5GiB" would not round-trip through `ByteSize`.
+  /// Exact binary multiples where the value is one, a plain byte count otherwise — never a rounded
+  /// "3.5GiB", which would not round-trip through `ByteSize`.
+  ///
+  /// The fallback carries the `B` suffix on purpose: a bare integer is a YAML *number*, and
+  /// `ByteSize` decodes from a string, so `disk: 68719476736` would fail to load while
+  /// `disk: 68719476736B` is exactly the same quantity and does.
   private static func bytes(_ value: UInt64) -> String {
     let units: [(String, UInt64)] = [("TiB", 1 << 40), ("GiB", 1 << 30), ("MiB", 1 << 20)]
     for (name, factor) in units where value >= factor && value % factor == 0 {
       return "\(value / factor)\(name)"
     }
-    return "\(value)"
+    return "\(value)B"
   }
 }

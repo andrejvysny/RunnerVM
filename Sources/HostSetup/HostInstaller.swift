@@ -47,12 +47,25 @@ public struct HostInstaller: Sendable {
   static let chmod = "/bin/chmod"
   static let operationPollInterval = Duration.seconds(2)
 
-  private let deps: Dependencies
-  private let dryRun: Bool
+  let deps: Dependencies
+  let dryRun: Bool
+  /// How long a macOS provisioning run may take before `setup` stops waiting on it. Two hours by
+  /// default: a full Tart-base clone, provision, seal and qualification is a long job, and the
+  /// host stays Linux-ready either way.
+  let macOSTimeout: Duration
+  /// State transitions are the only progress a managed run publishes, so polling faster than this
+  /// only adds noise.
+  let macOSPollInterval: Duration
 
-  public init(_ deps: Dependencies, dryRun: Bool = false) {
+  public init(
+    _ deps: Dependencies, dryRun: Bool = false,
+    macOSTimeout: Duration = .seconds(7_200),
+    macOSPollInterval: Duration = .seconds(15)
+  ) {
     self.deps = deps
     self.dryRun = dryRun
+    self.macOSTimeout = macOSTimeout
+    self.macOSPollInterval = macOSPollInterval
   }
 
   // MARK: - Entry point
@@ -81,6 +94,7 @@ public struct HostInstaller: Sendable {
     let pulled = await imagePullStep(daemon, plan: plan, report: &report)
     await configApplyStep(daemon, plan: plan, report: &report)
     await smokeTestStep(daemon, plan: plan, pulled: pulled, report: &report)
+    await macOSStep(daemon, plan: plan, report: &report)
     return await finish(plan, report)
   }
 
@@ -371,13 +385,19 @@ public struct HostInstaller: Sendable {
     io.heading(dryRun ? "Plan" : "Result")
     for line in report.ladder { io.say(line) }
 
-    guard !plan.activeProfiles.isEmpty else { return }
+    // The macOS profile is live only if its own step said so: it was activated by a third
+    // `config apply` after the image was promoted, which may not have happened.
+    let macOSLive = report.step(named: SetupReport.Name.macOSProfile)?.ok == true
+    let live = plan.activeProfiles + (macOSLive ? [plan.macOSProfile].compactMap { $0 } : [])
+    guard !live.isEmpty else { return }
     io.heading("Use it")
-    io.say("Labels: \(plan.labels.joined(separator: ", "))")
+    var labels: [String] = []
+    for label in live.flatMap(\.labels) where !labels.contains(label) { labels.append(label) }
+    io.say("Labels: \(labels.joined(separator: ", "))")
     io.say("")
     io.say("jobs:")
     io.say("  build:")
-    for profile in plan.activeProfiles {
+    for profile in live {
       // Scale-set matching (the production default) is single-label: the scale set carries
       // exactly one label — the profile name — and a multi-label runs-on never matches it
       // (found live 2026-08-26, commit b9ab328). The [self-hosted, …] form is JIT-origin only.
@@ -386,19 +406,23 @@ public struct HostInstaller: Sendable {
     io.say("")
     io.say("Then:  sudo runnerctl doctor        # full health check")
     io.say("       sudo runnerctl status        # capacity and live instances")
-    if plan.managed.contains(where: { $0.kind == .macosTart }) {
+    guard !macOSLive else { return }
+    for entry in plan.managed where entry.kind == .macosTart {
       io.say("")
-      // TODO(D7): drop this once the managed-image service can provision macOS itself; the macOS
-      // profile block in the generated config carries the same instruction.
-      io.say("macOS image provisioning lands with the managed-image service (D7): after it ships")
-      for entry in plan.managed where entry.kind == .macosTart {
-        io.say("run `sudo runnerctl image update run --managed \(entry.name)`, then uncomment the")
-        io.say("macOS profile at the bottom of \(plan.configPath).")
+      guard !dryRun else {
+        io.say("A real run would then provision the macOS image from \(entry.source), size the")
+        io.say("macOS profile to it and apply a third document activating that profile.")
+        continue
       }
+      io.say("The macOS image is not ready, so its profile is still commented out. Retry with:")
+      io.say("  sudo runnerctl image update run --managed \(entry.name)")
+      io.say("then set the macOS profile's `disk` to the promoted image's exact virtual size")
+      io.say("(`sudo runnerctl image inspect \(entry.name)`), uncomment it in \(plan.configPath)")
+      io.say("and apply:  sudo runnerctl config apply --file \(plan.configPath)")
     }
   }
 
-  private func describe(_ error: any Error) -> String {
+  func describe(_ error: any Error) -> String {
     guard let runnerError = error as? any RunnerError else { return "\(error)" }
     return "\(runnerError.code): \(runnerError.message)"
   }

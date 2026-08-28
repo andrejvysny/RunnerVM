@@ -42,7 +42,8 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
 - [x] D9 guest CI keychain (Go + Swift selfTest wiring + e2e keychain workflow job all landed; not
       yet run on hardware): `GuestAgent/internal/keychain`, startRunner fail-closed env,
       `agent.selfTest`, capability, Proto + Swift DTOs, `.github/workflows/e2e.yml` `keychain` job
-- [ ] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged)
+- [x] D10 `runnerctl upgrade` (--check/--version, drain, backup, rollback-if-schema-unchanged) +
+      `setup --macos` provisions/sizes/activates the macOS profile for real (needs live validation)
 - [x] Docs sweep: README/SETUP/install/qualification/macos-guests/published-images/release/
       status/CHANGELOG/AGENTS/Proto
 - [ ] Hardware/live matrix (user Macs): blackpen pkg install + wizard + reboot loop + upgrade;

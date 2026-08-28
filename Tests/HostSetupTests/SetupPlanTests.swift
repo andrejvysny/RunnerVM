@@ -77,6 +77,41 @@ import Testing
     #expect(!final.contains("\n  - name: rvm-ab12cd-macos-tahoe"))
   }
 
+  /// The third document: the same plan, re-rendered once a provisioning run has produced an image
+  /// and its exact virtual size is finally knowable.
+  @Test func theActivatedMacOSDocumentLoadsWithTheProfileSizedToTheImage() throws {
+    let exact: UInt64 = 68_719_479_808
+    let document = plan(.stub(macOSEnabled: true)).configActivatingMacOS(diskBytes: exact)
+    let config = try loadAndValidate(document)
+
+    let profile = try #require(config.profile(named: "rvm-ab12cd-macos-tahoe"))
+    #expect(profile.guestOS == .macos)
+    #expect(profile.scope == "repo")
+    #expect(profile.image == "macos-tahoe-base")
+    #expect(profile.lifecycle == .ephemeral)
+    // Exactly the image's virtual size, to the byte: a macOS guest cannot resize its APFS
+    // container, so anything else is an unbootable profile.
+    #expect(profile.resources.diskBytes == exact)
+    #expect(profile.resources.cpuCount == SetupDefaults.macOSResources.cpuCount)
+    #expect(profile.resources.memoryBytes == SetupDefaults.macOSResources.memoryBytes)
+    #expect(profile.limits.maxInstances == 1)
+    // The Linux profile is still there, and the commented block is gone.
+    #expect(config.profile(named: "rvm-ab12cd-ubuntu-24") != nil)
+    #expect(!document.contains("# macOS profile — activate after"))
+  }
+
+  /// A byte count that is not a binary multiple has to survive the YAML round trip. A bare integer
+  /// would be a YAML *number*, and `ByteSize` decodes from a string, so the `B` suffix is load
+  /// bearing rather than decorative.
+  @Test func anExactByteCountIsEmittedWithItsUnitSoItStillParses() throws {
+    let odd: UInt64 = 68_719_479_809
+    let document = plan(.stub(macOSEnabled: true)).configActivatingMacOS(diskBytes: odd)
+
+    #expect(document.contains("disk: 68719479809B"))
+    let config = try ConfigLoader.load(yaml: document)
+    #expect(config.profile(named: "rvm-ab12cd-macos-tahoe")?.resources.diskBytes == odd)
+  }
+
   @Test func aPlanWithNoManagedSourcesEmitsNoManagedBlock() {
     #expect(!plan().configFinal.contains("managed:"))
   }

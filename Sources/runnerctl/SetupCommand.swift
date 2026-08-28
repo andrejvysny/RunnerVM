@@ -49,11 +49,22 @@ struct SetupCommand: AsyncParsableCommand {
     help: "Create the Linux runner profile.")
   var linux = true
 
-  @Flag(name: .long, help: "Also declare a macOS runner profile (provisioned later, phase D7).")
+  @Flag(
+    name: .long,
+    help: ArgumentHelp(
+      "Also provision a macOS runner profile.",
+      discussion: "setup drives the managed build -> qualify -> promote run, sizes the profile "
+        + "to the promoted image and activates it. Expect an hour or more; a failure leaves the "
+        + "host Linux-ready with the macOS profile commented out."))
   var macos = false
 
   @Option(name: .long, help: "macOS base image to track.")
   var macosSource: String = SetupDefaults.macOSSource
+
+  @Option(
+    name: .long,
+    help: "How long to wait for the macOS provisioning run. 120m, 3h, 7200s.")
+  var macosTimeout: String = "120m"
 
   @Option(name: .long, help: "Concurrent Linux runners. Default: what the host's capacity allows.")
   var linuxConcurrency: Int?
@@ -95,6 +106,9 @@ struct SetupCommand: AsyncParsableCommand {
     if let profilePrefix, !RunnerConfiguration.isValidProfileName(profilePrefix) {
       throw ValidationError("--profile-prefix must match [a-z0-9][a-z0-9._-]*")
     }
+    guard (try? DurationValue(parsing: macosTimeout)) != nil else {
+      throw ValidationError("--macos-timeout must be a duration like 120m, 3h or 7200s")
+    }
     guard dryRun || geteuid() == 0 else {
       throw ValidationError(
         "setup writes to /Library and creates a service account, so it needs root: "
@@ -123,7 +137,9 @@ struct SetupCommand: AsyncParsableCommand {
 
     let plan = SetupPlanner.plan(
       answers: answers, facts: facts, stateDir: stateDir, runtimeDir: runtimeDir)
-    let installer = HostInstaller(dependencies(runner: runner, io: io), dryRun: dryRun)
+    let timeout = (try? DurationValue(parsing: macosTimeout)) ?? .minutes(120)
+    let installer = HostInstaller(
+      dependencies(runner: runner, io: io), dryRun: dryRun, macOSTimeout: timeout.duration)
     let report = await installer.install(plan, token: answers.token)
     guard report.ok else { throw ExitCode(1) }
   }

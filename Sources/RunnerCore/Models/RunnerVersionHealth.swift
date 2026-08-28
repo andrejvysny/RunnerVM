@@ -87,20 +87,47 @@ public enum RunnerVersionPolicy {
   }
 }
 
-/// `major.minor.patch` with a tolerated leading `v`. Missing components count as zero, so `2.336`
-/// and `2.336.0` compare equal; anything that is not a dotted run of digits is unparsable, which
-/// the policy reports as `unknown` rather than guessing.
+/// `major.minor.patch` with a tolerated leading `v` and an optional `-suffix`. Missing components
+/// count as zero, so `2.336` and `2.336.0` compare equal; anything that is not a dotted run of
+/// digits is unparsable, which the policy reports as `unknown` rather than guessing.
 ///
 /// `public`: `GitHubControl` reuses this exact comparison to pick `RunnerReleaseHistory.latest` by
-/// true version rather than by publish date, so the two modules can never disagree about ordering.
-public struct SemanticVersion: Comparable {
+/// true version rather than by publish date, and `HostSetup` reuses it to decide whether a release
+/// is newer than the installed build — three readers that must never disagree about ordering.
+public struct SemanticVersion: Comparable, Hashable, Sendable, CustomStringConvertible {
   let parts: [Int]
+  /// Everything after the first `-`, empty for a plain release. `actions/runner` never publishes
+  /// one; RunnerVM's own tags may (`v0.3.0-rc1`), and `runnerctl upgrade` compares those.
+  public let suffix: String
 
-  public init?(_ raw: String?) {
+  public var major: Int { parts[0] }
+  public var minor: Int { parts[1] }
+  public var patch: Int { parts[2] }
+
+  public init(major: Int, minor: Int, patch: Int, suffix: String = "") {
+    parts = [major, minor, patch]
+    self.suffix = suffix
+  }
+
+  /// Strict: a pre-release suffix makes the string unparsable. `actions/runner` never publishes
+  /// one, and the health policy deliberately reports something it does not recognise as `unknown`
+  /// rather than guessing which side of a release a `-beta` build falls on.
+  public init?(_ raw: String?) { self.init(raw, allowingSuffix: false) }
+
+  /// Lenient: a RunnerVM release tag may carry `-rc1`, and `runnerctl upgrade` has to order it
+  /// against the plain release.
+  public init?(tag raw: String?) { self.init(raw, allowingSuffix: true) }
+
+  private init?(_ raw: String?, allowingSuffix: Bool) {
     guard var text = raw.map({ $0.trimmingCharacters(in: .whitespaces) }), !text.isEmpty else {
       return nil
     }
     if text.hasPrefix("v") || text.hasPrefix("V") { text = String(text.dropFirst()) }
+    var tail = ""
+    if allowingSuffix, let dash = text.firstIndex(of: "-") {
+      tail = String(text[text.index(after: dash)...])
+      text = String(text[..<dash])
+    }
     let fields = text.split(separator: ".", omittingEmptySubsequences: false)
     guard (1...3).contains(fields.count) else { return nil }
     var parsed: [Int] = []
@@ -111,10 +138,20 @@ public struct SemanticVersion: Comparable {
       parsed.append(value)
     }
     parts = parsed + Array(repeating: 0, count: 3 - parsed.count)
+    suffix = tail
   }
 
   public static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
     for (left, right) in zip(lhs.parts, rhs.parts) where left != right { return left < right }
-    return false
+    // A pre-release of X.Y.Z precedes the release itself; two suffixes order lexically, which is
+    // right for rc1 < rc2 and admittedly arbitrary for anything else.
+    if lhs.suffix == rhs.suffix { return false }
+    if lhs.suffix.isEmpty { return false }
+    if rhs.suffix.isEmpty { return true }
+    return lhs.suffix < rhs.suffix
+  }
+
+  public var description: String {
+    "\(major).\(minor).\(patch)" + (suffix.isEmpty ? "" : "-\(suffix)")
   }
 }

@@ -133,8 +133,8 @@ public struct SetupWizard: Sendable {
   private func askEnvironments() -> (linux: Bool, macOS: Bool) {
     io.heading("Runner environments")
     let linux = io.confirm("Linux runners (ubuntu-24)?", default: true)
-    io.say("macOS guests are provisioned locally from a Cirrus Tart base; that lands with the")
-    io.say("managed-image service and is not usable on the day this host is installed.")
+    io.say("macOS guests are provisioned locally from a Cirrus Tart base. setup runs that build,")
+    io.say("qualifies it and activates the profile, which can take an hour or more.")
     let macOS = io.confirm("macOS runners?", default: false)
     if !linux, !macOS {
       io.say("")

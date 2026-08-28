@@ -98,13 +98,26 @@ import Testing
     #expect(io.output.contains("runnerctl doctor"))
   }
 
-  @Test func pointsAtTheManagedImageFollowUpWhenMacOSWasSelected() async {
+  @Test func aProvisionedMacOSProfileJoinsTheRunsOnSample() async {
     let io = ScriptedSetupIO(answers: [])
     _ = await HostInstaller(Self.dependencies(io: io))
       .install(Self.plan(macOS: true), token: "ghp_x")
 
-    #expect(io.output.contains("managed-image service (D7)"))
-    #expect(io.output.contains("runnerctl image update run --managed macos-tahoe-base"))
+    #expect(io.output.contains("Labels: self-hosted, rvm-ab12cd-ubuntu-24, rvm-ab12cd-macos-tahoe"))
+    #expect(io.output.contains("runs-on: rvm-ab12cd-macos-tahoe"))
+    // Nothing to retry: the profile is live.
+    #expect(!io.output.contains("image update run --managed"))
+  }
+
+  @Test func aFailedMacOSProvisioningRunPrintsTheRetryCommand() async {
+    let io = ScriptedSetupIO(answers: [])
+    let daemon = FakeSetupDaemon(updateStates: ["building", "failed"], updateError: "seal failed")
+    _ = await HostInstaller(Self.dependencies(io: io, daemon: daemon))
+      .install(Self.plan(macOS: true), token: "ghp_x")
+
+    #expect(io.output.contains("still a working Linux runner host"))
+    #expect(io.output.contains("sudo runnerctl image update run --managed macos-tahoe-base"))
+    #expect(!io.output.contains("runs-on: rvm-ab12cd-macos-tahoe"))
   }
 
   // MARK: - Token handling
@@ -283,6 +296,91 @@ import Testing
     #expect(io.output.contains("Commands this would run"))
     #expect(io.output.contains("(bootstrap)"))
     #expect(io.output.contains("(final, applied after the images are in place)"))
+  }
+
+  // MARK: - macOS provisioning
+
+  /// The tail `setup --macos` adds: provision the managed image, size the profile to it, apply a
+  /// third document, then prove the result by booting it.
+  @Test func provisionsSizesActivatesAndProvesTheMacOSProfile() async throws {
+    let daemon = FakeSetupDaemon(updateStates: ["checking", "building", "qualifying", "idle"])
+    let report = await HostInstaller(Self.dependencies(daemon: daemon))
+      .install(Self.plan(macOS: true), token: "ghp_x")
+
+    #expect(report.ok, "\(report.failed)")
+    #expect(names(report).suffix(3) == [
+      SetupReport.Name.macOSImage, SetupReport.Name.macOSProfile,
+      SetupReport.Name.macOSSmokeTest,
+    ])
+    let calls = await daemon.calls
+    #expect(calls.contains("imageUpdateRun(macos-tahoe-base)"))
+    // Asked for by the promoted digest, not by the alias: the track already knows which bytes won.
+    #expect(calls.contains("imageGet(sha256:macos)"))
+  }
+
+  /// The exact virtual size, in bytes, with the `B` suffix that keeps it a YAML string: a macOS
+  /// guest cannot resize its APFS container, so a rounded number is an unbootable profile.
+  @Test func theThirdDocumentCarriesTheProfileSizedToTheImage() async throws {
+    let daemon = FakeSetupDaemon()
+    let plan = Self.plan(macOS: true)
+    _ = await HostInstaller(Self.dependencies(daemon: daemon)).install(plan, token: "ghp_x")
+
+    let documents = await daemon.appliedDocuments
+    #expect(documents.count == 2)
+    #expect(documents[0] == plan.configFinal)
+    // The first apply still has the profile commented out; the second one activates it.
+    #expect(!documents[0].contains("\n  - name: rvm-ab12cd-macos-tahoe"))
+    #expect(documents[1].contains("  - name: rvm-ab12cd-macos-tahoe"))
+    #expect(documents[1].contains("      disk: 68719479808B"))
+    #expect(!documents[1].contains("# macOS profile — activate after"))
+    // And the file on disk is rewritten to match what the daemon now holds.
+    #expect(documents[1] == plan.configActivatingMacOS(diskBytes: 68_719_479_808))
+  }
+
+  @Test func aFailedProvisioningRunLeavesTheLinuxHalfIntact() async {
+    let daemon = FakeSetupDaemon(updateStates: ["building", "failed"], updateError: "seal failed")
+    let report = await HostInstaller(Self.dependencies(daemon: daemon))
+      .install(Self.plan(macOS: true), token: "ghp_x")
+
+    #expect(!report.ok)
+    #expect(report.step(named: SetupReport.Name.macOSImage)?.detail == "seal failed")
+    // Nothing past the failed step ran, and the Linux install is untouched.
+    #expect(report.step(named: SetupReport.Name.macOSProfile) == nil)
+    #expect(report.step(named: SetupReport.Name.smokeTest)?.ok == true)
+    #expect(report.step(named: SetupReport.Name.configApply)?.ok == true)
+    #expect(await daemon.appliedDocuments.count == 1)
+  }
+
+  @Test func aRunThatNeverSettlesTimesOutRatherThanWaitingForever() async {
+    let daemon = FakeSetupDaemon(updateStates: ["building"])
+    let report = await HostInstaller(
+      Self.dependencies(daemon: daemon),
+      macOSTimeout: .seconds(60), macOSPollInterval: .seconds(15))
+      .install(Self.plan(macOS: true), token: "ghp_x")
+
+    #expect(report.step(named: SetupReport.Name.macOSImage)?.ok == false)
+    #expect(report.step(named: SetupReport.Name.macOSImage)?.detail.contains("still building") == true)
+    // Five status polls: one per interval up to the timeout, plus the one that reports it.
+    #expect(await daemon.calls.filter { $0 == "imageUpdateStatus" }.count == 5)
+    #expect(await daemon.appliedDocuments.count == 1)
+  }
+
+  @Test func aRunThatFinishesWithoutPromotingAnImageIsAFailure() async {
+    let daemon = FakeSetupDaemon(promotedDigest: nil, updateError: "qualification failed")
+    let report = await HostInstaller(Self.dependencies(daemon: daemon))
+      .install(Self.plan(macOS: true), token: "ghp_x")
+
+    #expect(report.step(named: SetupReport.Name.macOSImage)?.ok == false)
+    #expect(report.step(named: SetupReport.Name.macOSImage)?.detail == "qualification failed")
+  }
+
+  @Test func aPlanWithoutMacOSNeverTouchesTheImageUpdateService() async {
+    let daemon = FakeSetupDaemon()
+    let report = await HostInstaller(Self.dependencies(daemon: daemon))
+      .install(Self.plan(), token: "ghp_x")
+
+    #expect(!names(report).contains(SetupReport.Name.macOSImage))
+    #expect(await !daemon.calls.contains { $0.hasPrefix("imageUpdate") })
   }
 
   // MARK: - No Linux profile

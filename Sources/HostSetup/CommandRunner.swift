@@ -182,14 +182,23 @@ public actor RecordingCommandRunner: CommandRunner {
   public struct Stub: Sendable {
     public var tokens: [String]
     public var result: CommandResult
+    /// Consumed on its first match, so a later stub with the same tokens answers the next call.
+    /// The one case that needs it is a command run twice with identical argv and two different
+    /// truths -- the schema query an upgrade makes before and after the swap.
+    public var once: Bool
 
-    public init(_ tokens: [String], _ result: CommandResult) {
+    public init(_ tokens: [String], _ result: CommandResult, once: Bool = false) {
       self.tokens = tokens
       self.result = result
+      self.once = once
     }
 
     public static func stdout(_ tokens: [String], _ text: String) -> Stub {
       Stub(tokens, CommandResult(exitCode: 0, stdout: text))
+    }
+
+    public static func once(_ tokens: [String], _ text: String) -> Stub {
+      Stub(tokens, CommandResult(exitCode: 0, stdout: text), once: true)
     }
 
     public static func failure(_ tokens: [String], _ exitCode: Int32 = 1, _ detail: String = "") -> Stub {
@@ -208,14 +217,20 @@ public actor RecordingCommandRunner: CommandRunner {
 
   public func run(_ argv: [String], stdin _: String?) async throws -> CommandResult {
     commands.append(argv)
-    let match = stubs.first { stub in
+    guard let index = stubs.firstIndex(where: { stub in
       stub.tokens.allSatisfy { token in argv.contains { $0.contains(token) } }
-    }
-    return match?.result ?? fallback
+    }) else { return fallback }
+    let stub = stubs[index]
+    if stub.once { stubs.remove(at: index) }
+    return stub.result
   }
 
   /// The recorded commands as single strings, for readable expectations.
   public var lines: [String] { commands.map { $0.joined(separator: " ") } }
+
+  /// Clears the recording, so a second phase of the same scenario — a rollback after an upgrade —
+  /// can assert on its own sequence rather than on everything since the start.
+  public func reset() { commands.removeAll() }
 
   public func add(_ stub: Stub) { stubs.insert(stub, at: 0) }
 }
