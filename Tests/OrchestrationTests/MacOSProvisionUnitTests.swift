@@ -315,18 +315,18 @@ import Testing
 
 /// The SSH gate's probe, against a real loopback listener rather than a seam.
 @Suite struct TCPPortProbeTests {
-  @Test func aBoundListenerReadsAsOpen() throws {
+  @Test func aBoundListenerReadsAsOpen() async throws {
     let (fd, port) = try Self.bindListener()
     defer { close(fd) }
 
-    #expect(TCPPortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(500)))
+    #expect(await TCPPortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(500)))
   }
 
-  @Test func aClosedPortReadsAsClosed() throws {
+  @Test func aClosedPortReadsAsClosed() async throws {
     let (fd, port) = try Self.bindListener()
     close(fd)
 
-    #expect(!TCPPortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(300)))
+    #expect(!(await TCPPortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(300))))
   }
 
   /// Binds an ephemeral loopback listener and reports which port the kernel chose.

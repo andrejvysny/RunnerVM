@@ -95,7 +95,18 @@ public enum SetupError: RunnerError {
 public struct DefaultCommandRunner: CommandRunner {
   public init() {}
 
+  /// The whole spawn/drain/wait sequence is blocking, so it runs on a GCD thread: parking a
+  /// cooperative-pool thread per subprocess starves every other task in the process (measured
+  /// 2026-08-28 on CI's 3-thread pool).
   public func run(_ argv: [String], stdin: String?) async throws -> CommandResult {
+    try await withCheckedThrowingContinuation { continuation in
+      DispatchQueue.global(qos: .utility).async {
+        continuation.resume(with: Result { try Self.blockingRun(argv, stdin: stdin) })
+      }
+    }
+  }
+
+  private static func blockingRun(_ argv: [String], stdin: String?) throws -> CommandResult {
     guard let executable = argv.first else {
       throw SetupError.executableMissing("<empty command>")
     }

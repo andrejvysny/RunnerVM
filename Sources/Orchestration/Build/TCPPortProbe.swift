@@ -17,7 +17,19 @@ enum TCPPortProbe {
   /// True when something answers on `host:port` within `timeout` (a listener accepted the
   /// connection, or has not yet refused it); false once the connection is actively refused or
   /// nothing answers before the timeout.
-  static func isOpen(host: String, port: UInt16, timeout: Duration) -> Bool {
+  /// Runs the blocking POSIX probe on a GCD thread: `connect`/`poll` can park a thread for the
+  /// whole timeout, and parking a cooperative-pool thread starves every other task in the
+  /// process (measured 2026-08-28: the CI runner's 3-thread pool starved the metrics endpoint's
+  /// request handling into URLSession timeouts).
+  static func isOpen(host: String, port: UInt16, timeout: Duration) async -> Bool {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .utility).async {
+        continuation.resume(returning: blockingIsOpen(host: host, port: port, timeout: timeout))
+      }
+    }
+  }
+
+  private static func blockingIsOpen(host: String, port: UInt16, timeout: Duration) -> Bool {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return false }
     defer { close(fd) }

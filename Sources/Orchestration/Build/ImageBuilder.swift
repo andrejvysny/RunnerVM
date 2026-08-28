@@ -60,8 +60,8 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     public var macosSSHProbeTimeout: Duration = .seconds(3)
     /// The "is port 22 open?" check the qualification gate runs. A seam so a test can point it at
     /// a real local listener (or at nothing) without needing a guest.
-    public var sshProbe: @Sendable (String, UInt16, Duration) -> Bool = {
-      TCPPortProbe.isOpen(host: $0, port: $1, timeout: $2)
+    public var sshProbe: @Sendable (String, UInt16, Duration) async -> Bool = {
+      await TCPPortProbe.isOpen(host: $0, port: $1, timeout: $2)
     }
     public var worker = BuilderWorkerDefaults()
     /// Assumed size of a cloud base before it has been downloaded, for the disk reservation (N3).

@@ -187,7 +187,7 @@ public struct SmokeTest<Daemon: SmokeTestDaemon>: Sendable {
       guard let address = info.ipAddresses.first else {
         return SmokeTestCheck(name: "guest.sshClosed", ok: true, detail: "no IP reported; skipped")
       }
-      let open = PortProbe.isOpen(host: address, port: sshPort, timeout: .seconds(3))
+      let open = await PortProbe.isOpen(host: address, port: sshPort, timeout: .seconds(3))
       return SmokeTestCheck(
         name: "guest.sshClosed", ok: !open,
         detail: open
@@ -217,7 +217,7 @@ public struct SmokeTest<Daemon: SmokeTestDaemon>: Sendable {
       detail: directoryGone ? "removed" : directory.path))
 
     let shortId = String(id.prefix(RunnerPaths.shortIDLength))
-    let leaked = Self.vmworkerRunning(matching: shortId)
+    let leaked = await Self.vmworkerRunning(matching: shortId)
     checks.append(SmokeTestCheck(
       name: "leak.vmworkerProcess", ok: !leaked,
       detail: leaked ? "a vmworker process still references \(shortId)" : "none"))
@@ -257,9 +257,17 @@ public struct SmokeTest<Daemon: SmokeTestDaemon>: Sendable {
     return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
   }
 
-  /// Blocking, like every other host-probe subprocess in `runnerctl` (`DoctorChecks.runProcess`):
-  /// short-lived by construction, so there is nothing to gain from a background thread.
-  private static func vmworkerRunning(matching shortId: String) -> Bool {
+  /// The `ps` scan is blocking (`readDataToEndOfFile` + `waitUntilExit`), so it runs on a GCD
+  /// thread rather than parking a cooperative-pool one.
+  private static func vmworkerRunning(matching shortId: String) async -> Bool {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .utility).async {
+        continuation.resume(returning: blockingVMWorkerRunning(matching: shortId))
+      }
+    }
+  }
+
+  private static func blockingVMWorkerRunning(matching shortId: String) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/ps")
     process.arguments = ["-axo", "command"]

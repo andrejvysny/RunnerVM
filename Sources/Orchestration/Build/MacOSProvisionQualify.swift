@@ -139,7 +139,7 @@ extension ImageBuilder {
   /// exists to prevent, and an unqualified image is never promoted (spec: distribution.md).
   private func requireSSHClosed(_ run: BuildRun, address: String) async throws {
     let timeout = tuning.macosSSHProbeTimeout
-    let open = tuning.sshProbe(address, 22, timeout)
+    let open = await tuning.sshProbe(address, 22, timeout)
     await run.log?.line("--- ssh probe \(address):22 -> \(open ? "open" : "closed")")
     guard !open else {
       throw ImageBuildError.macosQualificationFailed(

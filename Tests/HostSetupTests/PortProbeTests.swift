@@ -5,21 +5,21 @@ import Testing
 @testable import HostSetup
 
 @Suite struct PortProbeTests {
-  @Test func openListenerIsDetected() throws {
+  @Test func openListenerIsDetected() async throws {
     let (fd, port) = try Self.bindListener()
     defer { close(fd) }
-    #expect(PortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(500)))
+    #expect(await PortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(500)))
   }
 
-  @Test func closedPortIsNotDetected() throws {
+  @Test func closedPortIsNotDetected() async throws {
     let (fd, port) = try Self.bindListener()
     close(fd)  // free the port; nothing is listening any more
-    #expect(!PortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(300)))
+    #expect(!(await PortProbe.isOpen(host: "127.0.0.1", port: port, timeout: .milliseconds(300))))
   }
 
-  @Test func nothingEverListenedIsNotDetected() {
+  @Test func nothingEverListenedIsNotDetected() async {
     // Port 1 is a well-known privileged port real code never binds; refused on any sane host.
-    #expect(!PortProbe.isOpen(host: "127.0.0.1", port: 1, timeout: .milliseconds(300)))
+    #expect(!(await PortProbe.isOpen(host: "127.0.0.1", port: 1, timeout: .milliseconds(300))))
   }
 
   /// Binds an ephemeral loopback listener and returns its fd (caller closes it) and the port the
