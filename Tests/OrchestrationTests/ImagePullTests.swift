@@ -197,4 +197,165 @@ import Testing
         == image.record.digest)
     }
   }
+
+  // MARK: - inspectRemote
+
+  /// The whole point of `image.inspectRemote`: learn the virtual size a profile has to declare
+  /// without paying for the disk. Only the manifest and the two config blobs may move.
+  @Test func inspectRemoteReadsTheManifestAndTransfersNoDisk() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"), withNVRAM: true)
+      harness.registry.resetRecording()
+
+      let remote = try await harness.images.inspectRemote(
+        reference: published.reference.description)
+
+      #expect(remote.manifestDigest == published.manifestDigest)
+      #expect(remote.reference.description.contains("@sha256:"))
+      #expect(remote.metadata.virtualDiskSizeBytes == PublishedImage.diskBytes)
+      #expect(remote.metadata.hasGuestAgent)
+      #expect(remote.format == .runnervm)
+      #expect(remote.transferBytes > 0)
+      // Nothing transferred, nothing written: no chunk fetch, no row, no blob.
+      #expect(published.chunkFetches(harness.registry) == 0)
+      #expect(try await harness.imageRows.list(state: nil).isEmpty)
+    }
+  }
+
+  /// An agentless image is *described*, not refused. `vm create` is where `IMAGE_NO_GUEST_AGENT`
+  /// belongs; an operator asking what a reference contains deserves the answer.
+  @Test func inspectRemoteDescribesAnAgentlessImageInsteadOfRefusingIt() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"),
+        guestAgent: false)
+
+      let remote = try await harness.images.inspectRemote(
+        reference: published.reference.description)
+
+      #expect(!remote.metadata.hasGuestAgent)
+    }
+  }
+
+  /// Resolving here must seed the same cache a pull reads, or the pull that normally follows
+  /// repeats the round trip it just paid for.
+  @Test func inspectRemoteSeedsTheTagResolutionCacheForTheFollowingPull() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      _ = try await harness.images.inspectRemote(reference: published.reference.description)
+      let afterInspect = harness.registry.requests("GET", containing: "/manifests/").count
+
+      _ = try await harness.images.pull(reference: published.reference.description)
+
+      // The pull still fetches the manifest it is about to transfer from; what it must not do is
+      // re-resolve the tag first. One manifest GET, not two.
+      #expect(harness.registry.requests("GET", containing: "/manifests/").count == afterInspect + 1)
+    }
+  }
+
+  @Test func inspectRemoteRefusesABareLocalName() async throws {
+    try await withHarness { harness in
+      await #expect(throws: (any Error).self) {
+        try await harness.images.inspectRemote(reference: M2Harness.linuxImageName)
+      }
+    }
+  }
+
+  // MARK: - images.prefetch
+
+  /// Without prefetch the transfer happens inside the first `instance.create`, so the first job
+  /// after a config change waits for the whole image and looks like a runner failure.
+  @Test func prefetchPullsEveryProfileImageWhenEnabled() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      var config = M2Harness.configuration(linuxImage: published.reference.description)
+      config.images.prefetch = true
+
+      // `updateConfiguration` starts the sweep itself, detached, exactly as `config apply` does;
+      // waiting on the row is what proves that path runs, not just the method behind it.
+      await harness.images.updateConfiguration(config)
+
+      try await waitUntil("the profile image is prefetched") {
+        try await harness.imageRows.list(state: .ready).count == 1
+      }
+      let rows = try await harness.imageRows.list(state: .ready)
+      #expect(rows.first?.canonicalReference?.contains("@sha256:") == true)
+    }
+  }
+
+  /// Off by default: prefetch turns `config apply` and daemon start into calls that reach the
+  /// network, which nobody should get without asking for it.
+  @Test func prefetchIsOffByDefault() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      let config = M2Harness.configuration(linuxImage: published.reference.description)
+      #expect(!config.images.prefetch)
+
+      await harness.images.updateConfiguration(config)
+      // Nothing to wait on when the expectation is "no work happened", so drive the sweep directly
+      // too: if the flag were ignored, this call alone would pull.
+      await harness.images.prefetchProfileImages()
+
+      #expect(try await harness.imageRows.list(state: nil).isEmpty)
+      #expect(published.chunkFetches(harness.registry) == 0)
+    }
+  }
+
+  /// A local image name is not something to pull, and the macOS profile in the default
+  /// configuration carries one — so prefetch must skip it rather than fail the sweep.
+  @Test func prefetchSkipsProfilesWhoseImageIsALocalName() async throws {
+    try await withHarness { harness in
+      var config = M2Harness.configuration()
+      config.images.prefetch = true
+
+      await harness.images.updateConfiguration(config)
+      await harness.images.prefetchProfileImages()
+
+      #expect(harness.registry.requests("GET", containing: "/manifests/").isEmpty)
+    }
+  }
+
+  /// An unreachable reference is logged and stepped over: `runnerd` must still start, the
+  /// configuration must still apply, and the profiles that *can* be prefetched still are. The
+  /// reconcile tick retries the rest.
+  @Test func prefetchSurvivesAReferenceThatCannotBeResolved() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      var config = M2Harness.configuration(linuxImage: "\(harness.registry.host)/acme/absent:1")
+      config.profiles[1].image = published.reference.description
+      config.images.prefetch = true
+
+      await harness.images.updateConfiguration(config)
+
+      try await waitUntil("the reachable profile image is still prefetched") {
+        try await harness.imageRows.list(state: .ready).count == 1
+      }
+    }
+  }
+
+  /// Repeating the sweep is what the reconcile tick does every few seconds; it must cost nothing
+  /// once the image is in the store.
+  @Test func repeatedPrefetchMovesNoBytes() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      var config = M2Harness.configuration(linuxImage: published.reference.description)
+      config.images.prefetch = true
+      await harness.images.updateConfiguration(config)
+      try await waitUntil("the first sweep lands the image") {
+        try await harness.imageRows.list(state: .ready).count == 1
+      }
+      harness.registry.resetRecording()
+
+      await harness.images.prefetchProfileImages()
+
+      #expect(published.chunkFetches(harness.registry) == 0)
+      #expect(try await harness.imageRows.list(state: .ready).count == 1)
+    }
+  }
 }

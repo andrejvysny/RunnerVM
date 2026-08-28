@@ -460,7 +460,26 @@ have an image.
 
 ---
 
-## 8. Build a runner image
+## 8. Get a runner image
+
+Two ways: pull a published one, or build your own. Pulling is faster and needs nothing installed on
+the host beyond `runnerd` itself.
+
+### Pull a published image
+
+```sh
+rvm image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+rvm image list
+```
+
+The pull prints the immutable `…@sha256:…` it resolved — **that** is what belongs in your profile's
+`image:`, not the tag. The catalogue, what is inside each image, the disk each guest needs and the
+rebuild cadence are in [`docs/published-images.md`](docs/published-images.md).
+
+`rvm registry login ghcr.io -u <user> --password-stdin` first if the package is private. The
+credential belongs to the daemon, because the daemon is what performs the pull.
+
+### Or build your own
 
 Images are built by the daemon itself, from `Runnerfile` recipes that ship with the project.
 `ubuntu-24` is `ubuntu-24-minimal` plus Docker, so build both:
@@ -474,15 +493,13 @@ rvm image list
 
 Expect roughly 3 minutes for the bootstrap (it downloads and converts the pinned Ubuntu cloud image
 and installs the guest agent) and 1.5 minutes for the derived one. `--name` is the alias your
-profile's `image:` refers to.
+profile's `image:` refers to. Build when you need software the published images do not carry, a
+pinned `actions/runner`, or a base you control end to end — see
+[`docs/image-build.md`](docs/image-build.md).
 
 > `runnerd` must be able to *read* the recipe and its build context. `_runnervm` cannot read your
 > home directory, so keep recipes under `<state-dir>/share/recipes` (where `install.sh` puts them)
 > or `<state-dir>/recipes`.
-
-Other ways to get an image: `rvm image pull ghcr.io/...` for a RunnerVM image from any OCI
-registry (`rvm registry login` first if it is private), or your own recipe — see
-[`docs/image-build.md`](docs/image-build.md).
 
 Once an image exists, `rvm scaleset list` should advertise real capacity.
 

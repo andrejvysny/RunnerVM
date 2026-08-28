@@ -29,6 +29,7 @@ public protocol DaemonService: Sendable {
 
   func imageList() async throws -> ImageListResponse
   func imageGet(_ request: ImageGetRequest) async throws -> ImageInfoDTO
+  func imageInspectRemote(_ request: ImageInspectRemoteRequest) async throws -> RemoteImageInfoDTO
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO
   /// Resolves the tag, starts (or joins) the transfer and returns: the pull itself outlives the
   /// call and is followed through `operation.get` (spec §21, §137).

@@ -17,9 +17,11 @@
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
-log()  { printf '[e2e] %s\n' "$*"; }
-warn() { printf '[e2e] warning: %s\n' "$*" >&2; }
-die()  { printf '[e2e] error: %s\n' "$*" >&2; exit 2; }
+# $LOG_PREFIX lets a non-e2e caller (scripts/publish-images.sh) label its own output without
+# shadowing these three functions; both live drivers leave it unset and stay "[e2e]".
+log()  { printf '[%s] %s\n' "${LOG_PREFIX:-e2e}" "$*"; }
+warn() { printf '[%s] warning: %s\n' "${LOG_PREFIX:-e2e}" "$*" >&2; }
+die()  { printf '[%s] error: %s\n' "${LOG_PREFIX:-e2e}" "$*" >&2; exit 2; }
 
 # --------------------------------------------------------------------------
 # runnerctl

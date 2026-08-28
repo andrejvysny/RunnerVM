@@ -67,6 +67,7 @@ public actor DaemonServer {
     await request(.scopeGet) { try await service.scopeGet($0) }
     await request(.operationGet) { try await service.operationGet($0) }
     await request(.imageGet) { try await service.imageGet($0) }
+    await request(.imageInspectRemote) { try await service.imageInspectRemote($0) }
     await request(.imageImport) { try await service.imageImport($0) }
     await request(.imagePull) { try await service.imagePull($0) }
     await request(.imagePush) { try await service.imagePush($0) }

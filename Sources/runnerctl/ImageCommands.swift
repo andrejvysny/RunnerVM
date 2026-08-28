@@ -97,18 +97,57 @@ extension Image {
 
   struct Inspect: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-      commandName: "inspect", abstract: "Show one image by digest or local name.")
+      commandName: "inspect",
+      abstract: "Show one image by digest or local name, or a registry reference with --remote.",
+      discussion: """
+        --remote reads the manifest and the two config blobs from the registry and stops there: \
+        no disk is transferred, nothing is written, and nothing is left behind. Use it to size a \
+        profile before pulling a 16-50 GiB image -- a macOS profile's resources.disk must equal \
+        the image's virtual size exactly, and a Linux one's must be at least it.
+
+        An agentless image is described, not refused: `guest agent: absent` is the answer.
+        """)
 
     @OptionGroup var options: GlobalOptions
 
-    @Argument(help: "sha256:<hex> digest or local name.")
+    @Argument(help: "sha256:<hex> digest or local name; with --remote, a registry reference.")
     var ref: String
 
+    @Flag(
+      name: .long,
+      help: "Read the reference from its registry instead of the local store. No disk is moved.")
+    var remote = false
+
+    @Option(
+      name: .long,
+      help: "--remote only: runnervm or tart. Default: auto-detect from the manifest.")
+    var format: String?
+
+    func validate() throws {
+      if format != nil, !remote {
+        throw ValidationError("--format only applies with --remote")
+      }
+      guard let format else { return }
+      guard Image.artifactFormats.contains(format) else {
+        throw ValidationError("--format must be one of \(Image.artifactFormats.joined(separator: ", "))")
+      }
+    }
+
     func run() async throws {
-      let image = try await options.withDaemon { try await $0.imageGet(ref: ref) }
+      guard remote else {
+        let image = try await options.withDaemon { try await $0.imageGet(ref: ref) }
+        switch options.output {
+        case .json: try JSONOut.print(image)
+        case .human: print(Table.fields(Image.fields(image), indent: ""))
+        }
+        return
+      }
+      let image = try await options.withDaemon {
+        try await $0.imageInspectRemote(reference: ref, format: format)
+      }
       switch options.output {
       case .json: try JSONOut.print(image)
-      case .human: print(Table.fields(Image.fields(image), indent: ""))
+      case .human: print(Table.fields(Image.remoteFields(image), indent: ""))
       }
     }
   }
@@ -221,6 +260,43 @@ extension Image {
       ("created", image.createdAt),
       ("pulled", Format.optional(image.pulledAt)),
     ] + provenanceFields(image.provenance)
+  }
+
+  /// The remote view. `resources.disk` is spelled out in bytes as well as in units because that is
+  /// the number a profile has to carry, and a macOS profile is refused unless it matches exactly.
+  static func remoteFields(_ image: RemoteImageInfoDTO) -> [(String, String)] {
+    var fields: [(String, String)] = [
+      ("reference", image.reference),
+      ("manifest digest", image.manifestDigest),
+      ("os", image.os),
+      ("architecture", image.architecture),
+      ("format", image.format == "tart" ? "tart (import is read-only)" : image.format),
+      ("virtual size", "\(Format.bytes(image.virtualSizeBytes)) (\(image.virtualSizeBytes) bytes)"),
+      ("transfer size", Format.bytes(image.transferBytes)),
+      ("runner", Format.optional(image.runnerVersion)),
+      ("runner health", image.runnerVersionHealth.rawValue),
+      ("guest agent", image.guestAgent ? "present" : "absent (cannot run a job)"),
+      ("docker", image.docker ? "yes" : "no"),
+      ("ssh", image.ssh ? "yes" : "no"),
+      ("created", image.createdAt),
+    ]
+    if let cpu = image.minimumCPUCount {
+      fields.append(("minimum cpu", "\(cpu)"))
+    }
+    if let memory = image.minimumMemoryBytes {
+      fields.append(("minimum memory", Format.bytes(memory)))
+    }
+    fields.append(("profile resources.disk", Image.diskAdvice(image)))
+    return fields
+  }
+
+  /// The disk contract differs by guest, and getting it wrong is refused at admission rather than
+  /// at boot: a macOS guest cannot resize its APFS container, so the profile must ask for exactly
+  /// the image's size (VM_MACOS_DISK_RESIZE_UNSUPPORTED); a Linux guest may ask for more.
+  static func diskAdvice(_ image: RemoteImageInfoDTO) -> String {
+    image.os == "macos"
+      ? "\(image.virtualSizeBytes)  # macOS: must equal the image exactly"
+      : ">= \(image.virtualSizeBytes)"
   }
 
   /// `tart (imported)` is worth calling out: such an image is read-only provenance, never a thing

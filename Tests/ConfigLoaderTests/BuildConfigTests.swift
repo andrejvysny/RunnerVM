@@ -205,4 +205,21 @@ struct BuildConfigTests {
         """)
     }
   }
+
+  /// Off by default: prefetch makes `config apply` and daemon start reach the network, so it has to
+  /// be asked for.
+  @Test func imagesPrefetchDefaultsToOff() throws {
+    #expect(!(try Self.load(Fixtures.minimalYAML).images.prefetch))
+  }
+
+  @Test func imagesPrefetchIsReadFromTheDocument() throws {
+    let config = try Self.load("""
+      \(Self.scopeOnly)
+      images:
+        prefetch: true
+      """)
+    #expect(config.images.prefetch)
+    // A sibling key must still default rather than be dropped by the one that was set.
+    #expect(config.images.limits == ImageLimitsConfig())
+  }
 }

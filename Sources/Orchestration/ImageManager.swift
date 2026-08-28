@@ -74,6 +74,16 @@ public actor ImageManager {
   /// `vm create`. Registry-qualified reference string → (digest, resolved at).
   var tagResolutions: [String: (digest: ImageDigest, at: Date)] = [:]
 
+  /// `images.prefetch`, plus the configured profiles' `image:` values it applies to. Held rather
+  /// than re-read from a stored configuration so `prefetchProfileImages` needs nothing passed in
+  /// and the reconcile tick can simply call it again.
+  var prefetchEnabled = ImageCacheConfig().prefetch
+  var prefetchReferences: [String] = []
+  /// One prefetch sweep at a time: every caller (config apply, daemon start, reconcile tick) is
+  /// asking for the same work, and a second concurrent sweep would only fight the first for the
+  /// `concurrentPulls` gate.
+  var prefetchRunning = false
+
   /// How long a tag → digest resolution is trusted before the registry is asked again (spec §21:
   /// the digest is what gets pinned, the tag is only a lookup key).
   public static let tagResolutionTTL: Duration = .seconds(300)
@@ -105,8 +115,46 @@ public actor ImageManager {
     concurrentPulls = max(1, config?.host.limits.concurrentImagePulls
       ?? HostConfig.Limits().concurrentImagePulls)
     hostReserveDiskBytes = config?.host.reserve.diskBytes ?? HostConfig.Reserve().diskBytes
+    prefetchEnabled = config?.images.prefetch ?? ImageCacheConfig().prefetch
+    prefetchReferences = (config?.profiles ?? []).map(\.image)
     // A raised limit must wake whoever is queued behind the old one.
     wakePullWaiters()
+    // Detached from the caller on purpose: `config apply` answers an RPC, and a profile pointing
+    // at a 16-50 GiB image must not hold that call open for the length of a download.
+    guard prefetchEnabled else { return }
+    Task { await self.prefetchProfileImages() }
+  }
+
+  /// Pulls every configured profile's registry image that is not already in the store
+  /// (`images.prefetch`).
+  ///
+  /// Without this the transfer happens inside the first `instance.create` that needs the image, so
+  /// the first job after a config change waits for the whole download and looks like a runner
+  /// failure. Idempotent and safe to repeat: an image already present resolves to a `ready` row and
+  /// returns without moving a byte, and a tag resolution is cached for `tagResolutionTTL`, so a
+  /// steady-state sweep does not even reach the registry.
+  ///
+  /// Nothing here is fatal. An unreachable registry or a missing credential must not stop `runnerd`
+  /// from starting or a configuration from applying — the reconcile tick calls this again.
+  public func prefetchProfileImages() async {
+    guard prefetchEnabled, !prefetchRunning else { return }
+    let references = prefetchReferences.filter { Self.registryReference($0) != nil }
+    guard !references.isEmpty else { return }
+    prefetchRunning = true
+    defer { prefetchRunning = false }
+    // Sequential: `concurrentPulls` already bounds real parallelism, and a burst of resolutions
+    // against one registry buys nothing.
+    for reference in references {
+      do {
+        _ = try await pull(reference: reference)
+      } catch {
+        logger.warning(
+          "image prefetch failed",
+          metadata: [
+            "reference": .string(reference), "reason": .string(String(describing: error)),
+          ])
+      }
+    }
   }
 
   // MARK: - Import

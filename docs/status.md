@@ -25,6 +25,9 @@ the host, pulled from an OCI registry, or imported from tart.
 | Bounded base-image cache | done | unit + hardware (cache hit on rebuild) |
 | Image store (content-addressed, clonefile, pins, prune, provenance) | done | tests + live |
 | OCI push/pull of RunnerVM images (GHCR-compatible transport, resumable, LZ4 chunks) | done | live 2026-08-27: built image pushed to GHCR, deleted, pulled back by manifest digest, booted, ran a job |
+| Remote inspect without transferring the disk (`image inspect --remote`) | done | unit (FakeRegistry) + live 2026-08-28 against `ghcr.io/cirruslabs/{ubuntu,macos-tahoe-base}:latest`, anonymously |
+| Prefetch profile images at config apply / daemon start (`images.prefetch`) | done, opt-in | unit (FakeRegistry): pulls, is off by default, skips local names, survives an unresolvable reference, repeats for free |
+| Publishing prebuilt images (`scripts/publish-images.sh`, `docs/published-images.md`) | script + docs done | 51 shell assertions in CI; gate ladder dry-run against the four real local images. **Nothing published yet** — the push itself is unrun |
 | **Tart image import** (`image pull ghcr.io/cirruslabs/…`, read-only, spec §58) | done | live: `ghcr.io/cirruslabs/ubuntu:latest` imported; refusal paths verified |
 | **In-daemon image builder** (`runnerctl image build`, Runnerfile recipes) | done | live 2026-08-27: built image ran a real GitHub job (`scripts/live-builder-e2e.sh` 5/5) |
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |

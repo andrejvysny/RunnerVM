@@ -57,6 +57,10 @@ public struct InstanceReconciler: ReconcileStep {
     counts.swept = await sweepRetired(retention: await retention())
     counts.orphans = await reportOrphans(known: Set(live.map(\.id)))
     _ = try? await store.sweepStaging(olderThan: await retention())
+    // `images.prefetch` retry. A no-op when the flag is off or every profile image is already in
+    // the store; this is what makes a prefetch that failed at apply time (registry unreachable, no
+    // credential yet) eventually succeed without another `config apply`.
+    await images?.prefetchProfileImages()
     return counts
   }
 

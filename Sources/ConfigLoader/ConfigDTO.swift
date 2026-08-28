@@ -138,6 +138,7 @@ struct ConfigDTO: Decodable {
 
     var cache: Cache?
     var limits: Limits?
+    var prefetch: Bool?
   }
 
   struct ImageUpdates: Decodable {

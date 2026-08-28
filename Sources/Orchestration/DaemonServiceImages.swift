@@ -26,6 +26,34 @@ extension DaemonServiceImpl {
       firstMissed: await runnerVersions.firstMissedRelease(forVersion: version))
   }
 
+  /// Spec §21, §54. Manifest and config blobs only -- no disk transfer, no row, no staging
+  /// directory. An agentless image is described, not refused: `guestAgent: false` is the answer
+  /// the caller asked for.
+  func imageInspectRemote(
+    _ request: ImageInspectRemoteRequest
+  ) async throws -> RemoteImageInfoDTO {
+    let remote = try await images.inspectRemote(
+      reference: request.reference, format: try Self.artifactFormat(request.format))
+    let metadata = remote.metadata
+    let version = metadata.runnerVersion
+    return RemoteImageInfoDTO(
+      reference: remote.reference.description,
+      manifestDigest: remote.manifestDigest.rawValue,
+      os: metadata.os.rawValue,
+      architecture: metadata.architecture,
+      format: remote.format.rawValue,
+      virtualSizeBytes: metadata.virtualDiskSizeBytes,
+      transferBytes: remote.transferBytes,
+      runnerVersion: version,
+      runnerVersionHealth: await runnerVersions.health(forVersion: version),
+      guestAgent: metadata.hasGuestAgent,
+      docker: metadata.capabilities.docker,
+      ssh: metadata.capabilities.ssh,
+      createdAt: ISO8601DateFormatter().string(from: metadata.createdAt),
+      minimumCPUCount: metadata.macos?.minimumCPUCount,
+      minimumMemoryBytes: metadata.macos?.minimumMemoryBytes)
+  }
+
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {
     guard let os = GuestOS(rawValue: request.os) else {
       throw ImageError.metadataInvalid(reason: "unknown guest os '\(request.os)'")

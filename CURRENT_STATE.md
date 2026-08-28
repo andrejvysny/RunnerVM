@@ -1,14 +1,20 @@
 # Current State
 
-Last verified: 2026-08-28 12:05 (local)
+Last verified: 2026-08-28 15:35 (local)
 
-- **Branch:** `master`. The Mac mini deployment work landed as `3d8fae8` plus a docs commit on
-  `fix/headless-deployment-defects`, merged to `master`; nothing is left uncommitted.
-- **Build/test:** `swift build && swift test --parallel` → **1379 tests / 174 suites pass** (1 known
+- **Branch:** `master`, with **uncommitted work**: publishing prebuilt images to ghcr.io plus the
+  first two pull-only improvements. New files `scripts/publish-images.sh`,
+  `scripts/tests/publish-images-test.sh`, `docs/published-images.md`; modified `ci.yml`, `README.md`,
+  `SETUP.md`, `CHANGELOG.md`, `Proto/daemon_api.md`, `docs/{images,status}.md`, and the Swift for
+  `image.inspectRemote` + `images.prefetch` (DaemonAPI, ConfigLoader, Orchestration, RunnerCore,
+  runnerctl, three test targets).
+- **Nothing has been published to ghcr.io yet.** The push needs a `write:packages` PAT; the tooling
+  and the gate ladder are done and dry-run against the real local images.
+- **Build/test:** `swift build && swift test --parallel` → **1393 tests / 174 suites pass** (1 known
   issue: `mknod` needs root). `shellcheck scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh` clean;
-  `bash scripts/tests/provision-macos-tart-test.sh` → 75/75. `swiftformat --lint` unchanged from
-  `HEAD` on every touched file (the pre-existing violations in `DaemonServiceImpl.swift` and
-  `DoctorChecks.swift` are untouched).
+  all seven shell test scripts pass (316 assertions); `actionlint` clean. `swiftformat --lint`
+  unchanged from `HEAD` on every touched file (the pre-existing violations in
+  `DaemonServiceImpl.swift` and `DoctorChecks.swift` are untouched).
 - **Deployed:** RunnerVM runs on the Mac mini `blackpen` (`ssh blackpen`) — Apple M4, 32 GiB,
   macOS 26.5.2, headless. Serves `andrejvysny/github-managed-runners` on profile `ubuntu-24`,
   3 concurrent VMs, images `ubuntu-24-minimal` + `ubuntu-24` built on the host. Install is
@@ -29,7 +35,11 @@ Last verified: 2026-08-28 12:05 (local)
   scale-set session (a stale daemon stole a live job); `provision-macos-tart.sh` could never verify
   its payload over password SSH; `runnerctl status` hardcoded "Scale sets: 0 healthy". Detail:
   `CHANGELOG.md` and `docs/verification.md` "Mac mini deployment".
-- **Key decisions:** `--group staff` on the Mac mini only because the dedicated `_runnervm` group
+- **Key decisions:** macOS images are **not published** to ghcr.io — a RunnerVM macOS image is a
+  provisioned copy of Apple's macOS and the SLA does not grant redistribution; each host builds its
+  own from `ghcr.io/cirruslabs/macos-tahoe-base:latest` via `scripts/provision-macos-tart.sh`. Only
+  `ubuntu-24-base` is published, public. Note the alias trap in `~/runnervm-dev`: the local name
+  `macos-26-base` is the **debug** image (`ssh: true`); the hardened one is `macos-26`. · `--group staff` on the Mac mini only because the dedicated `_runnervm` group
   needs root — state dir hand-tightened to 0700 · `github.auth.source: file`, not keychain, because
   the host is headless · profile names must be unique per scope across hosts (a scale set has one
   message session) · the dev Mac's `ubuntu-24` profile stays removed from `~/runnervm-dev/config.yaml`

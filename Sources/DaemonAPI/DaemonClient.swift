@@ -86,6 +86,13 @@ public actor DaemonClient {
     try await call(.imageGet, ImageGetRequest(ref: ref))
   }
 
+  public func imageInspectRemote(
+    reference: String, format: String? = nil
+  ) async throws -> RemoteImageInfoDTO {
+    try await call(
+      .imageInspectRemote, ImageInspectRemoteRequest(reference: reference, format: format))
+  }
+
   public func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {
     try await call(.imageImport, request)
   }

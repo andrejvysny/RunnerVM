@@ -111,13 +111,22 @@ public struct ImageCacheConfig: Codable, Sendable, Hashable {
   /// Grace window in which an unreferenced image is kept anyway.
   public var keepRecentlyUsed: DurationValue
   public var limits: ImageLimitsConfig
+  /// Pull every enabled profile's registry image as soon as the configuration is applied, instead
+  /// of leaving the transfer to the first `instance.create` that needs it.
+  ///
+  /// Off by default: it turns `config apply` and daemon start into operations that reach the
+  /// network. Worth turning on wherever profiles point at a registry rather than a local build,
+  /// because otherwise the first job after a config change waits for the whole image and looks
+  /// like a runner failure rather than a download.
+  public var prefetch: Bool
 
   public init(
     maxSizeBytes: UInt64? = nil, keepRecentlyUsed: DurationValue = .days(7),
-    limits: ImageLimitsConfig = ImageLimitsConfig()
+    limits: ImageLimitsConfig = ImageLimitsConfig(), prefetch: Bool = false
   ) {
     self.maxSizeBytes = maxSizeBytes
     self.keepRecentlyUsed = keepRecentlyUsed
+    self.prefetch = prefetch
     self.limits = limits
   }
 }

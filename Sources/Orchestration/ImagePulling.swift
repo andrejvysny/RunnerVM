@@ -37,6 +37,19 @@ public struct ImagePushStart: Sendable, Hashable {
   public let operationId: OperationID?
 }
 
+/// What `image.inspectRemote` learns from a registry without moving a disk byte.
+public struct RemoteImageDescription: Sendable {
+  /// `<registry>/<repository>@sha256:…` — the immutable form to pin a profile at (spec §21).
+  public let reference: OCIReference
+  /// The registry manifest digest, which is not the local content digest: that one does not exist
+  /// until the bytes do.
+  public let manifestDigest: ImageDigest
+  public let format: ImageArtifactFormat
+  public let metadata: ImageMetadata
+  /// Compressed bytes a pull would move.
+  public let transferBytes: UInt64
+}
+
 /// Registry pull and push. Split out of `ImageManager.swift` to keep that file under its line
 /// budget; every member below runs actor-isolated on `ImageManager` exactly as if declared there.
 extension ImageManager {
@@ -92,6 +105,32 @@ extension ImageManager {
     updated.lastUsedAt = .now
     try await images.upsert(updated)
     return updated
+  }
+
+  // MARK: - Remote inspection
+
+  /// What a registry says about `reference`, without transferring its disk (spec §21, §54).
+  ///
+  /// Only the manifest and the two small config blobs move, which is the same work `beginPull`
+  /// already does before it decides whether to transfer anything -- so this is the cheap half of a
+  /// pull, exposed on its own. It exists to answer "how big is it?" before a 16-50 GiB download:
+  /// a macOS profile's `resources.disk` must equal the image's virtual size *exactly*, and a Linux
+  /// one's must be at least it.
+  ///
+  /// Purpose is `.storage`, deliberately: inspecting an agentless image must succeed and report
+  /// `guestAgent: false`, not be refused the way `.instance` refuses one.
+  public func inspectRemote(
+    reference: String, format: ImageArtifactFormat? = nil
+  ) async throws -> RemoteImageDescription {
+    let ref = try Self.requireRegistryReference(reference)
+    let remote = try await RunnerVMImageTransfer.inspect(
+      ref, registry: try await registries.client(for: ref.registry), require: format)
+    // A resolution is a resolution, whoever asked for it: caching it here means the pull that
+    // usually follows does not repeat the round trip.
+    tagResolutions[ref.description] = (remote.digest, now())
+    return RemoteImageDescription(
+      reference: ref.canonical(withDigest: remote.digest), manifestDigest: remote.digest,
+      format: remote.format, metadata: remote.metadata, transferBytes: remote.transferBytes)
   }
 
   // MARK: - Pull

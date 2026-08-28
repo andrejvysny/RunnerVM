@@ -24,6 +24,8 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
 
   case imageList = "image.list"
   case imageGet = "image.get"
+  /// Manifest + config blobs only, no disk transfer: sizing a profile before the pull.
+  case imageInspectRemote = "image.inspectRemote"
   case imageImport = "image.import"
   case imagePull = "image.pull"
   case imagePush = "image.push"
@@ -95,7 +97,8 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .systemDrain, .systemResume, .systemOffline, .systemShutdown, .metricsSnapshot,
     .configGet, .configValidate, .configApply,
     .profileList, .profileGet, .scopeList, .scopeGet,
-    .imageList, .imageGet, .imageImport, .imagePull, .imagePush, .imageDelete, .imagePrune,
+    .imageList, .imageGet, .imageInspectRemote, .imageImport, .imagePull, .imagePush,
+    .imageDelete, .imagePrune,
     .imageBuild, .buildList, .buildGet, .buildLog, .buildCancel,
     .registryLogin, .registryLogout, .registryStatus,
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,

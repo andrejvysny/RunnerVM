@@ -57,6 +57,7 @@ enum ConfigSchema {
     "images": .object([
       "cache": .object(["maxSize": .scalar, "keepRecentlyUsed": .scalar]),
       "limits": .object(["maxVirtualDiskSize": .scalar, "maxLayers": .scalar]),
+      "prefetch": .scalar,
     ]),
     "imageUpdates": .object(["recycleReusable": .scalar, "denyTooOldRunner": .scalar]),
     "build": .object([

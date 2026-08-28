@@ -174,6 +174,19 @@ actor FakeDaemonService: DaemonService {
     return match
   }
 
+  var lastInspectRemoteRequest: ImageInspectRemoteRequest?
+  var remoteImage: RemoteImageInfoDTO?
+
+  func imageInspectRemote(
+    _ request: ImageInspectRemoteRequest
+  ) async throws -> RemoteImageInfoDTO {
+    lastInspectRemoteRequest = request
+    guard let remoteImage else {
+      throw DaemonServiceError.notFound(entity: "image", name: request.reference)
+    }
+    return remoteImage
+  }
+
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {
     lastImportedPath = request.path
     lastImportRequest = request

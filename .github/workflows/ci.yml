@@ -73,6 +73,8 @@ jobs:
         run: bash scripts/tests/qualify-macos-image-test.sh
       - name: macOS live driver unit test
         run: bash scripts/tests/live-macos-e2e-test.sh
+      - name: image publishing script unit test
+        run: bash scripts/tests/publish-images-test.sh
       # swiftformat --lint is deliberately absent: the tree predates the .swiftformat rules
       # (≈250 files differ). Enable it in the same commit that runs `swiftformat .` once.
 

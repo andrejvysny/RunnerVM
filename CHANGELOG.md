@@ -2,6 +2,45 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — pull-only deployment: `image inspect --remote`, `images.prefetch`, published images
+
+A host that pulls its images should not have to build any. Three gaps stood between that and the
+existing OCI transport, which has been live-verified against GHCR since 2026-08-27.
+
+**Sizing before pulling.** A profile's `resources.disk` is measured against the image's virtual
+size — a macOS profile must match it exactly (`VM_MACOS_DISK_RESIZE_UNSUPPORTED`), a Linux one must
+be at least it — and a 16–50 GiB download is a bad way to learn that number. `image.inspectRemote`
+(`runnerctl image inspect --remote <ref>`) reads the manifest and the two config blobs and stops:
+no disk transfer, no row, no staging directory. It reports the `@sha256:…` to pin, the virtual size
+in bytes as well as units, the compressed transfer size, the guest-agent and Docker capabilities,
+and a macOS image's `minimumCPUCount`/`minimumMemoryBytes`. Unlike `instance.create` it *describes*
+an agentless image rather than refusing it — `guestAgent: false` is the answer to the question that
+was asked. Its tag resolution seeds the same cache `image.pull` reads, so the pull that usually
+follows does not repeat the round trip.
+
+**`images.prefetch`.** Off by default. With it on, every configured profile's registry image is
+pulled at `config apply` and at daemon start, instead of inside the first `instance.create` that
+needs it — which is what otherwise makes the first job after a config change wait for a
+multi-gigabyte download and look like a runner failure. The sweep is detached from `config apply`,
+sequential, and goes through the existing pull gate (`host.limits.concurrentImagePulls`, the
+free-space check against `host.reserve.disk`). Nothing in it is fatal: an unreachable registry or a
+credential not stored yet is logged and stepped over, the other profiles are still prefetched, and
+the reconcile tick retries.
+
+**Publishing.** `scripts/publish-images.sh` wraps `runnerctl image push` with the checks that are
+advisory for a local image and refusals for a published one: not `ready`, no guest agent, a macOS
+image that kept the Tart base's `admin`/`admin` over SSH, a `-dirty` guest-agent build, an
+`actions/runner` already graded `stale`/`tooOld`. Each refusal names the flag that overrides it.
+The SSH check is macOS-only on purpose: on Linux `capabilities.ssh: true` means socket-activated
+`sshd` with no keys and no password auth, which is every shipped recipe.
+`docs/published-images.md` is the catalogue; `SETUP.md` §8 now leads with pulling and treats
+building as the customization path.
+
+macOS images are deliberately not published: a RunnerVM macOS image is a provisioned copy of
+Apple's macOS, and Apple's SLA grants the right to run macOS VMs on Apple hardware, not to
+redistribute macOS. Each host builds its own from `ghcr.io/cirruslabs/macos-tahoe-base:latest`
+with `scripts/provision-macos-tart.sh`, as before.
+
 ## 2026-08-28 — `host.overcommit.disk`
 
 Admission reserves `max(profile.resources.disk, image.virtualBytes)` — the guest disk's **apparent**

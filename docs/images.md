@@ -414,6 +414,9 @@ retrying every tick.
 A sealed image can live in any OCI registry (spec §21, §54–§58). References must
 name their registry — RunnerVM never falls back to an implicit Docker Hub.
 
+The images this project publishes, and how they are published, are catalogued in
+[`docs/published-images.md`](published-images.md); what follows is the mechanism.
+
 ```bash
 # credentials: the daemon owns the Keychain item, because runnerd does the pull
 echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u "$GITHUB_USER" --password-stdin
@@ -444,7 +447,8 @@ incident stays reproducible after `:stable` moves. Consequences worth knowing:
 
 * **The first `vm create` after the tag moves is as slow as the image is large.**
   Resolution and the pull happen inside `instance.create`. Pre-pull with
-  `runnerctl image pull <ref>` to keep that cost off the first job.
+  `runnerctl image pull <ref>` to keep that cost off the first job — or set
+  `images.prefetch: true` and let the daemon do it (see below).
 * A tag → digest resolution is cached for five minutes per reference, so
   steady-state creates do not touch the registry at all.
 * Concurrent pulls that resolve to the same manifest digest share **one**
@@ -463,6 +467,51 @@ incident stays reproducible after `:stable` moves. Consequences worth knowing:
 `images.canonical_reference` holds the immutable reference the image was
 resolved from; `image list`'s `NAME` column keeps showing the local label from
 the image manifest, which a later pull cannot move.
+
+### Sizing a profile before the image is on the host
+
+A profile's `resources.disk` is measured against the image's virtual size — a macOS profile must
+match it **exactly** (`VM_MACOS_DISK_RESIZE_UNSUPPORTED`), a Linux one must be at least it — and
+pulling 16–50 GiB is a bad way to learn that number. `image inspect --remote` reads the manifest
+and the two config blobs and stops there: nothing is transferred, nothing is written.
+
+```bash
+runnerctl image inspect --remote ghcr.io/acme/runners/ubuntu-24:stable
+```
+
+It reports the resolved `@sha256:…` to pin, the virtual size in bytes as well as units, the
+compressed transfer size, whether a guest agent is present, and — for a macOS image — the
+`minimumCPUCount`/`minimumMemoryBytes` a profile is refused below. `--format runnervm|tart` pins
+the schema, exactly as on `image pull`.
+
+An agentless image is *described*, not refused: `guest agent: absent (cannot run a job)` is the
+answer. `IMAGE_NO_GUEST_AGENT` belongs to `vm create`, not to a question about a reference.
+
+### Prefetching profile images
+
+```yaml
+images:
+  prefetch: true    # default false
+```
+
+With this on, every configured profile whose `image:` is a registry reference is pulled when the
+configuration is applied and when the daemon starts, instead of inside the first `instance.create`
+that needs it — which is what otherwise makes the first job after a config change wait for a
+multi-gigabyte download and look like a runner failure.
+
+The sweep is detached from `config apply`, so applying a configuration never blocks on a transfer.
+It is idempotent and safe to repeat: an image already in the store resolves to its `ready` row and
+moves nothing, and a tag resolution is cached for five minutes, so a steady-state sweep does not
+reach the registry at all. It goes through the same gate as any other pull
+(`host.limits.concurrentImagePulls`, the free-space check against `host.reserve.disk`), and it
+pulls sequentially rather than stampeding one registry.
+
+Nothing here is fatal. An unreachable registry, a credential not stored yet, or a reference that
+does not resolve is logged and stepped over — the other profiles are still prefetched, `runnerd`
+still starts, the configuration still applies, and the reconcile tick retries.
+
+It is off by default because it turns `config apply` and daemon start into operations that reach
+the network. Turn it on wherever profiles point at a registry rather than at a locally built image.
 
 ## Importing tart images (spec §58)
 

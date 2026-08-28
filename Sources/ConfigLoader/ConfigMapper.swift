@@ -197,7 +197,8 @@ enum ConfigMapper {
     return ImageCacheConfig(
       maxSizeBytes: dto?.cache?.maxSize?.bytes ?? d.maxSizeBytes,
       keepRecentlyUsed: dto?.cache?.keepRecentlyUsed ?? d.keepRecentlyUsed,
-      limits: limits
+      limits: limits,
+      prefetch: dto?.prefetch ?? d.prefetch
     )
   }
 

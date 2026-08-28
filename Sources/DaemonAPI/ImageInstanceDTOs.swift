@@ -166,6 +166,77 @@ public struct ImageGetRequest: Codable, Sendable, Hashable {
   public init(ref: String) { self.ref = ref }
 }
 
+/// Spec §21, §54. What a registry says about an image **without transferring its disk**: only the
+/// manifest and the two small config blobs are fetched.
+///
+/// This exists so a profile can be sized before the image is on the host. A macOS profile's
+/// `resources.disk` must equal the image's virtual size exactly and a Linux one's must be at least
+/// it, and a 16-50 GiB pull is a bad way to learn that number.
+public struct ImageInspectRemoteRequest: Codable, Sendable, Hashable {
+  /// A registry-qualified reference: `<registry>/<repository>[:tag][@sha256:…]`.
+  public var reference: String
+  /// `runnervm` or `tart`; `nil` auto-detects. Same meaning as on `image.pull`.
+  public var format: String?
+
+  public init(reference: String, format: String? = nil) {
+    self.reference = reference
+    self.format = format
+  }
+}
+
+/// The answer to `image.inspectRemote`. Deliberately not an `ImageInfoDTO`: none of that type's
+/// local facts (`state`, `localPath`, `pinCount`, `pulledAt`) exist for an image this host has
+/// never held, and `runnerVersionHealth` is graded here exactly as it is for a local one.
+public struct RemoteImageInfoDTO: Codable, Sendable, Hashable {
+  /// `<registry>/<repository>@sha256:…` the reference resolved to — the immutable form to pin.
+  public var reference: String
+  /// The registry manifest digest. Not the local content digest, which does not exist until the
+  /// bytes do.
+  public var manifestDigest: String
+  public var os: String
+  public var architecture: String
+  /// `runnervm` or `tart`.
+  public var format: String
+  /// What the profile's `resources.disk` is measured against.
+  public var virtualSizeBytes: UInt64
+  /// Compressed bytes a pull would move, so free space can be checked before starting one.
+  public var transferBytes: UInt64
+  public var runnerVersion: String?
+  public var runnerVersionHealth: RunnerVersionHealth
+  /// `false` means the image can be inspected and re-published but never run a job
+  /// (`IMAGE_NO_GUEST_AGENT`).
+  public var guestAgent: Bool
+  public var docker: Bool
+  public var ssh: Bool
+  public var createdAt: String
+  /// macOS only: the floors a profile is refused below, from `VZMacOSConfigurationRequirements`.
+  public var minimumCPUCount: Int?
+  public var minimumMemoryBytes: UInt64?
+
+  public init(
+    reference: String, manifestDigest: String, os: String, architecture: String, format: String,
+    virtualSizeBytes: UInt64, transferBytes: UInt64, runnerVersion: String?,
+    runnerVersionHealth: RunnerVersionHealth, guestAgent: Bool, docker: Bool, ssh: Bool,
+    createdAt: String, minimumCPUCount: Int? = nil, minimumMemoryBytes: UInt64? = nil
+  ) {
+    self.reference = reference
+    self.manifestDigest = manifestDigest
+    self.os = os
+    self.architecture = architecture
+    self.format = format
+    self.virtualSizeBytes = virtualSizeBytes
+    self.transferBytes = transferBytes
+    self.runnerVersion = runnerVersion
+    self.runnerVersionHealth = runnerVersionHealth
+    self.guestAgent = guestAgent
+    self.docker = docker
+    self.ssh = ssh
+    self.createdAt = createdAt
+    self.minimumCPUCount = minimumCPUCount
+    self.minimumMemoryBytes = minimumMemoryBytes
+  }
+}
+
 /// Spec §21, §137. The reply comes back as soon as the tag is resolved and the transfer is
 /// started, so a multi-gigabyte pull never has to fit inside the socket's idle timeout; follow
 /// `operationId` with `operation.get`.

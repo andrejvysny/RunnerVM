@@ -55,15 +55,26 @@ See [`docs/status.md`](docs/status.md) for the full capability matrix and
   images built on the host, 3 concurrent VMs, 11/11 live E2E scenarios, nothing left on disk after a
   job — [docs/verification.md](docs/verification.md) "Mac mini deployment". Note that a host serving
   a scope must not share profile names with another host ([docs/install.md](docs/install.md)).
-- Images: build them on the host with `runnerctl image build` and the shipped `Runnerfile` recipes
+- Images: pull a prebuilt one from ghcr.io ([docs/published-images.md](docs/published-images.md)),
+  build them on the host with `runnerctl image build` and the shipped `Runnerfile` recipes
   ([docs/image-build.md](docs/image-build.md); bootstrap ~4 min, derived ~1 min, verified live),
-  pull RunnerVM images from any OCI registry, or import tart images read-only
+  or import tart images read-only
   (`runnerctl image pull ghcr.io/cirruslabs/ubuntu:latest` — inspect/re-publish only, no guest agent).
 - Recommended production lifecycle: `ephemeral` — one job per VM, then destroy. `reusable`
   exists but ephemeral is the mode this project is validated against.
 - CI is green on `master` (Swift 6.1.2 / macOS 15, Go, shellcheck).
 
-## Building images
+## Getting images
+
+Pull a published one — nothing to build, nothing else to install on the host:
+
+```sh
+runnerctl image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+```
+
+The catalogue and the disk each guest needs: [`docs/published-images.md`](docs/published-images.md).
+
+Or build your own, from a `Runnerfile`:
 
 ```sh
 runnerctl image build images/recipes/ubuntu-24-minimal --name ubuntu-24-minimal   # from the Ubuntu cloud image
@@ -77,6 +88,8 @@ runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22           
 - [`docs/status.md`](docs/status.md) — current capability matrix, limitations, next steps; [`CHANGELOG.md`](CHANGELOG.md).
 - [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
 - [`SETUP.md`](SETUP.md) — set it up on a fresh Mac, for an organization or a repository.
+- [`docs/published-images.md`](docs/published-images.md) — the prebuilt images on ghcr.io: what is
+  in them, how to size a host for one, and how they are published.
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
   [`docs/state_machines.md`](docs/state_machines.md), [`docs/release.md`](docs/release.md).
