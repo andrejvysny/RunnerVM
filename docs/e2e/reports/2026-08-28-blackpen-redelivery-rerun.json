@@ -1,0 +1,15 @@
+{
+  "owner": "andrejvysny",
+  "repo": "andrejvysny/github-managed-runners",
+  "profile": "ubuntu-24",
+  "scenarios": [
+    {
+      "name": "redelivery",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:51:50Z",
+      "endedAt": "2026-08-28T09:52:19Z",
+      "durationSeconds": 29,
+      "detail": ""
+    }
+  ]
+}

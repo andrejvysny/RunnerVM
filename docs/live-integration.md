@@ -55,6 +55,8 @@ repo's workflow file — cannot be verified locally and must be set up first.
 - `--restart-cmd` must actually restart *this* daemon. The default assumes a launchd job; a
   daemon started by hand needs an explicit command, and the `pkill` pattern inside it must not
   match the script that contains it (see "Known non-determinism" below).
+  [`docs/examples/restart-runnerd.sh`](examples/restart-runnerd.sh) is a ready-made one. Without
+  it the restart scenarios do not restart anything and still report `pass`.
 
 ### PAT scopes
 

@@ -1,0 +1,77 @@
+# RunnerVM — blackpen (olympics-Mac-mini, Apple M4, 10 cores, 32 GiB RAM)
+#
+# Sized for the deployment goal: exercise autoscaling and parallel VMs.
+# Disk is the binding constraint. Instance disk reservation is
+# max(profile.resources.disk, image.virtualBytes) and the shipped ubuntu-24
+# image carries a 16 GiB disk layer, so every instance reserves 16 GiB no
+# matter what the profile asks for. ~67 GiB free - 4 GiB floor => 3 concurrent.
+version: 1
+
+host:
+  reserve:
+    cpu: 2          # 10 logical - 2 => 8 vCPU budget => 4x 2-vCPU guests
+    memory: 6GiB    # 32 - 6 => 26 GiB budget
+    disk: 4GiB      # absolute free-space floor
+  maxVMs: 3         # disk-bound: 3 x 16 GiB + 4 GiB floor = 52 GiB of ~67 GiB free
+
+github:
+  demand: scaleSet
+  auth:
+    provider: pat
+    source: file    # <state-dir>/github-token, 0600 — no login keychain, host is headless
+  scopes:
+    - name: repo
+      type: repository
+      owner: andrejvysny
+      repository: github-managed-runners
+
+security:
+  allowPublicRepositories: true
+
+# Failed sessions hold their cpu/memory/disk reservation until this expires.
+# The default 2h would strand 16 GiB on a host this small.
+diagnostics:
+  failedInstanceRetention: 15m
+
+metrics:
+  prometheus:
+    enabled: true
+    listen: 127.0.0.1:9101
+
+# Storage ceilings. Per-job storage is already fully reclaimed (an ephemeral instance's
+# disk is deleted with the VM), so these bound only what outlives a job:
+#   - instance logs, one directory per job under logs/instances/ (~75 KiB each)
+#   - superseded image digests, which linger after a rebuild until `image prune`
+#   - the base-image cache the in-daemon builder converts cloud images into
+images:
+  cache:
+    maxSize: 20GiB          # image store ceiling; LRU-evicts unpinned, unreferenced digests
+    keepRecentlyUsed: 24h
+
+logging:
+  retention:
+    instanceLogs: 3d
+
+profiles:
+  - name: ubuntu-24
+    scope: repo
+    image: ubuntu-24
+    lifecycle: ephemeral
+    resources:
+      cpu: 2
+      memory: 4GiB
+      disk: 16GiB
+    limits:
+      maxInstances: 3
+    ssh:
+      enabled: true
+    timeouts:
+      agentReady: 3m
+
+build:
+  cpu: 4
+  memory: 4GiB
+  disk: 16GiB
+  cache:
+    maxBytes: 8GiB          # converted cloud-image bases; rebuilt on demand when evicted
+    minimumHostFreeBytes: 10GiB

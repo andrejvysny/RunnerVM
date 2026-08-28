@@ -57,6 +57,12 @@ Passing `--group staff` is refused unless `--allow-staff-group` is also given.
 Verify with `--dry-run` first; it performs no filesystem writes and prints every action, including
 the fully rendered launchd plist.
 
+For a configuration to start from, [`docs/examples/headless-mac-mini.yaml`](examples/headless-mac-mini.yaml)
+is the exact file a real deployment ran, with the reasoning for each number in comments — including
+the one that surprises people: instance disk reservation is `max(profile.resources.disk,
+image.virtualBytes)`, so concurrency on a normal Mac is bounded by disk long before CPU or RAM.
+See [`docs/examples/README.md`](examples/README.md).
+
 ## Installing via Homebrew
 
 ```sh

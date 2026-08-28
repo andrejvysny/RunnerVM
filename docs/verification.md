@@ -517,6 +517,10 @@ this host holding the session throughout.
 job still completes exactly once with the `vmworker` untouched, the runner registration cleaned up
 and capacity converged afterwards.
 
+Raw reports as the driver wrote them: [`docs/e2e/reports/2026-08-28-blackpen-suite.json`](e2e/reports/2026-08-28-blackpen-suite.json)
+and [`…-redelivery-rerun.json`](e2e/reports/2026-08-28-blackpen-redelivery-rerun.json). The exact
+configuration this host ran is [`docs/examples/headless-mac-mini.yaml`](examples/headless-mac-mini.yaml).
+
 ### Storage: nothing is left behind by a job — PASS
 
 After the ten jobs above:

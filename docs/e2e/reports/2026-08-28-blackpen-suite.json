@@ -1,0 +1,95 @@
+{
+  "owner": "andrejvysny",
+  "repo": "andrejvysny/github-managed-runners",
+  "profile": "ubuntu-24",
+  "scenarios": [
+    {
+      "name": "success",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:23:21Z",
+      "endedAt": "2026-08-28T09:23:59Z",
+      "durationSeconds": 38,
+      "detail": ""
+    },
+    {
+      "name": "cancel-before-assignment",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:23:59Z",
+      "endedAt": "2026-08-28T09:24:31Z",
+      "durationSeconds": 32,
+      "detail": ""
+    },
+    {
+      "name": "cancel-during-job",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:24:31Z",
+      "endedAt": "2026-08-28T09:25:03Z",
+      "durationSeconds": 32,
+      "detail": ""
+    },
+    {
+      "name": "restart-while-booting",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:25:03Z",
+      "endedAt": "2026-08-28T09:25:29Z",
+      "durationSeconds": 26,
+      "detail": ""
+    },
+    {
+      "name": "restart-while-runner-starts",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:25:29Z",
+      "endedAt": "2026-08-28T09:25:57Z",
+      "durationSeconds": 28,
+      "detail": ""
+    },
+    {
+      "name": "restart-during-job",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:25:57Z",
+      "endedAt": "2026-08-28T09:31:28Z",
+      "durationSeconds": 331,
+      "detail": ""
+    },
+    {
+      "name": "restart-during-job-sigkill",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:31:28Z",
+      "endedAt": "2026-08-28T09:37:02Z",
+      "durationSeconds": 334,
+      "detail": ""
+    },
+    {
+      "name": "redelivery",
+      "status": "fail",
+      "startedAt": "2026-08-28T09:37:02Z",
+      "endedAt": "2026-08-28T09:45:45Z",
+      "durationSeconds": 523,
+      "detail": ""
+    },
+    {
+      "name": "scaleset-reconnect",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:45:45Z",
+      "endedAt": "2026-08-28T09:49:16Z",
+      "durationSeconds": 211,
+      "detail": ""
+    },
+    {
+      "name": "concurrent",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:49:16Z",
+      "endedAt": "2026-08-28T09:49:55Z",
+      "durationSeconds": 39,
+      "detail": ""
+    },
+    {
+      "name": "queue-overflow",
+      "status": "pass",
+      "startedAt": "2026-08-28T09:49:55Z",
+      "endedAt": "2026-08-28T09:51:28Z",
+      "durationSeconds": 93,
+      "detail": ""
+    }
+  ]
+}

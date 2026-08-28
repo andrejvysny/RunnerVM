@@ -63,6 +63,8 @@ runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22           
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
   [`docs/state_machines.md`](docs/state_machines.md), [`docs/release.md`](docs/release.md).
+- [`docs/examples/`](docs/examples) — a real deployment's configuration, verbatim, with the
+  reasoning behind each number; and the raw E2E reports it produced.
 - [`Proto/`](Proto) — the daemon/worker/guest wire protocols.
 
 ## Provenance
