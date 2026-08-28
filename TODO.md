@@ -32,6 +32,13 @@ login session). Evidence, host layout, and the full tested/skipped list: `docs/v
 - [ ] Consider making the free-space fallback visible: the daemon now silently uses a less accurate
       figure on a host with no login session. A one-line startup log ("purgeable-aware free space
       unavailable; using volumeAvailableCapacity") would save the next person the same hunt.
+- [ ] **`runnerctl` cannot reach a production daemon without `--socket` on every call.**
+      `GlobalOptions.socketURL` falls back to `RunnerPaths.development(...)`
+      (`/tmp/runnervm-<uid>/runnerd.sock`) and there is no environment variable, so every command
+      against a real install (`--runtime-dir /var/run/runnervm`) needs the flag spelled out.
+      `SETUP.md` works around it with a shell function. Options: honour a `RUNNERVM_SOCKET`
+      environment variable (the live-e2e scripts already use that name), read the runtime dir from
+      an installed config, or probe the production path before falling back to the development one.
 
 
 ## M8 — macOS guests (started 2026-08-27; runtime first, native IPSW builder last)

@@ -1,5 +1,10 @@
 # Installing RunnerVM on the host Mac
 
+> Setting up a Mac for the first time? Read **[`SETUP.md`](../SETUP.md)** instead — it walks the
+> whole path from a fresh machine to a job running in a VM, including GitHub registration for an
+> organization or a repository. This document is the reference behind it: every flag, the privilege
+> model, and the security rationale.
+
 Production packaging for `runnerd`, `vmworker` and `runnerctl` (spec §7.2 privilege model, §22
 layout, §129 socket security, §130 shutdown integration). Everything below is driven by
 `scripts/install.sh`; read that script's `--help` for the exact flag list.

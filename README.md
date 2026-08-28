@@ -4,7 +4,9 @@ Linux ARM64 GitHub Actions runners hosted as Apple Virtualization.framework VMs 
 Apple Silicon — scale-to-zero, no shared cloud infrastructure.
 
 RunnerVM is a self-hosted runner orchestrator for a single Mac host: `runnerd` runs
-ephemeral (and, later, reusable) guest VMs on demand as GitHub Actions jobs arrive.
+ephemeral guest VMs on demand as GitHub Actions jobs arrive, one job per VM, and destroys them
+afterwards. It registers against a GitHub **organization** or a single **repository** as a runner
+scale set, so scale-to-zero and autoscaling are GitHub's own mechanism, not a polling hack.
 
 - `runnerd` — the host daemon: config, scheduling, GitHub scale-set demand, SQLite state.
 - `vmworker` — one process per VM; the only binary that links `Virtualization.framework`
@@ -12,7 +14,21 @@ ephemeral (and, later, reusable) guest VMs on demand as GitHub Actions jobs arri
 - `runnerctl` — the CLI, talking to `runnerd` over a Unix-domain socket.
 - `GuestAgent/` — the Go agent that runs inside each guest (systemd/launchd packaged).
 
-## Getting started
+## Setting it up
+
+**[`SETUP.md`](SETUP.md) is the guide**: a fresh Mac to jobs running in VMs, for either an
+organization or a single repository — host preparation, the service account, PAT and GitHub App
+permissions, configuration, images, the first job, and making it survive a reboot. Start there.
+
+Two things it will tell you that are worth knowing up front:
+
+- Concurrency is bounded by **disk**, not CPU or RAM. An instance reserves
+  `max(profile.resources.disk, image.virtualBytes)`, and the shipped `ubuntu-24` image is 16 GiB,
+  so a Mac with ~62 GiB free runs about 3 VMs at once.
+- A profile's name **is** its `runs-on` label, and it must not collide with a GitHub-hosted label
+  (`ubuntu-24.04`, `macos-26`, …) or the job silently runs on GitHub's runners instead of yours.
+
+Just poking around locally:
 
 ```sh
 swift build
@@ -20,8 +36,8 @@ scripts/sign-dev.sh              # ad-hoc sign vmworker for local development
 .build/debug/runnerctl doctor    # check this host is ready
 ```
 
-For a production install (release binaries, launchd packaging, dedicated service
-account) see [`docs/install.md`](docs/install.md) — including installing via
+Reference for every install flag, the privilege model and the security notes:
+[`docs/install.md`](docs/install.md) — including installing via
 `brew install andrejvysny/runnervm/runnervm`.
 
 ## Status
@@ -60,6 +76,7 @@ runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22           
 - [`RunnerVM — GitHub Actions VM Orchestrator.md`](<RunnerVM — GitHub Actions VM Orchestrator.md>) — the full architecture/implementation spec.
 - [`docs/status.md`](docs/status.md) — current capability matrix, limitations, next steps; [`CHANGELOG.md`](CHANGELOG.md).
 - [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
+- [`SETUP.md`](SETUP.md) — set it up on a fresh Mac, for an organization or a repository.
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
   [`docs/state_machines.md`](docs/state_machines.md), [`docs/release.md`](docs/release.md).
