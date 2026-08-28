@@ -87,7 +87,7 @@ not as a stray file.
 6. Optional, only if you'll trigger the suite from
    [`github-integration.yml`](../.github/workflows/github-integration.yml) instead of running the
    script by hand: register a long-lived self-hosted Actions runner on the Mac mini itself, in
-   *this* repo (github-managed-runners), labelled `self-hosted, macOS, ARM64, runnervm-host`.
+   *this* repo (RunnerVM, formerly github-managed-runners), labelled `self-hosted, macOS, ARM64, runnervm-host`.
    This is a plain GitHub Actions runner you set up by hand (`https://github.com/<owner>/<repo>/settings/actions/runners/new`)
    — it is **not** one of RunnerVM's own managed VMs, and GitHub-hosted macOS runners cannot
    nest `Virtualization.framework`, so there is no GitHub-hosted alternative. Set repo variables

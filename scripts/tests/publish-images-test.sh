@@ -106,7 +106,7 @@ if valid_package_name "double--dash"; then no "a doubled separator is refused"; 
 if valid_package_name "trailing-"; then no "a trailing separator is refused"; else ok "a trailing separator is refused"; fi
 if valid_package_name "a/b"; then no "a slash is refused in a package name"; else ok "a slash is refused in a package name"; fi
 
-if valid_registry_repo "ghcr.io/andrejvysny/github-managed-runners"; then
+if valid_registry_repo "ghcr.io/andrejvysny/runnervm"; then
     ok "a ghcr.io repo is valid"
 else
     no "a ghcr.io repo is valid"
@@ -117,7 +117,7 @@ if valid_registry_repo "owner/repo"; then no "an implicit Docker Hub reference i
 if valid_registry_repo "ghcr.io/"; then no "an empty path is refused"; else ok "an empty path is refused"; fi
 if valid_registry_repo "ghcr.io/Owner/repo"; then no "an uppercase path is refused"; else ok "an uppercase path is refused"; fi
 
-expect_eq "$(registry_host ghcr.io/andrejvysny/github-managed-runners)" "ghcr.io" "registry_host takes the first component"
+expect_eq "$(registry_host ghcr.io/andrejvysny/runnervm)" "ghcr.io" "registry_host takes the first component"
 expect_eq "$(registry_host localhost:5000/runners)" "localhost:5000" "registry_host keeps the port"
 
 expect_eq "$(image_reference ghcr.io/o/r ubuntu-24-base 2026-08-28)" \

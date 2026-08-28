@@ -14,7 +14,7 @@
 #
 # usage:
 #   scripts/publish-images.sh --image ubuntu-24 --package ubuntu-24-base \
-#     --repo ghcr.io/andrejvysny/github-managed-runners \
+#     --repo ghcr.io/andrejvysny/runnervm \
 #     --tag 2026-08-28 --tag r2.337.0 --tag stable
 #
 # The first --tag moves every byte; the rest re-use the blobs already uploaded (the registry client
@@ -70,7 +70,7 @@ refusing anything that should not become a published artifact.
 required:
   --image <name|digest>   Local image to publish, as `runnerctl image inspect` accepts it.
   --package <name>        Package name under --repo, e.g. ubuntu-24-base.
-  --repo <ref>            Registry and namespace, e.g. ghcr.io/andrejvysny/github-managed-runners.
+  --repo <ref>            Registry and namespace, e.g. ghcr.io/andrejvysny/runnervm.
   --tag <tag>             Tag to publish under. Repeatable; the first one carries the upload.
 
 options:

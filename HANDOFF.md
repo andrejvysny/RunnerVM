@@ -6,7 +6,7 @@ Session 2 · 2026-08-28 · previous session's notes are in `git log` (`a3cca52`)
 
 Deploy RunnerVM onto the Mac mini reached as `ssh blackpen` and exercise it for real: functionality,
 autoscaling, parallel VMs, cleanup, and at least one macOS guest. Not a rehearsal — a live host
-serving `andrejvysny/github-managed-runners`.
+serving `andrejvysny/RunnerVM`.
 
 ## What happened
 

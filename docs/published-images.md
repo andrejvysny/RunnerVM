@@ -1,7 +1,7 @@
 # Published images
 
 Prebuilt RunnerVM images, published as OCI artifacts under
-`ghcr.io/andrejvysny/github-managed-runners`. A host that pulls one of these does not need the
+`ghcr.io/andrejvysny/runnervm`. A host that pulls one of these does not need the
 guest-agent binary, a recipe root, or a builder VM — see [Using one](#using-one).
 
 These are built by hand on an Apple Silicon Mac and pushed with
@@ -83,10 +83,10 @@ The sizing and disk-contract rules below still apply to whatever that produces.
 ```bash
 # 1. Look before you pull: the digest to pin, the size the profile must ask for, and what
 #    is inside — read from the registry, without transferring the disk.
-runnerctl image inspect --remote ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+runnerctl image inspect --remote ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
 
 # 2. Pull it.
-runnerctl image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
 
 # 3. Point a profile at the digest, never the tag.
 ```
@@ -95,7 +95,7 @@ runnerctl image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:s
 profiles:
   - name: ubuntu-24            # this IS the runs-on label; it must not collide with a
     scope: repo                # GitHub-hosted label (ubuntu-24.04, macos-26, ...)
-    image: ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base@sha256:…
+    image: ghcr.io/andrejvysny/runnervm/ubuntu-24-base@sha256:…
     lifecycle: ephemeral
     resources:
       cpu: 2
@@ -179,7 +179,7 @@ will ignore.
 echo "$GHCR_PAT" | runnerctl registry login ghcr.io -u <user> --password-stdin
 
 scripts/publish-images.sh --image ubuntu-24 --package ubuntu-24-base \
-  --repo ghcr.io/andrejvysny/github-managed-runners \
+  --repo ghcr.io/andrejvysny/runnervm \
   --tag "$(date -u +%Y-%m-%d)" --tag r2.337.0 --tag stable --dry-run
 ```
 
@@ -200,5 +200,5 @@ push, delete the local copy, pull back by immutable digest, second job on the re
 
 ```bash
 scripts/live-builder-e2e.sh --recipe images/recipes/ubuntu-24 --name ubuntu-24-base \
-  --registry ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base --profile ubuntu-24 …
+  --registry ghcr.io/andrejvysny/runnervm/ubuntu-24-base --profile ubuntu-24 …
 ```

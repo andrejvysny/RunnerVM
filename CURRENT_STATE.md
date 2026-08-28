@@ -16,7 +16,7 @@ Last verified: 2026-08-28 15:35 (local)
   unchanged from `HEAD` on every touched file (the pre-existing violations in
   `DaemonServiceImpl.swift` and `DoctorChecks.swift` are untouched).
 - **Deployed:** RunnerVM runs on the Mac mini `blackpen` (`ssh blackpen`) — Apple M4, 32 GiB,
-  macOS 26.5.2, headless. Serves `andrejvysny/github-managed-runners` on profile `ubuntu-24`,
+  macOS 26.5.2, headless. Serves `andrejvysny/RunnerVM` on profile `ubuntu-24`,
   3 concurrent VMs, images `ubuntu-24-minimal` + `ubuntu-24` built on the host. Install is
   user-scoped and root-free: prefix `/Users/blackpen/.local`, state `/Users/blackpen/runnervm`,
   runtime `/Users/blackpen/runnervm/run`, PAT at `<state-dir>/state/github-token` (0600).

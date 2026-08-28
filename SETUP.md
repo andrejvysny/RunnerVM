@@ -102,8 +102,8 @@ Two things to know before you go further:
 **From source** (what this guide assumes):
 
 ```sh
-git clone https://github.com/andrejvysny/github-managed-runners.git
-cd github-managed-runners
+git clone https://github.com/andrejvysny/RunnerVM.git
+cd RunnerVM
 swift build -c release          # ~2 minutes on an M-series Mac
 ```
 
@@ -468,7 +468,7 @@ the host beyond `runnerd` itself.
 ### Pull a published image
 
 ```sh
-rvm image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+rvm image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
 rvm image list
 ```
 

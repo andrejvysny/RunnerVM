@@ -69,7 +69,7 @@ See [`docs/status.md`](docs/status.md) for the full capability matrix and
 Pull a published one — nothing to build, nothing else to install on the host:
 
 ```sh
-runnerctl image pull ghcr.io/andrejvysny/github-managed-runners/ubuntu-24-base:stable
+runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
 ```
 
 The catalogue and the disk each guest needs: [`docs/published-images.md`](docs/published-images.md).
