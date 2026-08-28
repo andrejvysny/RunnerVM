@@ -110,6 +110,7 @@ extension RunnerProfileConfig {
   func validateLifecycle(path: String) -> [ConfigurationIssue] {
     var issues: [ConfigurationIssue] = []
     if lifecycle == .reusable {
+      issues.append(contentsOf: validateMacOSIsEphemeral(path: path))
       issues.append(contentsOf: validateReusableIsolation(path: path))
     }
     guard let reuse else {
@@ -138,6 +139,43 @@ extension RunnerProfileConfig {
       ))
     }
     return issues
+  }
+
+  /// A profile name is also the scale set's `runs-on` label. GitHub-hosted labels win that match:
+  /// a job with `runs-on: macos-26` runs on GitHub's own macOS 26 runner and never reaches this
+  /// host (seen live), so the shadowing names are flagged. Only the shapes GitHub actually uses
+  /// (`macos-<major>`, `ubuntu-<major>.<minor>`, `windows-<year>`, `*-latest`, plus GitHub's size/arch
+  /// suffixes) -- `ubuntu-24` and `macos-15-xcode-16` are fine.
+  func validateHostedLabelShadowing(path: String) -> [ConfigurationIssue] {
+    guard Self.shadowsHostedLabel(name) else { return [] }
+    return [.warning(
+      "PROFILE_NAME_SHADOWS_HOSTED_LABEL", "\(path).name",
+      "'\(name)' matches a GitHub-hosted runner label; jobs with runs-on: \(name) run on GitHub's "
+        + "hosted runners instead of this host. Prefix the name, e.g. rvm-\(name)"
+    )]
+  }
+
+  static func shadowsHostedLabel(_ name: String) -> Bool {
+    // GitHub's only suffixes are size/architecture variants; `macos-15-xcode-16` is a fine name.
+    let suffix = #"(-(large|xlarge|intel|arm|arm64))?$"#
+    let patterns = [
+      #"^(ubuntu|macos|windows)-latest"# + suffix,
+      #"^macos-[0-9]+"# + suffix,
+      #"^ubuntu-[0-9]+\.[0-9]+"# + suffix,
+      #"^windows-[0-9]{4}"# + suffix,
+    ]
+    return patterns.contains { name.range(of: $0, options: .regularExpression) != nil }
+  }
+
+  /// The between-jobs cleanup was written for a Linux guest and has no macOS equivalent yet, so a
+  /// reusable macOS profile is refused outright rather than acknowledged like the Linux one.
+  private func validateMacOSIsEphemeral(path: String) -> [ConfigurationIssue] {
+    guard guestOS == .macos else { return [] }
+    return [.error(
+      "PROFILE_MACOS_REUSABLE_UNSUPPORTED", "\(path).lifecycle",
+      "macOS guests are ephemeral-only in this release: Keychain, DerivedData, simulator and "
+        + "Apple tooling state cannot be reset safely between jobs"
+    )]
   }
 
   /// A reusable VM is not an isolation boundary between jobs: cleanup resets HOME, `_work` and

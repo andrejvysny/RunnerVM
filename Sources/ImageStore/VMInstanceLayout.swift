@@ -10,6 +10,9 @@ public struct VMInstanceLayout: Sendable, Equatable {
   public static let serialLogName = "serial.log"
   public static let workerLogName = "worker.log"
   public static let workerLockName = "worker.lock"
+  /// macOS only: the serialized `VZMacMachineIdentifier` vmworker mints on first boot. Instance
+  /// identity, never sealed into an image (spec §24).
+  public static let machineIdentifierName = "machine-identifier.bin"
   public static let failureName = "failure.json"
   /// Cloud-init NoCloud seed a build-time boot may need. Runner instances never have one.
   public static let seedName = "seed.img"
@@ -29,6 +32,9 @@ public struct VMInstanceLayout: Sendable, Equatable {
   /// the worker's `fcntl` write lock on this inode is the liveness proof runnerd fences on.
   public let workerLock: URL
   public let failure: URL
+  /// Always the path, never a promise that the file exists: vmworker creates it on the first boot
+  /// of a macOS instance and a Linux instance never has one.
+  public let machineIdentifier: URL
 
   public init(instanceId: InstanceID, directory: URL, hasNVRAM: Bool) {
     self.instanceId = instanceId
@@ -40,6 +46,7 @@ public struct VMInstanceLayout: Sendable, Equatable {
     workerLog = directory.appending(path: Self.workerLogName)
     workerLock = directory.appending(path: Self.workerLockName)
     failure = directory.appending(path: Self.failureName)
+    machineIdentifier = directory.appending(path: Self.machineIdentifierName)
   }
 
   public static func nvramPath(in directory: URL) -> URL {
@@ -83,6 +90,8 @@ public struct VMBuildLayout: Sendable, Equatable {
   public let seed: URL
   /// The build context, attached read-only so `COPY`-style steps can pull files out of it.
   public let context: URL
+  /// Mirrors `VMInstanceLayout`; a Linux build never has one, but the path algebra stays symmetric.
+  public let machineIdentifier: URL
 
   public init(buildId: ImageBuildID, directory: URL, hasNVRAM: Bool) {
     self.buildId = buildId
@@ -95,6 +104,7 @@ public struct VMBuildLayout: Sendable, Equatable {
     workerLock = VMInstanceLayout.workerLockPath(in: directory)
     seed = directory.appending(path: VMInstanceLayout.seedName)
     context = directory.appending(path: VMInstanceLayout.contextName)
+    machineIdentifier = directory.appending(path: VMInstanceLayout.machineIdentifierName)
   }
 }
 

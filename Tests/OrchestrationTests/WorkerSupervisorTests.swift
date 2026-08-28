@@ -163,6 +163,35 @@ import WorkerProtocol
     #expect(json.contains("\"os\":\"linux\""))
   }
 
+  /// The macOS half of the same contract: one extra top-level key, and a nested object whose keys
+  /// `VirtualizationCore.MacOSInstancePlatformSpec` has to decode field for field.
+  @Test func aMacOSSpecAddsExactlyTheMacOSBlock() throws {
+    let spec = InstanceSpecFile(
+      id: InstanceID(rawValue: "11111111-2222-3333-4444-555555555555"),
+      imageDigest: ImageDigest(rawValue: "sha256:" + String(repeating: "a", count: 64)),
+      os: .macos, cpuCount: 4, memoryBytes: 2_147_483_648, diskBytes: 4_294_967_296,
+      macAddress: "02:11:22:33:44:55",
+      macos: MacOSInstancePlatformSpec(
+        hardwareModel: "aGFyZHdhcmU=", sourceVersion: "26.0", minimumCPUCount: 4,
+        minimumMemoryBytes: 2_147_483_648))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+
+    let object = try #require(
+      try JSONSerialization.jsonObject(with: try encoder.encode(spec)) as? [String: Any])
+
+    #expect(
+      Set(object.keys) == [
+        "id", "imageDigest", "os", "cpuCount", "memoryBytes", "diskBytes", "macAddress",
+        "serialConsole", "macos",
+      ])
+    let macos = try #require(object["macos"] as? [String: Any])
+    #expect(
+      Set(macos.keys)
+        == ["hardwareModel", "sourceVersion", "minimumCPUCount", "minimumMemoryBytes"])
+  }
+
   @Test func absentDeadlineIsOmitted() throws {
     let spec = InstanceSpecFile(
       id: InstanceID(rawValue: "abc"), imageDigest: ImageDigest(rawValue: "sha256:x"), os: .linux,

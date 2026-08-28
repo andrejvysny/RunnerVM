@@ -28,11 +28,12 @@ import Testing
     #expect(unwrapped.code == "CONFIG_VALIDATION_FAILED")
   }
 
-  @Test func macOSProfileIsRejectedAsUnsupportedGuestOS() throws {
+  /// M8: `os: macos` is a supported guest OS, so a well-formed macOS profile validates clean.
+  /// The `GUEST_OS_UNSUPPORTED` rule itself stays -- it is set-based, and a guest OS this build has
+  /// no platform builder for must still be refused at config time rather than at first boot.
+  @Test func macOSProfileValidatesWithoutIssues() {
     let issues = Fixtures.issues { $0.profiles = [Fixtures.macosProfile] }
-    let issue = try #require(issues.first(code: "GUEST_OS_UNSUPPORTED"))
-    #expect(issue.severity == .error)
-    #expect(issue.path == "profiles[0].os")
+    #expect(issues.isEmpty)
   }
 
   @Test func issuesCarryASeverityCodePathAndMessage() throws {

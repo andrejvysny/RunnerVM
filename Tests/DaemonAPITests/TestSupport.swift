@@ -52,6 +52,7 @@ actor FakeDaemonService: DaemonService {
   var images: [ImageInfoDTO] = []
   var instances: [InstanceInfoDTO] = []
   var lastImportedPath: String?
+  var lastImportRequest: ImageImportRequest?
   var metrics = FakeGuestAgent.Script.defaultMetrics
   var sshInfo = InstanceSSHInfo(
     ipAddresses: ["192.168.64.7"], user: InstanceSSHInfo.defaultUser, sshEnabled: true)
@@ -175,6 +176,7 @@ actor FakeDaemonService: DaemonService {
 
   func imageImport(_ request: ImageImportRequest) async throws -> ImageInfoDTO {
     lastImportedPath = request.path
+    lastImportRequest = request
     let image = FakeDaemonService.sampleImage(name: request.name, os: request.os)
     images.append(image)
     return image

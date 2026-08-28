@@ -33,7 +33,7 @@ extension DaemonServiceImpl {
     let imported = try await images.importLocal(
       disk: URL(fileURLWithPath: request.path),
       nvram: request.nvramPath.map { URL(fileURLWithPath: $0) },
-      os: os, name: request.name,
+      os: os, name: request.name, hardwareModel: request.hardwareModel,
       metadataPath: request.metadataPath.map { URL(fileURLWithPath: $0) },
       guestAgent: request.guestAgent ?? true)
     return await describe(imported)

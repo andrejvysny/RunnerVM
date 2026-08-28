@@ -14,6 +14,15 @@ public enum VMError: RunnerError {
   case unsupportedGuestOS(GuestOS)
   case hostCapabilityMissing(capability: String)
   case macOSGuestLimitReached(limit: Int)
+  /// The M8 macOS identity plumbing: an image that cannot describe its platform, a host that
+  /// cannot run it, or a profile sized below what the image will boot with. All permanent.
+  case macOSHardwareModelMissing
+  case macOSHardwareModelInvalid(reason: String)
+  case macOSHardwareModelUnsupported
+  case macOSMachineIdentifierInvalid(path: String)
+  case macOSAuxiliaryStorageMissing(path: String)
+  case macOSProfileCPUTooSmall(requested: Int, minimum: Int)
+  case macOSProfileMemoryTooSmall(requestedBytes: UInt64, minimumBytes: UInt64)
 
   public var code: String {
     switch self {
@@ -28,6 +37,13 @@ public enum VMError: RunnerError {
     case .unsupportedGuestOS: "VM_UNSUPPORTED_GUEST_OS"
     case .hostCapabilityMissing: "VM_HOST_CAPABILITY_MISSING"
     case .macOSGuestLimitReached: "VM_MACOS_GUEST_LIMIT_REACHED"
+    case .macOSHardwareModelMissing: "VM_MACOS_HARDWARE_MODEL_MISSING"
+    case .macOSHardwareModelInvalid: "VM_MACOS_HARDWARE_MODEL_INVALID"
+    case .macOSHardwareModelUnsupported: "VM_MACOS_HARDWARE_MODEL_UNSUPPORTED"
+    case .macOSMachineIdentifierInvalid: "VM_MACOS_MACHINE_IDENTIFIER_INVALID"
+    case .macOSAuxiliaryStorageMissing: "VM_MACOS_AUXILIARY_STORAGE_MISSING"
+    case .macOSProfileCPUTooSmall: "VM_MACOS_PROFILE_CPU_TOO_SMALL"
+    case .macOSProfileMemoryTooSmall: "VM_MACOS_PROFILE_MEMORY_TOO_SMALL"
     }
   }
 
@@ -44,6 +60,17 @@ public enum VMError: RunnerError {
     case .unsupportedGuestOS(let os): "guest OS \(os.rawValue) is not supported on this host"
     case .hostCapabilityMissing(let capability): "host lacks required capability: \(capability)"
     case .macOSGuestLimitReached(let limit): "macOS guest limit of \(limit) reached"
+    case .macOSHardwareModelMissing:
+      "macOS instance has no hardware model; the image metadata must carry macos.hardwareModel"
+    case .macOSHardwareModelInvalid(let reason): "macOS hardware model rejected: \(reason)"
+    case .macOSHardwareModelUnsupported: "this host cannot run the image's macOS hardware model"
+    case .macOSMachineIdentifierInvalid(let path): "macOS machine identifier unusable: \(path)"
+    case .macOSAuxiliaryStorageMissing(let path): "macOS auxiliary storage is missing: \(path)"
+    case .macOSProfileCPUTooSmall(let requested, let minimum):
+      "profile requests \(requested) vCPU but the image requires at least \(minimum)"
+    case .macOSProfileMemoryTooSmall(let requested, let minimum):
+      "profile requests \(ByteSize(bytes: requested)) of memory but the image requires at least "
+        + "\(ByteSize(bytes: minimum))"
     }
   }
 
@@ -54,7 +81,10 @@ public enum VMError: RunnerError {
     case .workerSpawnFailed, .workerUnresponsive, .bootTimeout, .guestStopTimeout,
          .workerLockHeldByOtherProcess, .macOSGuestLimitReached:
       true
-    case .specInvalid, .workerFenced, .forceStopFailed, .unsupportedGuestOS, .hostCapabilityMissing:
+    case .specInvalid, .workerFenced, .forceStopFailed, .unsupportedGuestOS, .hostCapabilityMissing,
+         .macOSHardwareModelMissing, .macOSHardwareModelInvalid, .macOSHardwareModelUnsupported,
+         .macOSMachineIdentifierInvalid, .macOSAuxiliaryStorageMissing, .macOSProfileCPUTooSmall,
+         .macOSProfileMemoryTooSmall:
       false
     }
   }

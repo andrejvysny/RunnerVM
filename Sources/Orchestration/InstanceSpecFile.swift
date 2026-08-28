@@ -20,10 +20,14 @@ struct InstanceSpecFile: Codable, Sendable, Equatable {
   var macAddress: String
   var serialConsole: Bool
   var hardDeadline: Date?
+  /// macOS guests only; omitted for Linux so a Linux `spec.json` keeps the exact key set it had
+  /// before M8.
+  var macos: MacOSInstancePlatformSpec?
 
   init(
     id: InstanceID, imageDigest: ImageDigest, os: GuestOS, cpuCount: Int, memoryBytes: UInt64,
-    diskBytes: UInt64, macAddress: String, serialConsole: Bool = true, hardDeadline: Date? = nil
+    diskBytes: UInt64, macAddress: String, serialConsole: Bool = true, hardDeadline: Date? = nil,
+    macos: MacOSInstancePlatformSpec? = nil
   ) {
     self.id = id
     self.imageDigest = imageDigest
@@ -34,6 +38,7 @@ struct InstanceSpecFile: Codable, Sendable, Equatable {
     self.macAddress = macAddress
     self.serialConsole = serialConsole
     self.hardDeadline = hardDeadline
+    self.macos = macos
   }
 
   /// Locally administered unicast address (`02:` prefix), so a guest can never collide with a real

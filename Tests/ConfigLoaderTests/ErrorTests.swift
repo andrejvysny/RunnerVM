@@ -233,7 +233,8 @@ struct ErrorTests {
     #expect(loadError.code == "CONFIG_VALIDATION_FAILED")
   }
 
-  @Test func macOSProfileFailsValidationAsUnsupportedGuestOS() throws {
+  /// M8: `os: macos` is a supported guest OS, so a macOS profile now loads *and* validates.
+  @Test func macOSProfileLoadsAndValidates() throws {
     let yaml = """
     version: 1
     github:
@@ -245,9 +246,27 @@ struct ErrorTests {
         image: ghcr.io/acme/runners/macos-15:stable
         os: macos
     """
-    // Loading alone succeeds: `os: macos` is a well-formed value, just unsupported in this build.
-    let config = try ConfigLoader.load(yaml: yaml)
+    let (config, issues) = try ConfigLoader.loadAndValidate(yaml: yaml, host: Fixtures.hostFacts)
     #expect(config.profile(named: "macos-15")?.guestOS == .macos)
+    #expect(!issues.contains { $0.severity == .error })
+  }
+
+  /// macOS guests stay ephemeral-only: the between-jobs reset has no macOS equivalent yet.
+  @Test func reusableMacOSProfileFailsValidation() throws {
+    let yaml = """
+    version: 1
+    github:
+      scopes:
+        - {name: engineering, type: organization, owner: acme}
+    profiles:
+      - name: macos-15
+        scope: engineering
+        image: ghcr.io/acme/runners/macos-15:stable
+        os: macos
+        lifecycle: reusable
+    """
+    // Loading alone succeeds: `lifecycle: reusable` is a well-formed value on any guest OS.
+    #expect(try ConfigLoader.load(yaml: yaml).profile(named: "macos-15")?.lifecycle == .reusable)
 
     let error = #expect(throws: ConfigLoadError.self) {
       try ConfigLoader.loadAndValidate(yaml: yaml, host: Fixtures.hostFacts)
@@ -257,7 +276,7 @@ struct ErrorTests {
       Issue.record("unexpected error \(loadError)")
       return
     }
-    let issue = try #require(issues.first(code: "GUEST_OS_UNSUPPORTED"))
-    #expect(issue.path == "profiles[0].os")
+    let issue = try #require(issues.first(code: "PROFILE_MACOS_REUSABLE_UNSUPPORTED"))
+    #expect(issue.path == "profiles[0].lifecycle")
   }
 }

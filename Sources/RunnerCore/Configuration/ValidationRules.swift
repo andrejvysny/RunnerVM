@@ -142,12 +142,13 @@ extension RunnerConfiguration {
       if !HostConstants.supportedGuestOS.contains(profile.guestOS) {
         issues.append(.error(
           "GUEST_OS_UNSUPPORTED", "\(path).os",
-          "guest OS \(profile.guestOS.rawValue) is not supported in this build; supported: linux/arm64"
+          "guest OS \(profile.guestOS.rawValue) is not supported in this build; supported: linux, macos"
         ))
       }
       issues += profile.validateResources(facts: facts, path: path)
       issues += profile.validateWarmPool(path: path)
       issues += profile.validateLifecycle(path: path)
+      issues += profile.validateHostedLabelShadowing(path: path)
       issues += profile.validateTimeouts(path: path)
     }
     return issues
@@ -162,7 +163,9 @@ extension RunnerConfiguration {
     }
   }
 
-  /// Aggregate macOS rules: Virtualization.framework refuses a third concurrent macOS guest.
+  /// Aggregate macOS rules against `HostConstants.macOSGuestLimit`: two concurrent macOS guests
+  /// per host is RunnerVM's fixed default, matching Apple's standard macOS license allowance and
+  /// the supported Virtualization.framework operating model -- not a framework error code.
   func validateMacOSAggregates() -> [ConfigurationIssue] {
     let macProfiles = profiles.filter { $0.guestOS == .macos }
     guard !macProfiles.isEmpty else { return [] }

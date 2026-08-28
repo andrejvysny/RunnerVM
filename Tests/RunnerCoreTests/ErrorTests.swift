@@ -83,6 +83,38 @@ private struct Cause: Error, Sendable, CustomStringConvertible {
     #expect(!GuestAgentError.cleanupFailed(reason: "docker").retryable)
   }
 
+  /// M8.1 pinned these codes into `failure.json` and the operator-facing surfaces; every one is a
+  /// permanent misconfiguration, so none may be graded retryable.
+  @Test func macOSPlatformErrorsAreStableAndPermanent() {
+    let expected: [(VMError, String)] = [
+      (.macOSHardwareModelMissing, "VM_MACOS_HARDWARE_MODEL_MISSING"),
+      (.macOSHardwareModelInvalid(reason: "not base64"), "VM_MACOS_HARDWARE_MODEL_INVALID"),
+      (.macOSHardwareModelUnsupported, "VM_MACOS_HARDWARE_MODEL_UNSUPPORTED"),
+      (.macOSMachineIdentifierInvalid(path: "/i/machine-identifier.bin"),
+       "VM_MACOS_MACHINE_IDENTIFIER_INVALID"),
+      (.macOSAuxiliaryStorageMissing(path: "/i/nvram.bin"), "VM_MACOS_AUXILIARY_STORAGE_MISSING"),
+      (.macOSProfileCPUTooSmall(requested: 4, minimum: 6), "VM_MACOS_PROFILE_CPU_TOO_SMALL"),
+      (.macOSProfileMemoryTooSmall(requestedBytes: 1, minimumBytes: 2),
+       "VM_MACOS_PROFILE_MEMORY_TOO_SMALL"),
+    ]
+    for (error, code) in expected {
+      #expect(error.code == code)
+      #expect(!error.retryable, "\(code)")
+      #expect(error.underlying == nil, "\(code)")
+      #expect(!error.message.isEmpty, "\(code)")
+    }
+  }
+
+  @Test func macOSSizingMessagesNameBothFigures() {
+    let cpu = VMError.macOSProfileCPUTooSmall(requested: 4, minimum: 6)
+    #expect(cpu.message == "profile requests 4 vCPU but the image requires at least 6")
+
+    let memory = VMError.macOSProfileMemoryTooSmall(
+      requestedBytes: ByteSize.gibibytes(2).bytes, minimumBytes: ByteSize.gibibytes(8).bytes)
+    #expect(memory.message.contains("2GiB"))
+    #expect(memory.message.contains("8GiB"))
+  }
+
   @Test func byteSizesAppearHumanReadableInMessages() {
     let error = SchedulerError.insufficientMemory(
       requestedBytes: ByteSize.gibibytes(12).bytes, availableBytes: ByteSize.gibibytes(4).bytes

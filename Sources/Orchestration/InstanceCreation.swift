@@ -29,16 +29,16 @@ extension InstanceManager {
     let instanceId = InstanceID.generate()
     let (digest, image) = try await images.reserve(
       reference: profile.image, for: instanceId, profile: profile.name)
-    let record: InstanceRecord
+    let planned: (record: InstanceRecord, macos: MacOSInstancePlatformSpec?)
     do {
-      record = try await plan(
+      planned = try await plan(
         instanceId: instanceId, digest: digest, image: image, profile: profile,
         profileRow: profileRow)
     } catch {
       try? await images.release(planning: instanceId)
       throw error
     }
-    return try await bringUp(record, profile: profile)
+    return try await bringUp(planned.record, profile: profile, macos: planned.macos)
   }
 
   /// Validates the image against the profile, admits it against host capacity, inserts the row
@@ -47,10 +47,11 @@ extension InstanceManager {
   private func plan(
     instanceId: InstanceID, digest: ImageDigest, image: ImageInfo, profile: RunnerProfileConfig,
     profileRow: RunnerProfileRecord
-  ) async throws -> InstanceRecord {
+  ) async throws -> (record: InstanceRecord, macos: MacOSInstancePlatformSpec?) {
     guard image.metadata.os == profile.guestOS else {
       throw ImageError.incompatibleGuestOS(expected: profile.guestOS, actual: image.metadata.os)
     }
+    let macos = try Self.macOSPlatformSpec(profile: profile, image: image)
     try await enforceRunnerVersion(digest: digest, image: image)
     let reservation = DiskAccounting.estimatedAdditionalAllocation(
       for: profile.resources.diskBytes, image: image)
@@ -65,7 +66,31 @@ extension InstanceManager {
     logger.info(
       "instance planned",
       metadata: .context(profile: profileRow.id, instance: record.id, imageDigest: digest))
-    return record
+    return (record, macos)
+  }
+
+  /// What a macOS instance's `spec.json` must carry, and the two refusals that go with it.
+  ///
+  /// Runs inside `plan`, before the row is inserted: an image that cannot describe its platform, or
+  /// a profile sized below what the image will boot with, is a permanent misconfiguration, and
+  /// leaving a `failed` row behind for it would only make the operator clean up after a create that
+  /// never allocated anything. Linux never has a platform block (`ImageStore` refuses one).
+  private static func macOSPlatformSpec(
+    profile: RunnerProfileConfig, image: ImageInfo
+  ) throws -> MacOSInstancePlatformSpec? {
+    guard profile.guestOS == .macos else { return nil }
+    guard let platform = image.metadata.macos, !platform.hardwareModel.isEmpty else {
+      throw VMError.macOSHardwareModelMissing
+    }
+    if let minimum = platform.minimumCPUCount, profile.resources.cpuCount < minimum {
+      throw VMError.macOSProfileCPUTooSmall(
+        requested: profile.resources.cpuCount, minimum: minimum)
+    }
+    if let minimum = platform.minimumMemoryBytes, profile.resources.memoryBytes < minimum {
+      throw VMError.macOSProfileMemoryTooSmall(
+        requestedBytes: profile.resources.memoryBytes, minimumBytes: minimum)
+    }
+    return MacOSInstancePlatformSpec(platform)
   }
 
   /// The capacity critical section: reading the reservations, deciding they leave room and
@@ -135,11 +160,11 @@ extension InstanceManager {
   }
 
   private func bringUp(
-    _ record: InstanceRecord, profile: RunnerProfileConfig
+    _ record: InstanceRecord, profile: RunnerProfileConfig, macos: MacOSInstancePlatformSpec?
   ) async throws -> InstanceRecord {
     var current = try await transition(record, to: .preparing)
     current = try await transition(current, to: .cloning)
-    let layout = try await stage(current, profile: profile)
+    let layout = try await stage(current, profile: profile, macos: macos)
     current = try await transition(current, to: .startingWorker)
     let spawnedAt = ContinuousClock.now
     let session = try await spawn(current, specPath: layout.spec)
@@ -156,12 +181,12 @@ extension InstanceManager {
   }
 
   private func stage(
-    _ record: InstanceRecord, profile: RunnerProfileConfig
+    _ record: InstanceRecord, profile: RunnerProfileConfig, macos: MacOSInstancePlatformSpec?
   ) async throws -> VMInstanceLayout {
     let spec = InstanceSpecFile(
       id: record.id, imageDigest: record.imageDigest, os: profile.guestOS,
       cpuCount: record.cpuCount, memoryBytes: record.memoryBytes, diskBytes: record.diskBytes,
-      macAddress: record.macAddress ?? InstanceSpecFile.randomMACAddress())
+      macAddress: record.macAddress ?? InstanceSpecFile.randomMACAddress(), macos: macos)
     let startedAt = ContinuousClock.now
     do {
       let materialized = try await instanceStore.materialize(

@@ -31,6 +31,18 @@ import Testing
     #expect(Self.issues { $0.name = "ok.name_1-2" }.isEmpty)
   }
 
+  /// Seen live: `runs-on: macos-26` went to GitHub's hosted macOS 26 runner, never to this host.
+  @Test func warnsWhenAProfileNameShadowsAGitHubHostedLabel() {
+    for name in ["macos-26", "macos-latest", "ubuntu-latest", "ubuntu-24.04", "windows-2025", "macos-15-large"] {
+      let issues = Self.issues { $0.name = name }
+      #expect(issues.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL"), "\(name)")
+      #expect(!issues.errors.contains { $0.code == "PROFILE_NAME_SHADOWS_HOSTED_LABEL" }, "\(name) is a warning")
+    }
+    for name in ["ubuntu-24", "rvm-macos-26", "macos26", "linux-arm64", "ubuntu-24-minimal", "macos-15-xcode-16"] {
+      #expect(!Self.issues { $0.name = name }.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL"), "\(name)")
+    }
+  }
+
   @Test(arguments: [
     "acme/ubuntu-24:stable",
     "ghcr.io/acme/ubuntu-24:BAD TAG",
@@ -186,6 +198,27 @@ import Testing
     #expect(!Self.issues { $0.lifecycle = .ephemeral }.contains(code: "PROFILE_REUSABLE_SINGLE_TENANT"))
   }
 
+  /// A macOS guest cannot be acknowledged into reusability the way a Linux one can: the
+  /// between-jobs reset has no macOS equivalent yet, so the refusal is unconditional.
+  @Test func refusesReusableMacOSProfilesOutright() throws {
+    let issue = try #require(
+      Self.macIssues { $0.lifecycle = .reusable }.first(code: "PROFILE_MACOS_REUSABLE_UNSUPPORTED"))
+    #expect(issue.severity == .error)
+    #expect(issue.path == "profiles[0].lifecycle")
+
+    // Acknowledging the shared host does not buy a way past it.
+    let acknowledged = Self.macIssues {
+      $0.lifecycle = .reusable
+      $0.reuse = ReusePolicy(acknowledgeSharedHost: true)
+    }
+    #expect(acknowledged.contains(code: "PROFILE_MACOS_REUSABLE_UNSUPPORTED"))
+
+    #expect(!Self.macIssues { $0.lifecycle = .ephemeral }
+      .contains(code: "PROFILE_MACOS_REUSABLE_UNSUPPORTED"))
+    #expect(!Self.issues { $0.lifecycle = .reusable }
+      .contains(code: "PROFILE_MACOS_REUSABLE_UNSUPPORTED"))
+  }
+
   /// `timeouts.clone` is parsed for compatibility but has nothing to enforce: `clonefile(2)` is
   /// synchronous. Setting it is a configuration smell, not an error.
   @Test func warnsWhenTheUnenforcedCloneTimeoutIsSet() throws {
@@ -280,9 +313,9 @@ import Testing
         $0.warmPool = WarmPoolPolicy(minIdle: 2, maxIdle: 2)
       }]
     }
-    // GUEST_OS_UNSUPPORTED always fires for a macOS profile in this build; the aggregate rule
-    // under test must not add an error of its own on top of it.
-    #expect(issues.errors.map(\.code) == ["GUEST_OS_UNSUPPORTED"])
+    // Exactly at the limit: the aggregate rule under test must not fire, and nothing else may
+    // either -- a macOS profile is otherwise a fully supported profile since M8.
+    #expect(issues.errors.isEmpty)
   }
 
   @Test func warnsWhenMacOSMaxInstancesOversubscribeTheTwoGuestLimit() throws {
@@ -297,8 +330,9 @@ import Testing
     }
     let issue = try #require(issues.first(code: "MACOS_MAX_INSTANCES_EXCEEDS_GUEST_LIMIT"))
     #expect(issue.severity == .warning)
-    // The only errors present are the (expected) per-profile GUEST_OS_UNSUPPORTED ones.
-    #expect(issues.errors.allSatisfy { $0.code == "GUEST_OS_UNSUPPORTED" })
+    // Over-subscribing the two slots across profiles is legitimate, so it warns and nothing else
+    // in the document is an error.
+    #expect(issues.errors.isEmpty)
   }
 
   @Test func linuxProfilesAreNotSubjectToTheMacOSGuestLimit() {

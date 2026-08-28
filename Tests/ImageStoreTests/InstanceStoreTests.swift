@@ -9,6 +9,19 @@ import Testing
     return try await env.images.importLocal(disk: disk, nvram: nil, metadata: TempStore.linuxMetadata())
   }
 
+  /// vmworker mints `machine-identifier.bin` for a macOS instance; the daemon and the sealer agree
+  /// on its name through this constant alone, so the name is pinned here rather than duplicated.
+  @Test func theLayoutNamesTheMacOSMachineIdentifier() {
+    #expect(VMInstanceLayout.machineIdentifierName == "machine-identifier.bin")
+
+    let directory = URL(fileURLWithPath: "/tmp/rvm-instance")
+    let layout = VMInstanceLayout(
+      instanceId: InstanceID.generate(), directory: directory, hasNVRAM: true)
+
+    #expect(layout.machineIdentifier == directory.appending(path: "machine-identifier.bin"))
+    #expect(!VMInstanceLayout.diagnosticNames.contains(VMInstanceLayout.machineIdentifierName))
+  }
+
   @Test func cloneProducesIndependentInstances() async throws {
     let env = try TempStore()
     let image = try await importBase(env)

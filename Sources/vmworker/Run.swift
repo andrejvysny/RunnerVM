@@ -33,6 +33,7 @@ struct Run: ParsableCommand {
       try LinuxVMPlatform.createVariableStore(at: paths.nvram)
       logger.info("created EFI variable store", metadata: ["path": "\(paths.nvram.path)"])
     }
+    try Self.prepareMachineIdentity(spec: loaded.spec, paths: paths, logger: logger)
     let configuration = try Self.buildConfiguration(spec: loaded.spec, paths: paths, logger: logger)
     let options = Self.makeOptions(loaded, instance: instance, run: self)
 
@@ -89,6 +90,24 @@ struct Run: ParsableCommand {
     } catch let error as WorkerLockError {
       logger.error("instance lock unavailable", metadata: ["error": .string("\(error)")])
       throw ExitCode(WorkerExitCode.lockHeld.rawValue)
+    }
+  }
+
+  /// The macOS counterpart of the EFI variable store: minted once, on the first boot after this
+  /// process took the worker lock, and reused for every later boot of the same instance. Holding
+  /// the lock is what makes "exists?" then "create" safe here.
+  private static func prepareMachineIdentity(
+    spec: VMInstanceSpec, paths: VMRuntimePaths, logger: Logger
+  ) throws {
+    guard spec.os == .macos else { return }
+    do {
+      let result = try MacOSMachineIdentity.loadOrCreate(at: paths.machineIdentifier)
+      logger.info(
+        result.created ? "created macOS machine identifier" : "loaded macOS machine identifier",
+        metadata: ["path": "\(paths.machineIdentifier.path)"])
+    } catch {
+      logger.error("macOS machine identifier unusable", metadata: ["error": .string("\(error)")])
+      throw ExitCode(WorkerExitCode.vzConfigInvalid.rawValue)
     }
   }
 

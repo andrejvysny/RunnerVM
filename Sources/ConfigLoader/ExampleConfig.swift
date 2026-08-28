@@ -1,7 +1,8 @@
-/// The spec §63 example configuration, minus its macOS profile: this build rejects `os: macos` at
-/// validation time (`GUEST_OS_UNSUPPORTED`), so shipping one would make `runnerctl config init`
-/// print a document that fails its own validation. `runnerctl config init` prints this so a fresh
-/// install starts from a document that is already known to load and validate cleanly.
+/// The spec §63 example configuration, minus its macOS profile: `os: macos` validates now, but a
+/// macOS profile is only usable once a macOS image has been imported, and it permanently claims
+/// one of the host's two macOS guest slots -- neither is true of a fresh install. `runnerctl
+/// config init` prints this so an install starts from a document that already loads, validates
+/// cleanly, and can actually run what it declares.
 public enum ExampleConfig {
   public static let example = """
   version: 1

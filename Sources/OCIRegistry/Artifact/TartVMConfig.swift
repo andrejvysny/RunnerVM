@@ -163,10 +163,20 @@ extension TartVMConfig {
       minimumHostOS: "15.0",
       createdAt: createdAt,
       boot: ImageMetadata.Boot(type: os == .darwin ? .macos : .efi),
-      macos: os == .darwin ? hardwareModel.map { ImageMetadata.MacOSPlatform(hardwareModel: $0) } : nil,
+      macos: os == .darwin ? hardwareModel.map(macOSPlatform(hardwareModel:)) : nil,
       capabilities: ImageMetadata.Capabilities(docker: false, ssh: true, guestAgent: false),
       provenance: provenance
     )
+  }
+
+  /// tart records real boot floors for a macOS image (the restore image's own minimums), so they
+  /// are carried into the platform block and become the profile check at instance creation. A zero
+  /// means "tart did not say", not "no minimum".
+  private func macOSPlatform(hardwareModel: String) -> ImageMetadata.MacOSPlatform {
+    ImageMetadata.MacOSPlatform(
+      hardwareModel: hardwareModel,
+      minimumCPUCount: cpuCountMin > 0 ? cpuCountMin : nil,
+      minimumMemoryBytes: memorySizeMin > 0 ? memorySizeMin : nil)
   }
 
   /// The sizing hints worth carrying forward, plus where the image came from.

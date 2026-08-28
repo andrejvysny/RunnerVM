@@ -67,12 +67,4 @@ import Virtualization
     bad.macAddress = "nope"
     #expect(throws: VMConfigurationError.self) { try VMConfigurationBuilder(spec: bad, paths: paths).build(validate: false) }
   }
-
-  @Test func macOSNotSupportedYet() throws {
-    let paths = try makeInstanceDir()
-    defer { try? FileManager.default.removeItem(at: paths.directory) }
-    var mac = spec()
-    mac.os = .macos
-    #expect(throws: VMConfigurationError.self) { try VMConfigurationBuilder(spec: mac, paths: paths).build(validate: false) }
-  }
 }

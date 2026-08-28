@@ -139,10 +139,15 @@ public struct ImageImportRequest: Codable, Sendable, Hashable {
   /// this explicitly `false` (`runnerctl image import --no-guest-agent`) cannot run jobs and is
   /// only useful as a build/inspection artifact.
   public var guestAgent: Bool?
+  /// macOS only: base64 of `VZMacHardwareModel.dataRepresentation`, e.g. the `hardwareModel` field
+  /// of a tart `config.json`. Only used to fill a gap: a sealed `metadata.json` that already
+  /// carries `macos.hardwareModel` wins (see `SealedImageMetadata.reconcile`). Optional so an
+  /// older client's payload stays valid on the wire.
+  public var hardwareModel: String?
 
   public init(
     path: String, nvramPath: String? = nil, os: String, name: String? = nil,
-    metadataPath: String? = nil, guestAgent: Bool? = nil
+    metadataPath: String? = nil, guestAgent: Bool? = nil, hardwareModel: String? = nil
   ) {
     self.path = path
     self.nvramPath = nvramPath
@@ -150,6 +155,7 @@ public struct ImageImportRequest: Codable, Sendable, Hashable {
     self.name = name
     self.metadataPath = metadataPath
     self.guestAgent = guestAgent
+    self.hardwareModel = hardwareModel
   }
 }
 

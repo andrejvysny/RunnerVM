@@ -26,7 +26,8 @@ import Testing
   /// authority and `ImageStore` rejects a stale figure.
   private func sealed(
     _ harness: M2Harness, named: String, os: GuestOS = .linux,
-    provenance: ImageMetadata.Provenance? = SealedMetadataImportTests.provenance
+    provenance: ImageMetadata.Provenance? = SealedMetadataImportTests.provenance,
+    macos: ImageMetadata.MacOSPlatform? = nil
   ) throws -> URL {
     let directory = harness.tree.root.appending(path: named, directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -41,7 +42,7 @@ import Testing
       guestAgentVersion: "v0.1.0-12-g3fb473c",
       createdAt: Date(timeIntervalSince1970: 1_800_000_000),
       boot: ImageMetadata.Boot(type: os == .macos ? .macos : .efi),
-      capabilities: ImageMetadata.Capabilities(docker: true, ssh: true),
+      macos: macos, capabilities: ImageMetadata.Capabilities(docker: true, ssh: true),
       provenance: provenance)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -143,6 +144,40 @@ import Testing
 
       #expect(first.record.digest == second.record.digest)
       #expect(try await harness.images.list().count == 1)
+    }
+  }
+
+  // MARK: - `--hardware-model` (M8.2)
+
+  /// A tart-derived macOS disk arrives with no sealed `metadata.json`, so `--hardware-model` is
+  /// the only thing that can tell the store what hardware the image is -- and `ImageStore` refuses
+  /// a macOS image that cannot say.
+  @Test func hardwareModelReachesSynthesisedMacOSMetadata() async throws {
+    try await withHarness { harness in
+      let disk = try harness.sparseFile(named: "mac-synth.img", bytes: 32 << 20)
+      let nvram = try harness.sparseFile(named: "mac-synth-nvram.bin", bytes: 64 << 10)
+      let image = try await harness.images.importLocal(
+        disk: disk, nvram: nvram, os: .macos, name: "macos-synth",
+        hardwareModel: "ZmFrZS1tb2RlbA==")
+
+      #expect(image.metadata?.macos?.hardwareModel == "ZmFrZS1tb2RlbA==")
+      #expect(image.metadata?.boot.type == .macos)
+    }
+  }
+
+  /// The sealed file is what the image really is; `--hardware-model` only fills a gap.
+  @Test func aSealedHardwareModelBeatsTheImportOption() async throws {
+    try await withHarness { harness in
+      let disk = try sealed(
+        harness, named: "out-mac-sealed", os: .macos,
+        macos: ImageMetadata.MacOSPlatform(hardwareModel: "c2VhbGVk", sourceVersion: "26.0"))
+      let nvram = try harness.sparseFile(named: "mac-sealed-nvram.bin", bytes: 64 << 10)
+      let image = try await harness.images.importLocal(
+        disk: disk, nvram: nvram, os: .macos, name: "macos-sealed",
+        hardwareModel: "ZmFrZS1tb2RlbA==")
+
+      #expect(image.metadata?.macos?.hardwareModel == "c2VhbGVk")
+      #expect(image.metadata?.macos?.sourceVersion == "26.0")
     }
   }
 

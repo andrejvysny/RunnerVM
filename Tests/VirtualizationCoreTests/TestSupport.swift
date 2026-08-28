@@ -1,4 +1,5 @@
 import Foundation
+import Virtualization
 
 /// Short-lived scratch directory under `/tmp`.
 ///
@@ -111,5 +112,30 @@ final class CountWaiter: @unchecked Sendable {
       waiting = (target, continuation)
       lock.unlock()
     }
+  }
+}
+
+/// Opaque `VZMacHardwareModel` blobs, so the macOS platform tests need neither a real macOS image
+/// nor the virtualization entitlement: decoding a hardware model is a pure data operation.
+///
+/// Both are `bplist00` dictionaries of `{DataRepresentationVersion, PlatformVersion,
+/// MinimumSupportedOS}` — the shape Apple's own `dataRepresentation` emits — differing only in
+/// `PlatformVersion`, which is what decides `isSupported`.
+enum MacOSFixtures {
+  /// `PlatformVersion 2`, `MinimumSupportedOS 12.0.0`: decodes and `isSupported` on Apple silicon.
+  static let supportedHardwareModel =
+    "YnBsaXN0MDDTAQIDBAQFXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QD1BsYXRmb3JtVmVyc2lvbl8QEk1p"
+    + "bmltdW1TdXBwb3J0ZWRPUxACowYHBxAMEAAIDys9UlRYWgAAAAAAAAEBAAAAAAAAAAgAAAAAAAAAAAAAAAAAAABc"
+  /// `PlatformVersion 999`: well-formed enough to decode, but no host can run it.
+  static let unsupportedHardwareModel =
+    "YnBsaXN0MDDTAQIDBAUIXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QEk1pbmltdW1TdXBwb3J0ZWRPU18Q"
+    + "D1BsYXRmb3JtVmVyc2lvbhACowYHBxBjEAARA+cIDytAUlRYWlwAAAAAAAABAQAAAAAAAAAJAAAAAAAAAAAAAAAA"
+    + "AAAAXw=="
+
+  /// Whether this host accepts `supportedHardwareModel`. An Intel Mac (or a future macOS that
+  /// retires the model) skips the tests that need a usable model rather than failing them.
+  static var hostSupportsFixture: Bool {
+    Data(base64Encoded: supportedHardwareModel)
+      .flatMap(VZMacHardwareModel.init(dataRepresentation:))?.isSupported == true
   }
 }

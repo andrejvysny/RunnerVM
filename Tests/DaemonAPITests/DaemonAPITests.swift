@@ -142,6 +142,30 @@ import Testing
     #expect(decoded.guestAgent == nil)
   }
 
+  /// M8: `--hardware-model` is the only way to import a tart-derived macOS disk that has no sealed
+  /// `metadata.json`, so the daemon has to see it exactly as runnerctl sent it.
+  @Test func imageImportCarriesTheMacOSHardwareModel() async throws {
+    try await withDaemon { client, service in
+      _ = try await client.imageImport(
+        ImageImportRequest(
+          path: "/tmp/disk.img", os: "macos", name: "macos-15",
+          hardwareModel: "YnBsaXN0MDA="))
+      #expect(await service.lastImportRequest?.hardwareModel == "YnBsaXN0MDA=")
+    }
+  }
+
+  /// Optional on the wire in both directions: a Linux import must not start emitting a macOS-only
+  /// key, and a client that predates the field still produces a decodable payload.
+  @Test func imageImportOmitsTheHardwareModelWhenAbsent() throws {
+    let request = ImageImportRequest(path: "/tmp/disk.img", os: "linux", name: "ubuntu-24")
+    let encoded = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+    #expect(!encoded.contains("hardwareModel"))
+
+    let json = #"{"path":"/tmp/disk.img","os":"linux"}"#
+    let decoded = try JSONDecoder().decode(ImageImportRequest.self, from: Data(json.utf8))
+    #expect(decoded.hardwareModel == nil)
+  }
+
   @Test func imagePruneRoundTripsAndCarriesDryRun() async throws {
     try await withDaemon { client, service in
       let response = try await client.imagePrune(dryRun: true)

@@ -5,18 +5,19 @@ import Virtualization
 
 public enum VMConfigurationError: Error, CustomStringConvertible {
   case invalidMACAddress(String)
-  case unsupportedGuestOS(GuestOS)
 
   public var description: String {
     switch self {
     case .invalidMACAddress(let mac): "invalid MAC address: \(mac)"
-    case .unsupportedGuestOS(let os): "guest OS not supported yet: \(os.rawValue)"
     }
   }
 }
 
 /// Builds a headless, CI-oriented VZVirtualMachineConfiguration (spec §27/§28).
 /// Inputs: spec + paths. No GitHub/SQLite/OCI knowledge.
+///
+/// "Headless" survives macOS guests: a macOS platform contributes one virtual display because the
+/// guest expects a framebuffer, but nothing here ever creates a window to show it in.
 public struct VMConfigurationBuilder {
   public var spec: VMInstanceSpec
   public var paths: VMRuntimePaths
@@ -29,17 +30,23 @@ public struct VMConfigurationBuilder {
     self.readOnlyDisks = readOnlyDisks
   }
 
-  public static func platform(for os: GuestOS) throws -> any VMPlatformBuilder {
-    switch os {
-    case .linux: LinuxVMPlatform()
-    case .macos: throw VMConfigurationError.unsupportedGuestOS(os)
+  /// Takes the whole spec, not just `os`: a macOS platform is only buildable together with the
+  /// image facts `spec.macos` carries, and a spec that says `macos` without them is an image that
+  /// was imported without a hardware model rather than a guest OS this build cannot run.
+  public static func platform(for spec: VMInstanceSpec) throws -> any VMPlatformBuilder {
+    switch spec.os {
+    case .linux:
+      return LinuxVMPlatform()
+    case .macos:
+      guard let macos = spec.macos else { throw VMError.macOSHardwareModelMissing }
+      return MacOSVMPlatform(spec: macos)
     }
   }
 
   /// `validate` calls `VZVirtualMachineConfiguration.validate()`, which itself requires the
   /// virtualization entitlement — so it only works inside signed vmworker, not in test runners.
   public func build(validate: Bool = true) throws -> VZVirtualMachineConfiguration {
-    let platform = try Self.platform(for: spec.os)
+    let platform = try Self.platform(for: spec)
     let config = VZVirtualMachineConfiguration()
 
     config.bootLoader = try platform.bootLoader(paths: paths)

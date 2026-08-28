@@ -124,6 +124,32 @@ struct TartVMConfigTests {
     }
   }
 
+  /// tart's `cpuCountMin`/`memorySizeMin` are the restore image's real boot floors, so they become
+  /// the platform minimums a profile is checked against at instance creation.
+  @Test func aDarwinConfigCarriesItsSizingFloorsIntoTheMacOSPlatform() throws {
+    let config = try TartVMConfig.decode(Data(TartFixtures.darwinConfigJSON.utf8))
+
+    let metadata = try config.imageMetadata(
+      ociConfig: try TartOCIConfig.decode(TartFixtures.ociConfig(os: "darwin")),
+      virtualDiskSizeBytes: 3072, createdAt: Date(timeIntervalSince1970: 0),
+      provenance: config.provenance(manifestDigest: "sha256:aa"))
+
+    #expect(metadata.macos?.hardwareModel == TartFixtures.hardwareModel)
+    #expect(metadata.macos?.minimumCPUCount == 2)
+    #expect(metadata.macos?.minimumMemoryBytes == 4_294_967_296)
+  }
+
+  @Test func aLinuxConfigGetsNoMacOSPlatformAtAll() throws {
+    let config = try TartVMConfig.decode(Data(TartFixtures.linuxConfigJSON.utf8))
+
+    let metadata = try config.imageMetadata(
+      ociConfig: try TartOCIConfig.decode(TartFixtures.ociConfig()),
+      virtualDiskSizeBytes: 3072, createdAt: Date(timeIntervalSince1970: 0),
+      provenance: config.provenance(manifestDigest: "sha256:aa"))
+
+    #expect(metadata.macos == nil)
+  }
+
   @Test func theOCIConfigCarriesTheDiskFormatLabel() throws {
     let config = try TartOCIConfig.decode(TartFixtures.ociConfig())
     #expect(config.architecture == "arm64")

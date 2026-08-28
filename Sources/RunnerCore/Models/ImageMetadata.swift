@@ -15,9 +15,22 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
     /// Base64 of `VZMacHardwareModel.dataRepresentation`.
     public var hardwareModel: String
     public var sourceVersion: String?
-    public init(hardwareModel: String, sourceVersion: String? = nil) {
+    /// Smallest vCPU count this restore image will boot with. `nil` on metadata sealed before the
+    /// field existed and on images whose source never stated one; a profile is only refused when
+    /// there is a figure to compare against.
+    public var minimumCPUCount: Int?
+    /// Smallest guest memory this restore image will boot with, same nil semantics as
+    /// `minimumCPUCount`.
+    public var minimumMemoryBytes: UInt64?
+
+    public init(
+      hardwareModel: String, sourceVersion: String? = nil, minimumCPUCount: Int? = nil,
+      minimumMemoryBytes: UInt64? = nil
+    ) {
       self.hardwareModel = hardwareModel
       self.sourceVersion = sourceVersion
+      self.minimumCPUCount = minimumCPUCount
+      self.minimumMemoryBytes = minimumMemoryBytes
     }
   }
 

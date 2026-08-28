@@ -5,6 +5,17 @@ Worker: acquire fcntl `F_WRLCK` on `<instanceDir>/worker.lock` (fail ⇒ exit 75
 `<socket-dir>/vm-<shortid>.sock` (mode 0600) → publish (rename from `.tmp`) → serve. Exit codes: 0 clean, 64 usage,
 65 spec invalid, 75 lock held, 76 VZ config invalid, 77 VZ start failed.
 
+Instance directory (`<instanceDir>`, the parent of `spec.json`): `disk.img`, `nvram.bin` (EFI variable
+store on Linux, auxiliary storage on macOS), `spec.json`, `worker.lock`, `serial.log`, `worker.log`,
+optional `seed.img`/`context.img` (build VMs only), and — macOS only — `machine-identifier.bin`, the
+serialized `VZMacMachineIdentifier` the worker mints on first boot after taking the lock and reuses on
+every restart. It is instance identity: never sealed into an image, never copied between instances.
+
+`spec.json` carries an optional `macos` object for macOS guests only (absent for Linux):
+`{hardwareModel, sourceVersion?, minimumCPUCount?, minimumMemoryBytes?}`, where `hardwareModel` is
+base64 of `VZMacHardwareModel.dataRepresentation`. The minimums come from the image and are enforced
+by runnerd before the instance row exists.
+
 A second socket `<socket-dir>/vm-<shortid>-agent.sock` is a raw byte bridge: each accepted connection opens one
 fresh `VZVirtioSocketConnection` to guest port 4050; both halves close together.
 

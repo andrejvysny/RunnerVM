@@ -15,10 +15,15 @@ public struct VMInstanceSpec: Codable, Sendable, Equatable {
   /// Absolute wall-clock instant after which vmworker stops the VM even while the agent bridge is
   /// busy (Proto/worker_protocol.md orphan policy). Absent means "no deadline".
   public var hardDeadline: Date?
+  /// macOS guests only, and omitted entirely for Linux so a Linux `spec.json` is byte-identical to
+  /// what every release before M8 wrote. Carries the image's platform facts (hardware model,
+  /// sizing floors); instance identity stays in the instance directory.
+  public var macos: MacOSInstancePlatformSpec?
 
   public init(
     id: InstanceID, imageDigest: ImageDigest, os: GuestOS, cpuCount: Int, memoryBytes: UInt64,
-    diskBytes: UInt64, macAddress: String, serialConsole: Bool = true, hardDeadline: Date? = nil
+    diskBytes: UInt64, macAddress: String, serialConsole: Bool = true, hardDeadline: Date? = nil,
+    macos: MacOSInstancePlatformSpec? = nil
   ) {
     self.id = id
     self.imageDigest = imageDigest
@@ -29,6 +34,7 @@ public struct VMInstanceSpec: Codable, Sendable, Equatable {
     self.macAddress = macAddress
     self.serialConsole = serialConsole
     self.hardDeadline = hardDeadline
+    self.macos = macos
   }
 }
 
@@ -68,6 +74,9 @@ public struct VMRuntimePaths: Sendable, Equatable {
   public var seedDisk: URL { directory.appendingPathComponent("seed.img") }
   /// Optional extra read-only disk: the build context, attached only inside a build VM.
   public var contextDisk: URL { directory.appendingPathComponent("context.img") }
+  /// macOS only: serialized `VZMacMachineIdentifier`, created by vmworker on first boot after
+  /// taking the worker lock; reused on every restart of the same instance; never part of an image.
+  public var machineIdentifier: URL { directory.appendingPathComponent("machine-identifier.bin") }
   /// Instance-scoped exclusive `fcntl` lock held by the owning vmworker.
   public var workerLock: URL { directory.appendingPathComponent("worker.lock") }
   public var spec: URL { directory.appendingPathComponent("spec.json") }

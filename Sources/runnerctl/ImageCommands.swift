@@ -48,16 +48,30 @@ extension Image {
       help: "Record that this disk carries no RunnerVM guest agent; such an image cannot run jobs and is only useful as a build/inspection artifact.")
     var noGuestAgent = false
 
+    @Option(
+      name: .long,
+      help: "macOS only: base64 VZMacHardwareModel, as found in a tart config.json 'hardwareModel'. Ignored when the adopted metadata.json already names one.")
+    var hardwareModel: String?
+
     func validate() throws {
       guard ["linux", "macos"].contains(os) else {
         throw ValidationError("--os must be linux or macos")
+      }
+      guard let hardwareModel else { return }
+      guard os == "macos" else {
+        throw ValidationError("--hardware-model applies to --os macos only")
+      }
+      // Checked here rather than daemon-side so a typo fails before a multi-gigabyte disk is read.
+      guard Data(base64Encoded: hardwareModel) != nil else {
+        throw ValidationError("--hardware-model must be base64")
       }
     }
 
     func run() async throws {
       let request = ImageImportRequest(
         path: Image.absolute(disk), nvramPath: nvram.map(Image.absolute), os: os, name: name,
-        metadataPath: metadata.map(Image.absolute), guestAgent: noGuestAgent ? false : nil)
+        metadataPath: metadata.map(Image.absolute), guestAgent: noGuestAgent ? false : nil,
+        hardwareModel: hardwareModel)
       let image = try await options.withDaemon { try await $0.imageImport(request) }
       switch options.output {
       case .json: try JSONOut.print(image)
