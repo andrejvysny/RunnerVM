@@ -7,6 +7,10 @@
 #
 # LONG_MINUTES below must match the driver's --long-minutes (default 65): this workflow only
 # takes job/count/profile as inputs, so the "long" job's duration is fixed here, not passed in.
+#
+# The steps are OS-neutral on purpose: `runs-on: ${{ inputs.profile }}` may be a Linux or a macOS
+# RunnerVM profile, and both scripts/live-github-e2e.sh and scripts/live-macos-e2e.sh drive this
+# same file. Anything guest-specific goes behind a `uname -s` case, never at the top level.
 name: RunnerVM E2E
 
 on:
@@ -45,9 +49,35 @@ jobs:
     steps:
       - name: Host facts
         run: |
+          # One probe for both guest families: `runs-on: <profile>` may now be a macOS runner, and
+          # `docker info` on a macOS guest is not a soft failure -- it fails the step and turns
+          # every macOS E2E run red for a reason that has nothing to do with RunnerVM. GitHub
+          # documents container actions and service containers as Linux-only, so the Docker probe
+          # belongs behind the OS check rather than in the common part.
+          set -eu
+          echo "--- common ---"
           uname -a
-          docker info
           id
+          git --version
+          case "$(uname -s)" in
+          Darwin)
+            echo "--- darwin ---"
+            sw_vers
+            uname -m
+            xcode-select -p || echo "no Command Line Tools"
+            security list-keychains
+            # The guest agent is the control plane; a job that runs at all proves it, but the
+            # LaunchDaemon's state is the thing worth seeing in the log when one does not.
+            sudo launchctl print system/com.runnervm.guest-agent >/dev/null 2>&1 \
+              && echo "guest agent: loaded" || echo "guest agent: NOT LOADED"
+            ;;
+          Linux)
+            echo "--- linux ---"
+            cat /etc/os-release
+            docker info
+            systemctl is-system-running || true
+            ;;
+          esac
 
       - name: Write a marker
         run: |
@@ -100,6 +130,32 @@ jobs:
       - name: Host facts (${{ matrix.index }} of ${{ inputs.count }})
         run: |
           echo "job ${{ matrix.index }} of ${{ inputs.count }}"
+          # One probe for both guest families: `runs-on: <profile>` may now be a macOS runner, and
+          # `docker info` on a macOS guest is not a soft failure -- it fails the step and turns
+          # every macOS E2E run red for a reason that has nothing to do with RunnerVM. GitHub
+          # documents container actions and service containers as Linux-only, so the Docker probe
+          # belongs behind the OS check rather than in the common part.
+          set -eu
+          echo "--- common ---"
           uname -a
-          docker info
           id
+          git --version
+          case "$(uname -s)" in
+          Darwin)
+            echo "--- darwin ---"
+            sw_vers
+            uname -m
+            xcode-select -p || echo "no Command Line Tools"
+            security list-keychains
+            # The guest agent is the control plane; a job that runs at all proves it, but the
+            # LaunchDaemon's state is the thing worth seeing in the log when one does not.
+            sudo launchctl print system/com.runnervm.guest-agent >/dev/null 2>&1 \
+              && echo "guest agent: loaded" || echo "guest agent: NOT LOADED"
+            ;;
+          Linux)
+            echo "--- linux ---"
+            cat /etc/os-release
+            docker info
+            systemctl is-system-running || true
+            ;;
+          esac

@@ -10,3 +10,6 @@ GuestAgent/bin/
 
 # Reference clone of openai/tart (own git repo); never part of RunnerVM
 tart/
+
+# Claude Code agent worktrees: ~10 GB of throwaway clones, never part of the repo
+.claude/

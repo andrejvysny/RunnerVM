@@ -27,17 +27,21 @@ public enum MacOSMachineIdentity {
     return identifier
   }
 
-  /// Generates a fresh identifier and persists it.
+  /// Generates a fresh identifier and persists it durably.
   ///
-  /// Written to a sibling temporary and renamed, so a crash mid-write leaves either the previous
-  /// identifier or nothing at all -- never a truncated one that would strand the instance's
-  /// auxiliary storage.
+  /// `DurableFile.atomicReplace` is the whole contract here: unique temporary, full write, the
+  /// file's own `fsync`, `rename(2)`, then the directory's `fsync`. A power loss at any point
+  /// leaves either the previous identifier or nothing at all -- never a truncated one, and never a
+  /// durable-but-unnamed one whose loss would make the next boot mint a *second* virtual Mac
+  /// against auxiliary storage bound to the first.
   @discardableResult
   public static func create(at url: URL) throws -> VZMacMachineIdentifier {
     let identifier = VZMacMachineIdentifier()
-    let temporary = url.deletingLastPathComponent()
-      .appendingPathComponent("\(url.lastPathComponent).tmp-\(getpid())")
-    try writeAtomically(identifier.dataRepresentation, to: url, via: temporary)
+    do {
+      try DurableFile.atomicReplace(identifier.dataRepresentation, at: url, mode: 0o600)
+    } catch {
+      throw VMError.macOSMachineIdentifierInvalid(path: url.path(percentEncoded: false))
+    }
     return identifier
   }
 
@@ -52,27 +56,5 @@ public enum MacOSMachineIdentity {
       return (try create(at: url), true)
     }
     return (try load(at: url), false)
-  }
-
-  /// Create-write-fsync-rename at 0600. `Data.write(options: .atomic)` would do the rename but not
-  /// the fsync, and the identifier has to be on the platter before the guest boots against it.
-  private static func writeAtomically(_ data: Data, to url: URL, via temporary: URL) throws {
-    let path = url.path(percentEncoded: false)
-    let temporaryPath = temporary.path(percentEncoded: false)
-    let descriptor = open(temporaryPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
-    guard descriptor >= 0 else { throw VMError.macOSMachineIdentifierInvalid(path: path) }
-    var succeeded = false
-    defer {
-      close(descriptor)
-      if !succeeded { try? FileManager.default.removeItem(at: temporary) }
-    }
-    let written = data.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
-    guard written == data.count, fsync(descriptor) == 0 else {
-      throw VMError.macOSMachineIdentifierInvalid(path: path)
-    }
-    guard rename(temporaryPath, path) == 0 else {
-      throw VMError.macOSMachineIdentifierInvalid(path: path)
-    }
-    succeeded = true
   }
 }

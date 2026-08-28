@@ -58,6 +58,16 @@ public enum InstanceState: String, StateMachineState {
   /// cpu/memory/disk against the host budget (plan C1 "Capacity").
   public var consumesCapacity: Bool { self != .deleted }
 
+  /// A start that ended badly rather than one still in progress. `interrupted` is included: a
+  /// worker that died on the way up is a failed start from the scheduler's point of view, even
+  /// though a reusable VM can later be restarted out of it.
+  public var isFailedStart: Bool {
+    switch self {
+    case .failed, .interrupted, .orphaned: true
+    default: false
+    }
+  }
+
   /// States in which a guest is expected to be running and reachable over vsock.
   public var hasRunningVM: Bool {
     switch self {

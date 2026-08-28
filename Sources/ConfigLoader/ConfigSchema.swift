@@ -31,6 +31,7 @@ enum ConfigSchema {
       "acknowledgeSharedHost": .scalar,
     ]),
     "timeouts": timeouts,
+    "allowHostedLabelShadowing": .scalar,
   ])
 
   static let root: Shape = .object([

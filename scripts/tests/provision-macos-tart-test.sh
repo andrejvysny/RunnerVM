@@ -50,6 +50,8 @@ expect_eq() {
 if help_out="$("$SCRIPT" --help 2>&1)"; then
     expect_contains "$help_out" "usage: provision-macos-tart.sh" "--help prints usage"
     expect_contains "$help_out" "--keep-vm-running" "--help documents --keep-vm-running"
+    expect_contains "$help_out" "--debug-ssh" "--help documents --debug-ssh"
+    expect_contains "$help_out" "--allow-dirty-seal" "--help documents --allow-dirty-seal"
     expect_contains "$help_out" "RVM_RELEASE_JSON_FILE" "--help documents the release JSON seam"
 else
     no "--help exits 0" "$help_out"
@@ -182,7 +184,8 @@ expect_eq "$(jq -r .macos.minimumCPUCount "$META")" "2" "minimumCPUCount comes f
 expect_eq "$(jq -r .macos.minimumMemoryBytes "$META")" "4294967296" \
     "minimumMemoryBytes comes from memorySizeMin"
 expect_eq "$(jq -r .capabilities.docker "$META")" "false" "docker is false on macOS"
-expect_eq "$(jq -r .capabilities.ssh "$META")" "true" "ssh is true"
+expect_eq "$(jq -r .capabilities.ssh "$META")" "false" \
+    "ssh is false: the seal-time lockdown disables it"
 expect_eq "$(jq -r .capabilities.guestAgent "$META")" "true" "guestAgent is true"
 expect_eq "$(jq -r '.capabilities.labels."runnervm.source"' "$META")" "tart" "the tart source label"
 expect_eq "$(jq -r '.capabilities.labels."runnervm.tart.image"' "$META")" \
@@ -190,22 +193,54 @@ expect_eq "$(jq -r '.capabilities.labels."runnervm.tart.image"' "$META")" \
 expect_eq "$(jq -r 'has("provenance")' "$META")" "false" \
     "no provenance block is invented for an SSH-provisioned image"
 
-# Zeroed minimums mean "the source never stated one": ImageMetadata wants those absent, not 0.
+# With --debug-ssh the image keeps SSH, and its metadata has to say so rather than lie about it.
+DEBUG_META="$TWORK/metadata-debug-ssh.json"
+DEBUG_SSH=1
+write_metadata "$CONFIG" "$DEBUG_META"
+expect_eq "$(jq -r .capabilities.ssh "$DEBUG_META")" "true" \
+    "--debug-ssh records capabilities.ssh: true"
+DEBUG_SSH=0
+
+# Missing sizing floors are refused, not silently omitted: admission now requires both, so an
+# image without them could never create an instance.
 ZERO_CONFIG="$TWORK/config-zero.json"
 cat >"$ZERO_CONFIG" <<JSON
 {"hardwareModel": "$HW_MODEL", "cpuCountMin": 0, "memorySizeMin": 0}
 JSON
-ZERO_META="$TWORK/metadata-zero.json"
+if out="$(write_metadata "$ZERO_CONFIG" "$TWORK/never-zero.json" 2>&1)"; then
+    no "a config.json with no sizing floors is refused" "exited 0"
+else
+    expect_contains "$out" "no cpuCountMin/memorySizeMin" \
+        "a config.json with no sizing floors is refused"
+fi
+
+NO_MEM_CONFIG="$TWORK/config-no-mem.json"
+cat >"$NO_MEM_CONFIG" <<JSON
+{"hardwareModel": "$HW_MODEL", "cpuCountMin": 2, "memorySizeMin": 0}
+JSON
+if out="$(write_metadata "$NO_MEM_CONFIG" "$TWORK/never-mem.json" 2>&1)"; then
+    no "a config.json with no memorySizeMin is refused" "exited 0"
+else
+    expect_contains "$out" "no cpuCountMin/memorySizeMin" \
+        "a config.json with no memorySizeMin is refused"
+fi
+
+# An unknown guest version is still omitted rather than written as an empty string.
+NO_VERSION_META="$TWORK/metadata-no-version.json"
 GUEST_PRODUCT_VERSION=""
-write_metadata "$ZERO_CONFIG" "$ZERO_META"
-expect_eq "$(jq -r '.macos | has("minimumCPUCount")' "$ZERO_META")" "false" \
-    "a zero cpuCountMin is omitted, not written as 0"
-expect_eq "$(jq -r '.macos | has("minimumMemoryBytes")' "$ZERO_META")" "false" \
-    "a zero memorySizeMin is omitted, not written as 0"
-expect_eq "$(jq -r '.macos | has("sourceVersion")' "$ZERO_META")" "false" \
+write_metadata "$CONFIG" "$NO_VERSION_META"
+expect_eq "$(jq -r '.macos | has("sourceVersion")' "$NO_VERSION_META")" "false" \
     "an unknown guest version is omitted, not written as an empty string"
-expect_eq "$(jq -r '.diskFormat' "$ZERO_META")" "raw" "a config.json with no diskFormat means raw"
 GUEST_PRODUCT_VERSION="26.1"
+
+DEFAULT_FORMAT_CONFIG="$TWORK/config-default-format.json"
+cat >"$DEFAULT_FORMAT_CONFIG" <<JSON
+{"hardwareModel": "$HW_MODEL", "cpuCountMin": 2, "memorySizeMin": 4294967296}
+JSON
+DEFAULT_FORMAT_META="$TWORK/metadata-default-format.json"
+write_metadata "$DEFAULT_FORMAT_CONFIG" "$DEFAULT_FORMAT_META"
+expect_eq "$(jq -r '.diskFormat' "$DEFAULT_FORMAT_META")" "raw" \
+    "a config.json with no diskFormat means raw"
 
 # --------------------------------------------------------------------------
 # 5. A non-raw tart disk is refused rather than sealed
@@ -231,7 +266,7 @@ else
 fi
 
 NO_MODEL_CONFIG="$TWORK/config-no-model.json"
-echo '{"diskFormat": "raw"}' >"$NO_MODEL_CONFIG"
+echo '{"diskFormat": "raw", "cpuCountMin": 2, "memorySizeMin": 4294967296}' >"$NO_MODEL_CONFIG"
 if out="$(write_metadata "$NO_MODEL_CONFIG" "$TWORK/never2.json" 2>&1)"; then
     no "a config.json with no hardwareModel is refused" "exited 0"
 else
@@ -291,6 +326,18 @@ else
     expect_contains "$out" "no git_version" "a guest with no git fails the run"
 fi
 
+# A LaunchDaemon that did not load is the one thing that has to work on the first cold boot under
+# RunnerVM, so it fails the build instead of warning.
+NO_DAEMON="$TWORK/selfcheck-nodaemon.txt"
+sed 's/^launchd_loaded=.*/launchd_loaded=no/' "$GOOD_SELFCHECK" >"$NO_DAEMON"
+SELFCHECK="$NO_DAEMON"
+if out="$(check_selfcheck 2>&1)"; then
+    no "an unloaded LaunchDaemon fails the run" "exited 0"
+else
+    expect_contains "$out" "LaunchDaemon is not loaded" "an unloaded LaunchDaemon fails the run"
+fi
+SELFCHECK="$GOOD_SELFCHECK"
+
 # "<unset>" is not "<empty>": no helper configured at all leaves nothing to stop a later install
 # from adding a Keychain-backed one.
 UNSET_SELFCHECK="$TWORK/selfcheck-unset.txt"
@@ -303,6 +350,90 @@ else
         "an unconfigured credential helper fails the run"
 fi
 SELFCHECK="$GOOD_SELFCHECK"
+
+# --------------------------------------------------------------------------
+# 6b. Seal-time lockdown report parsing
+# --------------------------------------------------------------------------
+HARDEN_REPORT="$TWORK/harden.txt"
+write_harden_report() {
+    cat >"$1" <<TXT
+RVM-HARDEN-V1
+harden_user=admin
+password_rotated=${2:-yes}
+old_password_rejected=${3:-yes}
+authorized_keys_removed=1
+sshd_disabled=${4:-yes}
+sshd_disabled_readback=yes
+remote_login_off_at=next-boot
+RVM-HARDEN-END
+TXT
+}
+
+write_harden_report "$HARDEN_REPORT"
+if out="$(check_harden_report 2>&1)"; then
+    expect_contains "$out" "password rotated" "a complete lockdown report passes"
+else
+    no "a complete lockdown report passes" "$out"
+fi
+
+write_harden_report "$HARDEN_REPORT" no
+if out="$(check_harden_report 2>&1)"; then
+    no "an unrotated password fails the build" "exited 0"
+else
+    expect_contains "$out" "did not rotate" "an unrotated password fails the build"
+fi
+
+write_harden_report "$HARDEN_REPORT" yes no
+if out="$(check_harden_report 2>&1)"; then
+    no "an old password that still authenticates fails the build" "exited 0"
+else
+    expect_contains "$out" "still authenticates" \
+        "an old password that still authenticates fails the build"
+fi
+
+write_harden_report "$HARDEN_REPORT" yes yes no
+if out="$(check_harden_report 2>&1)"; then
+    no "sshd left enabled fails the build" "exited 0"
+else
+    expect_contains "$out" "did not disable com.openssh.sshd" "sshd left enabled fails the build"
+fi
+
+# Key auth cannot prove the old credential is rejected; that is a warning plus a pointer at the
+# cold-boot check, not a refusal.
+write_harden_report "$HARDEN_REPORT" yes unknown
+if out="$(check_harden_report 2>&1)"; then
+    expect_contains "$out" "qualify-macos-image.sh" \
+        "an unprovable rotation warns and points at the cold-boot check"
+else
+    no "an unprovable rotation warns rather than failing" "$out"
+fi
+
+# --------------------------------------------------------------------------
+# 6c. A forced stop must not seal
+# --------------------------------------------------------------------------
+GRACEFUL_SHUTDOWN=1
+if out="$(require_clean_shutdown 2>&1)"; then
+    ok "a graceful shutdown may seal"
+else
+    no "a graceful shutdown may seal" "$out"
+fi
+
+GRACEFUL_SHUTDOWN=0
+ALLOW_DIRTY_SEAL=0
+if out="$(require_clean_shutdown 2>&1)"; then
+    no "a forced stop refuses to seal" "exited 0"
+else
+    expect_contains "$out" "only crash-consistent" "a forced stop refuses to seal"
+fi
+
+ALLOW_DIRTY_SEAL=1
+if out="$(require_clean_shutdown 2>&1)"; then
+    expect_contains "$out" "debugging artifact" "--allow-dirty-seal seals with a warning"
+else
+    no "--allow-dirty-seal seals with a warning" "$out"
+fi
+ALLOW_DIRTY_SEAL=0
+GRACEFUL_SHUTDOWN=1
 
 # --------------------------------------------------------------------------
 # 7. tart list membership (pure; no tart involved)
@@ -334,6 +465,48 @@ if out="$(STAGE_DIR="$TWORK/missing" bash "$GUEST_SCRIPT" 2>&1)"; then
     no "the guest script refuses to run as a non-root user" "exited 0"
 else
     expect_contains "$out" "must run as root" "the guest script refuses to run as a non-root user"
+fi
+
+if out="$(STAGE=harden bash "$GUEST_SCRIPT" 2>&1)"; then
+    no "the harden stage refuses to run as a non-root user" "exited 0"
+else
+    expect_contains "$out" "must run as root" "the harden stage refuses to run as a non-root user"
+fi
+
+# The old password reaches the guest as a 0600 file, never as an argv assignment: an `ssh ... env
+# HARDEN_OLD_PASSWORD=...` command line would be readable in `ps` on the *host*, which is not a
+# throwaway VM. The guest reads it once and unlinks it.
+#
+# The patterns below are deliberately literal (single-quoted): they are source text being matched
+# in another file, not expressions to expand here.
+# shellcheck disable=SC2016
+if grep -q 'HARDEN_OLD_PASSWORD=\$(shq' "$SCRIPT"; then
+    no "the old password is never an ssh argv assignment" "found HARDEN_OLD_PASSWORD=... in $SCRIPT"
+else
+    ok "the old password is never an ssh argv assignment"
+fi
+# shellcheck disable=SC2016
+expect_contains "$(cat "$GUEST_SCRIPT")" 'rm -f "$HARDEN_OLD_PASSWORD_FILE"' \
+    "the guest unlinks the staged password file after reading it"
+
+# The lockdown runs the guest script a second time, so the provisioning stage must not delete it
+# out from under that. It is the guest's own detached shutdown tail that removes it, and the host
+# only does so on the --debug-ssh path where there is no second stage.
+# shellcheck disable=SC2016
+if grep -q 'rm -f .\$GUEST_SCRIPT_REMOTE' "$SCRIPT" &&
+    ! grep -q 'remove_guest_script' "$SCRIPT"; then
+    no "the provisioning stage does not delete the script the lockdown re-runs" \
+        "the host removes $GUEST_SCRIPT_REMOTE unconditionally"
+else
+    ok "the provisioning stage does not delete the script the lockdown re-runs"
+fi
+expect_contains "$(cat "$GUEST_SCRIPT")" "rm -f '\$self'" \
+    "the guest removes its own script from the detached shutdown tail"
+
+if out="$(STAGE=nonsense bash "$GUEST_SCRIPT" 2>&1)"; then
+    no "an unknown STAGE fails" "exited 0"
+else
+    expect_contains "$out" "STAGE must be all or harden" "an unknown STAGE fails before doing anything"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

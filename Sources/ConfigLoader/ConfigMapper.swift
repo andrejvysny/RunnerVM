@@ -105,7 +105,8 @@ enum ConfigMapper {
       limits: ProfileLimits(maxInstances: dto.limits?.maxInstances),
       ssh: SSHPolicy(enabled: dto.ssh?.enabled ?? SSHPolicy().enabled),
       reuse: mapReuse(dto.reuse),
-      timeouts: mapTimeouts(dto.timeouts)
+      timeouts: mapTimeouts(dto.timeouts),
+      allowHostedLabelShadowing: dto.allowHostedLabelShadowing ?? false
     )
   }
 

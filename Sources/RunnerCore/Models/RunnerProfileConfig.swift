@@ -188,6 +188,11 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
   public var reuse: ReusePolicy?
   /// `nil` inherits `TimeoutPolicy.default`.
   public var timeouts: TimeoutPolicy?
+  /// Opt in to a profile name GitHub also uses for its own hosted runners. Off by default and
+  /// deliberately awkward: the name is the scale set's `runs-on` label, GitHub-hosted labels win
+  /// that match, and the job then runs somewhere else entirely -- different billing, secrets,
+  /// network, toolchain and caches -- with nothing on this host to show for it.
+  public var allowHostedLabelShadowing: Bool
 
   public init(
     name: String,
@@ -200,7 +205,8 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
     limits: ProfileLimits = ProfileLimits(),
     ssh: SSHPolicy = SSHPolicy(),
     reuse: ReusePolicy? = nil,
-    timeouts: TimeoutPolicy? = nil
+    timeouts: TimeoutPolicy? = nil,
+    allowHostedLabelShadowing: Bool = false
   ) {
     self.name = name
     self.scope = scope
@@ -213,6 +219,7 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
     self.ssh = ssh
     self.reuse = reuse
     self.timeouts = timeouts
+    self.allowHostedLabelShadowing = allowHostedLabelShadowing
   }
 
   public var effectiveTimeouts: TimeoutPolicy { timeouts ?? .default }
@@ -228,6 +235,7 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
 extension RunnerProfileConfig {
   private enum CodingKeys: String, CodingKey {
     case name, scope, image, guestOS, lifecycle, resources, warmPool, limits, ssh, reuse, timeouts
+    case allowHostedLabelShadowing
   }
 
   /// Lenient for the optional sections so a `runner_profiles.config_json` written by an older
@@ -246,7 +254,9 @@ extension RunnerProfileConfig {
       limits: try c.decodeIfPresent(ProfileLimits.self, forKey: .limits) ?? ProfileLimits(),
       ssh: try c.decodeIfPresent(SSHPolicy.self, forKey: .ssh) ?? SSHPolicy(),
       reuse: try c.decodeIfPresent(ReusePolicy.self, forKey: .reuse),
-      timeouts: try c.decodeIfPresent(TimeoutPolicy.self, forKey: .timeouts)
+      timeouts: try c.decodeIfPresent(TimeoutPolicy.self, forKey: .timeouts),
+      allowHostedLabelShadowing:
+        try c.decodeIfPresent(Bool.self, forKey: .allowHostedLabelShadowing) ?? false
     )
   }
 }

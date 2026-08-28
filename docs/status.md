@@ -30,7 +30,7 @@ the host, pulled from an OCI registry, or imported from tart.
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |
 | Legacy host-script builder (`scripts/build-ubuntu-image.sh`) | kept, legacy | live 2026-08-26 |
 | Production install (`install.sh`, launchd, `_runnervm` service account) | done | `scripts/tests/install-test.sh`; not yet run on a dedicated Mac mini |
-| **macOS guests (M8)** | runtime landed, **experimental** | `MacOSVMPlatform`, per-instance machine identifier, ephemeral-only; live 2026-08-27: Tart `macos-tahoe-base` provisioned by `scripts/provision-macos-tart.sh`, imported, one GitHub JIT job on `rvm-macos-26` (23 s cold start), VM removed after the job; 2-guest concurrency and the native IPSW builder still open — `docs/macos-guests.md` |
+| **macOS guests (M8)** | runtime landed + hardened, **experimental** | `MacOSVMPlatform`, per-instance machine identifier (durable write), ephemeral-only, `resources.disk` must equal the image; live 2026-08-27: Tart `macos-tahoe-base` provisioned by `scripts/provision-macos-tart.sh`, imported, one GitHub JIT job on `rvm-macos-26` (23 s cold start), VM removed after the job. Hardening pass 2026-08-28: sealed images no longer carry `admin`/`admin` or SSH, a forced stop cannot seal, the LaunchDaemon fails closed, `vmworker` fences the 2-guest ceiling itself, `scripts/qualify-macos-image.sh` cold-boots a clone as the image gate. Still open: the H3–H5 live runs (concurrency, recovery, soak) and the native IPSW builder — `docs/macos-guests.md` |
 | SSH provisioning of agent-less (tart) images | macOS only, script | `scripts/provision-macos-tart.sh` (one-shot image preparation over SSH, not a runtime dependency); Linux tart imports remain inspect/re-publish only |
 | GitHub App authentication | done | tests against fakes |
 | CI (Swift 6.1.2 on macOS 15 + Go + shellcheck) | green | flakes fixed at the root (`74ecb12`); every hardening push green after `4f214e2` |
@@ -50,6 +50,17 @@ Test suite: 1355 Swift tests / 172 suites (`swift test`), Go guest-agent tests (
 - Live: cold boot, restart-keeps-identity, agent over vsock, GitHub JIT job end to end. Found and
   fixed live: Tart's `/Users/runner` symlink; profile names shadowing GitHub-hosted labels
   (`PROFILE_NAME_SHADOWS_HOSTED_LABEL`).
+- Hardening pass (2026-08-28), from an external review of the landed runtime. Security and
+  correctness, not features: the seal-time SSH lockdown (a sealed image no longer carries the Tart
+  base's `admin`/`admin` or an enabled sshd); `resources.disk` on a macOS profile must equal the
+  image's own disk, because a macOS guest cannot resize its APFS container
+  (`VM_MACOS_DISK_RESIZE_UNSUPPORTED`); `PROFILE_NAME_SHADOWS_HOSTED_LABEL` promoted to an error
+  with an explicit `allowHostedLabelShadowing` opt-out; `DurableFile.atomicReplace` under the
+  machine identifier; a forced `tart stop` can no longer seal an image; the guest-agent
+  LaunchDaemon fails closed; `MacOSGuestSlot` fences the 2-guest ceiling inside `vmworker`; the
+  Tart payload is content-verified end to end. Plus two drivers:
+  `scripts/qualify-macos-image.sh` (cold-boot a clone as the image gate) and
+  `scripts/live-macos-e2e.sh` (concurrency, recovery matrix, soak, leak invariants).
 
 ## What the previous milestone added (M14 tart import + M15 image builder)
 
@@ -102,7 +113,11 @@ Plan: `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (independent Code
 2. `scripts/live-builder-faults.sh`: finish the kill -9 run at `staging`/`booting`/`provisioning`/`sealing` (in flight at hand-off; `queued`/`resolving` are unobservable on a warm build).
 4. Reusable-lifecycle HOME reset on a real VM (unit-tested in the guest agent only).
 5. Build-time secrets (`docs/design/build-secrets.md`).
-6. macOS guests (M8): the 2-concurrent-guest / third-job-waits test (blocked only by free disk on the dev host — admission reserves the image's full 46.6 GiB per instance), crash/restart recovery and the 100-short-jobs soak (M8.5), then the native IPSW builder (M8.6). See `docs/macos-guests.md`.
+6. macOS guests: the hardening pass's own live runs — `scripts/qualify-macos-image.sh` against a
+   re-provisioned image (H2), then `scripts/live-macos-e2e.sh` for the 2-concurrent-guest /
+   third-job-waits test (H3, blocked only by free disk on the dev host — admission reserves the
+   image's full virtual size per instance), the recovery matrix (H4) and the 100-short-jobs soak
+   (H5). The native IPSW builder (M8.6) comes after those, not before. See `docs/macos-guests.md`.
 
 ## Developer quick start
 

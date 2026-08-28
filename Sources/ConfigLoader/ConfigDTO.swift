@@ -104,6 +104,7 @@ struct ConfigDTO: Decodable {
     var ssh: SSH?
     var reuse: Reuse?
     var timeouts: Timeouts?
+    var allowHostedLabelShadowing: Bool?
   }
 
   struct Security: Decodable {

@@ -146,12 +146,25 @@ extension RunnerProfileConfig {
   /// host (seen live), so the shadowing names are flagged. Only the shapes GitHub actually uses
   /// (`macos-<major>`, `ubuntu-<major>.<minor>`, `windows-<year>`, `*-latest`, plus GitHub's size/arch
   /// suffixes) -- `ubuntu-24` and `macos-15-xcode-16` are fine.
+  ///
+  /// An error, not a warning: the failure mode is silent misrouting of somebody's job, which no
+  /// amount of log-reading on this host would explain. `allowHostedLabelShadowing: true` is the
+  /// deliberate opt-out.
   func validateHostedLabelShadowing(path: String) -> [ConfigurationIssue] {
     guard Self.shadowsHostedLabel(name) else { return [] }
+    guard allowHostedLabelShadowing else {
+      return [.error(
+        "PROFILE_NAME_SHADOWS_HOSTED_LABEL", "\(path).name",
+        "'\(name)' matches a GitHub-hosted runner label; jobs with runs-on: \(name) run on "
+          + "GitHub's hosted runners instead of this host -- different billing, secrets, network "
+          + "and toolchain, with nothing here to show for it. Rename the profile, e.g. "
+          + "rvm-\(name), or set allowHostedLabelShadowing: true to accept that misrouting"
+      )]
+    }
     return [.warning(
-      "PROFILE_NAME_SHADOWS_HOSTED_LABEL", "\(path).name",
-      "'\(name)' matches a GitHub-hosted runner label; jobs with runs-on: \(name) run on GitHub's "
-        + "hosted runners instead of this host. Prefix the name, e.g. rvm-\(name)"
+      "PROFILE_NAME_SHADOWS_HOSTED_LABEL_ALLOWED", "\(path).allowHostedLabelShadowing",
+      "'\(name)' matches a GitHub-hosted runner label and shadowing is explicitly allowed; jobs "
+        + "with runs-on: \(name) may run on GitHub's hosted runners instead of this host"
     )]
   }
 

@@ -14,16 +14,17 @@ import Testing
   /// storage) + a `metadata.json` carrying the platform block. `importLocal` cannot set the sizing
   /// floors directly, and adopting a sealed file is the path a tart import takes anyway.
   private func importMacImage(
-    _ harness: M2Harness, named: String, minimumCPUCount: Int? = nil,
-    minimumMemoryBytes: UInt64? = nil
+    _ harness: M2Harness, named: String, minimumCPUCount: Int? = 1,
+    minimumMemoryBytes: UInt64? = ByteSize.mebibytes(512).bytes,
+    diskBytes: UInt64 = ByteSize.gibibytes(1).bytes
   ) async throws -> ManagedImage {
     let directory = harness.tree.root.appending(path: named, directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let disk = try Self.sparseFile(at: directory.appending(path: "disk.img"), bytes: 32 << 20)
+    let disk = try Self.sparseFile(at: directory.appending(path: "disk.img"), bytes: diskBytes)
     let nvram = try Self.sparseFile(at: directory.appending(path: "nvram.bin"), bytes: 64 << 10)
 
     let metadata = ImageMetadata(
-      os: .macos, virtualDiskSizeBytes: 1, createdAt: M2Harness.imageClock,
+      os: .macos, virtualDiskSizeBytes: diskBytes, createdAt: M2Harness.imageClock,
       boot: ImageMetadata.Boot(type: .macos),
       macos: ImageMetadata.MacOSPlatform(
         hardwareModel: Self.hardwareModel, sourceVersion: "26.0",
@@ -108,6 +109,73 @@ import Testing
       let specURL = harness.paths.instanceDir(record.id).appending(path: "spec.json")
       let json = String(decoding: try Data(contentsOf: specURL), as: UTF8.self)
       #expect(!json.contains("macos"))
+    }
+  }
+
+  /// The host truncates `disk.img` up before boot and the *guest* is what turns that into
+  /// filesystem — which a macOS guest cannot do (`agent.resizeDisk` answers `NOT_SUPPORTED`). A
+  /// profile promising more than the image carries is refused before the row exists, rather than
+  /// handing the job a 100 GiB raw disk and a 60 GiB root volume.
+  @Test func aProfileAskingForMoreDiskThanTheImageCarriesIsRefused() async throws {
+    try await withHarness { harness in
+      // The `mac` profile is 1 GiB of disk (`M2Harness.configuration`).
+      let image = try await importMacImage(
+        harness, named: "mac-small-disk", diskBytes: ByteSize.mebibytes(512).bytes)
+
+      let error = await #expect(throws: VMError.self) {
+        _ = try await harness.instances.create(profileName: "mac")
+      }
+
+      #expect(error?.code == "VM_MACOS_DISK_RESIZE_UNSUPPORTED")
+      #expect(error?.retryable == false)
+      #expect(try await harness.instances.list().isEmpty)
+      #expect(try await harness.imageRows.pinCount(digest: image.record.digest) == 0)
+    }
+  }
+
+  /// The other direction is refused at admission too. `InstanceStore.materialize` would catch it
+  /// (`IMAGE_DISK_SMALLER_THAN_IMAGE`), but only after the row and its reservation exist.
+  @Test func aProfileAskingForLessDiskThanTheImageIsRefusedBeforeAnyRowExists() async throws {
+    try await withHarness { harness in
+      _ = try await importMacImage(
+        harness, named: "mac-big-disk", diskBytes: ByteSize.gibibytes(4).bytes)
+
+      let error = await #expect(throws: VMError.self) {
+        _ = try await harness.instances.create(profileName: "mac")
+      }
+
+      #expect(error?.code == "VM_MACOS_DISK_RESIZE_UNSUPPORTED")
+      #expect(try await harness.instances.list().isEmpty)
+    }
+  }
+
+  /// An image that states no sizing floor would move the first real compatibility failure out of
+  /// admission and into `VZVirtualMachineConfiguration.validate()`, inside a worker, after a clone
+  /// and a boot. macOS images have to declare both.
+  @Test func aMacOSImageWithNoSizingFloorsIsRefused() async throws {
+    try await withHarness { harness in
+      _ = try await importMacImage(
+        harness, named: "mac-no-cpu-floor", minimumCPUCount: nil)
+
+      let error = await #expect(throws: VMError.self) {
+        _ = try await harness.instances.create(profileName: "mac")
+      }
+
+      #expect(error?.code == "VM_MACOS_IMAGE_MINIMUMS_MISSING")
+      #expect(try await harness.instances.list().isEmpty)
+    }
+  }
+
+  @Test func aMacOSImageWithNoMemoryFloorIsRefused() async throws {
+    try await withHarness { harness in
+      _ = try await importMacImage(
+        harness, named: "mac-no-memory-floor", minimumMemoryBytes: nil)
+
+      let error = await #expect(throws: VMError.self) {
+        _ = try await harness.instances.create(profileName: "mac")
+      }
+
+      #expect(error?.code == "VM_MACOS_IMAGE_MINIMUMS_MISSING")
     }
   }
 

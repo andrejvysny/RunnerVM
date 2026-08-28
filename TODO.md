@@ -24,9 +24,43 @@ auto-update disabled.
 - [x] M8.3 (LIVE 2026-08-27: provisioned Tart base, imported `macos-26-base`, agent over vsock) guest agent over vsock in macOS (provision Tart image over SSH: `runner` user, darwin guest-agent + LaunchDaemon, actions/runner osx-arm64, `git config --global credential.helper ""` as runner) · hello/health/guestInfo · `startSession`
 - [x] M8.4 (LIVE 2026-08-27: run 33118688632 on `rvm-macos-26`, 23 s cold start, VM removed after job) (`runs-on: [self-hosted, macos, arm64]`; `sw_vers`, `uname -m`, checkout)
 - [ ] M8.5 (restart-keeps-id proven; 2-VM test blocked by disk: needs ~95 GiB free) identity uniqueness across clones, restart keeps id, 2 concurrent + 3rd blocked by scheduler, crash/restart recovery, 100 short jobs, no leaks
-- [ ] M8.6 native IPSW builder (`runnerctl image build-macos`), separate from the Runnerfile builder
-- [ ] validation warning: profile name shadowing a GitHub-hosted label (`macos-*`, `ubuntu-*`, `windows-*`, `*-latest`) — found live
+- [ ] M8.6 native IPSW builder (`runnerctl image build-macos`), separate from the Runnerfile builder — **not started until H1–H6 below are done**; separate risk domain from hardening
+- [x] validation: profile name shadowing a GitHub-hosted label (`macos-*`, `ubuntu-*`, `windows-*`, `*-latest`) — found live; now an **error** with `allowHostedLabelShadowing: true` as the opt-out (H1)
 - [ ] docs: rewrite `docs/macos-guests.md` (graphics not an Apple requirement; 2-guest rationale = Apple license/framework operating model), `docs/status.md`, `CHANGELOG.md`
+
+### M8 hardening pass (2026-08-28 review; H1–H6 before "macOS supported")
+
+**H1 — security + correctness (minimum for public beta). Landed 2026-08-28.**
+
+- [x] P0 seal-time lockdown: `STAGE=harden` in `scripts/lib/macos-guest-provision.sh` rotates the build account's password to a discarded 64-char random value, removes every `authorized_keys`, `launchctl disable system/com.openssh.sshd`, proves the old credential is rejected (`dscl . -authonly`), then halts gracefully. `--debug-ssh` opts out and records `capabilities.ssh: true`; the host refuses to seal without an `RVM-HARDEN-V1` block
+- [x] P1 macOS disk contract: `resources.disk` must equal the image's disk layer exactly — `VM_MACOS_DISK_RESIZE_UNSUPPORTED`, thrown in `plan` before any row exists (`agent.resizeDisk` is `NOT_SUPPORTED` on darwin)
+- [x] P1 durable machine-ID write: `DurableFile.atomicReplace` (unique `O_EXCL` temp, write-all with `EINTR`, `fsync(file)`, `rename`, `fsync(dir)`) under `MacOSMachineIdentity.create`
+- [x] P1 no seal after a forced stop: `wait_for_guest_down` records `GRACEFUL_SHUTDOWN`; `require_clean_shutdown` fails the build unless `--allow-dirty-seal`
+- [x] P1 LaunchDaemon fails closed: `plutil -lint`, `root:wheel:644` ownership, `launchctl bootstrap`/`enable`/`print` all fatal in the guest, and `launchd_loaded != yes` is fatal on the host
+- [x] P1 hosted-label collision is an error (above)
+- [x] P2 second macOS-capacity fence: `MacOSGuestSlot` `fcntl` locks (`<runtime>/macos-slot-N.lock`) taken by `vmworker` itself, so the two-guest ceiling holds even without runnerd
+- [x] P2 Tart bootstrap payload manifest: agent binary, plist, guest script and runner tarball hashed on the host, read back through the guest's own `shasum`, verified a third time before install
+- [x] P2 macOS image minimums are mandatory (`VM_MACOS_IMAGE_MINIMUMS_MISSING`); the provisioner refuses a tart `config.json` with no `cpuCountMin`/`memorySizeMin`
+- [x] P3 guest-agent log rotation: `newsyslog.d` drop-in installed into the image
+- [x] P3 image circuit breaker: a bring-up that returns a failed record now holds the profile down (`InstanceState.isFailedStart`), so a permanently unbootable image is not re-cloned every tick
+- [ ] P3 follow-up: mark an image/profile *unhealthy* until its digest or configuration changes, rather than only holding it down for `startHoldDown`
+
+**H2 — image qualification (an image is valid because RunnerVM cold-booted a clone of it)**
+
+- [x] `scripts/qualify-macos-image.sh`: import → create → cold boot → agent hello/health/guestInfo → `exec sw_vers` → TCP/22 unreachable → `admin/admin` rejected → destroy → report
+- [ ] run it against the live `macos-26-base` image (needs the host + a re-provisioned image)
+
+**H3–H5 — concurrency, recovery, soak (need hardware; 2-VM test still blocked on disk)**
+
+- [x] `scripts/live-macos-e2e.sh`: concurrency (2 VMs + 3rd queued, unique identity/MAC/aux storage), recovery matrix (runnerd/vmworker kill at each state), soak, and the end-of-run leak invariants (GitHub runners = 0, non-terminal sessions = 0, live instance dirs = 0, vmworkers = 0, 2 macOS slots free, image digest unchanged)
+- [ ] run H3 (2 concurrent + 3rd waits, then A finishes and C starts)
+- [ ] run H4 (graceful restart and `SIGKILL` at each state)
+- [ ] run H5 (100 short jobs, then 500 at concurrency 2 with fault injection)
+
+**H6 — observability**
+
+- [x] guest diagnostics collection is OS-aware (`/var/log/runnervm-guest-agent.log` + `log show` on darwin instead of `journalctl`/`dmesg`)
+- [ ] single correlation key (job/session/instance/runner id) across host logs, `_diag` and guest-agent logs
 
 Facts: Apple catalog latest for this host = macOS 26.6.2 (25G83), `mostFeaturefulSupportedConfiguration`
 min 2 vCPU / 4 GiB; hardware-model base64 captured as a test fixture. `tart pull

@@ -69,28 +69,62 @@ extension InstanceManager {
     return (record, macos)
   }
 
-  /// What a macOS instance's `spec.json` must carry, and the two refusals that go with it.
+  /// What a macOS instance's `spec.json` must carry, and the refusals that go with it.
   ///
   /// Runs inside `plan`, before the row is inserted: an image that cannot describe its platform, or
   /// a profile sized below what the image will boot with, is a permanent misconfiguration, and
   /// leaving a `failed` row behind for it would only make the operator clean up after a create that
   /// never allocated anything. Linux never has a platform block (`ImageStore` refuses one).
-  private static func macOSPlatformSpec(
+  static func macOSPlatformSpec(
     profile: RunnerProfileConfig, image: ImageInfo
   ) throws -> MacOSInstancePlatformSpec? {
     guard profile.guestOS == .macos else { return nil }
     guard let platform = image.metadata.macos, !platform.hardwareModel.isEmpty else {
       throw VMError.macOSHardwareModelMissing
     }
-    if let minimum = platform.minimumCPUCount, profile.resources.cpuCount < minimum {
+    // Mandatory on macOS, unlike the `nil`-tolerant model the fields were introduced with: an
+    // image that states no floor pushes the first real compatibility failure out of admission and
+    // into `VZVirtualMachineConfiguration.validate()`, inside a worker, after a clone and a boot.
+    guard let minimumCPU = platform.minimumCPUCount else {
+      throw VMError.macOSImageMinimumsMissing(field: "minimumCPUCount")
+    }
+    guard let minimumMemory = platform.minimumMemoryBytes else {
+      throw VMError.macOSImageMinimumsMissing(field: "minimumMemoryBytes")
+    }
+    if profile.resources.cpuCount < minimumCPU {
       throw VMError.macOSProfileCPUTooSmall(
-        requested: profile.resources.cpuCount, minimum: minimum)
+        requested: profile.resources.cpuCount, minimum: minimumCPU)
     }
-    if let minimum = platform.minimumMemoryBytes, profile.resources.memoryBytes < minimum {
+    if profile.resources.memoryBytes < minimumMemory {
       throw VMError.macOSProfileMemoryTooSmall(
-        requestedBytes: profile.resources.memoryBytes, minimumBytes: minimum)
+        requestedBytes: profile.resources.memoryBytes, minimumBytes: minimumMemory)
     }
+    try checkMacOSDiskContract(profile: profile, image: image)
     return MacOSInstancePlatformSpec(platform)
+  }
+
+  /// `resources.disk` has to name the macOS image's own size, exactly.
+  ///
+  /// The host enlarges `disk.img` before boot (`VMDirectoryStaging`) and the *guest* is what turns
+  /// that space into filesystem. On darwin the guest agent cannot: `agent.resizeDisk` answers
+  /// `NOT_SUPPORTED`, because growing an APFS container needs a recovery story RunnerVM does not
+  /// have yet. A profile asking for more would therefore hand the job a bigger raw disk and
+  /// exactly the image's original root volume -- capacity the job never receives.
+  ///
+  /// Asking for *less* is refused too, by `InstanceStore.materialize`
+  /// (`IMAGE_DISK_SMALLER_THAN_IMAGE`), but only after the row and the reservation exist. Both
+  /// directions are checked here instead, in `plan`, so a misconfigured profile never leaves a
+  /// `failed` row behind for the operator to clean up.
+  private static func checkMacOSDiskContract(
+    profile: RunnerProfileConfig, image: ImageInfo
+  ) throws {
+    // The disk *layer*, not `image.virtualBytes` (which sums every layer, auxiliary storage
+    // included) and not the metadata figure (which a hand-edited `metadata.json` can misstate):
+    // this is the same number `InstanceStore.materialize` measures the request against.
+    let imageBytes = image.manifest.layer(.disk)?.sizeBytes ?? image.metadata.virtualDiskSizeBytes
+    guard profile.resources.diskBytes != imageBytes else { return }
+    throw VMError.macOSDiskResizeUnsupported(
+      requestedBytes: profile.resources.diskBytes, imageBytes: imageBytes)
   }
 
   /// The capacity critical section: reading the reservations, deciding they leave room and

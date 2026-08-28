@@ -30,8 +30,21 @@ extension InstanceManager {
              /Users/*/actions-runner; do
       if [ -d "$d/_diag" ]; then cp -R "$d/_diag" "$t/_diag" 2>/dev/null; break; fi
     done
-    journalctl -u \(unit) --no-pager -o short-iso -n 5000 > "$t/guest-agent.log" 2>/dev/null || true
-    dmesg 2>/dev/null | tail -n 2000 > "$t/dmesg.log" 2>/dev/null || true
+    uname -a > "$t/uname.txt" 2>/dev/null || true
+    if [ "$(uname -s)" = "Darwin" ]; then
+      # No journal and no systemd unit on a macOS guest: the LaunchDaemon's stdio *is* the log
+      # (GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist). `log show` is the closest
+      # thing to `dmesg` here and is slow, so it is bounded and best-effort.
+      tail -c 2000000 /var/log/runnervm-guest-agent.log > "$t/guest-agent.log" 2>/dev/null || true
+      sw_vers > "$t/sw_vers.txt" 2>/dev/null || true
+      log show --last 15m --style compact \
+        --predicate 'senderImagePath CONTAINS "runnervm-guest-agent"' \
+        > "$t/log-show.txt" 2>/dev/null || true
+    else
+      journalctl -u \(unit) --no-pager -o short-iso -n 5000 > "$t/guest-agent.log" 2>/dev/null || true
+      cat /etc/os-release > "$t/os-release.txt" 2>/dev/null || true
+      dmesg 2>/dev/null | tail -n 2000 > "$t/dmesg.log" 2>/dev/null || true
+    fi
     tar czf - -C "$t" . 2>/dev/null
     """
   }
@@ -52,6 +65,7 @@ extension InstanceManager {
   func collectGuestDiagnostics(_ record: InstanceRecord) async -> Int? {
     let config = loggingConfiguration()
     guard config.collectRunnerDiagnostics else { return nil }
+    writeDiagnosticsContext(record)
     guard let client = try? await agentClient(record.id) else { return nil }
     let destination = paths.instanceDiagnosticsDir(record.id)
       .appending(path: Self.diagnosticsArchiveName)
@@ -79,6 +93,46 @@ extension InstanceManager {
           .merging(["error": .string(Orchestrator.describe(error))]) { $1 })
       return nil
     }
+  }
+
+  /// The keys that tie a destroyed VM back to everything else: which profile asked for it, which
+  /// image it was cloned from, which host ran it, which worker owned it.
+  ///
+  /// Written before the guest is reached, not after, so it exists even for the case that most
+  /// needs it -- a VM whose agent never answered. The directory is already named by instance id,
+  /// so that is the one key not repeated here.
+  private struct DiagnosticsContext: Encodable {
+    var instanceId: String
+    var name: String
+    var profileId: String
+    var hostId: String
+    var imageDigest: String
+    var lifecycle: String
+    var state: String
+    var workerPid: Int32?
+    var createdAt: Date
+    var startedAt: Date?
+    var collectedAt: Date
+  }
+
+  /// Best effort in the same sense as everything else here: a teardown never fails because the
+  /// evidence could not be written.
+  private func writeDiagnosticsContext(_ record: InstanceRecord) {
+    let directory = paths.instanceDiagnosticsDir(record.id)
+    let context = DiagnosticsContext(
+      instanceId: record.id.rawValue, name: record.name, profileId: record.profileId.rawValue,
+      hostId: record.hostId.rawValue, imageDigest: record.imageDigest.rawValue,
+      lifecycle: record.lifecycle.rawValue, state: record.state.rawValue,
+      workerPid: record.workerPid, createdAt: record.createdAt.date,
+      startedAt: record.startedAt?.date, collectedAt: Date())
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(context) else { return }
+    try? FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: NSNumber(value: 0o750)])
+    try? data.write(to: directory.appending(path: "context.json"))
   }
 
   /// Reads the exec stream into the file. Split out of `collectGuestDiagnostics` so that function

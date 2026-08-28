@@ -32,15 +32,26 @@ import Testing
   }
 
   /// Seen live: `runs-on: macos-26` went to GitHub's hosted macOS 26 runner, never to this host.
-  @Test func warnsWhenAProfileNameShadowsAGitHubHostedLabel() {
+  /// Silent misrouting changes billing, secrets, network and toolchain, so it is an error.
+  @Test func refusesAProfileNameThatShadowsAGitHubHostedLabel() {
     for name in ["macos-26", "macos-latest", "ubuntu-latest", "ubuntu-24.04", "windows-2025", "macos-15-large"] {
       let issues = Self.issues { $0.name = name }
-      #expect(issues.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL"), "\(name)")
-      #expect(!issues.errors.contains { $0.code == "PROFILE_NAME_SHADOWS_HOSTED_LABEL" }, "\(name) is a warning")
+      #expect(issues.errors.contains { $0.code == "PROFILE_NAME_SHADOWS_HOSTED_LABEL" }, "\(name)")
     }
     for name in ["ubuntu-24", "rvm-macos-26", "macos26", "linux-arm64", "ubuntu-24-minimal", "macos-15-xcode-16"] {
       #expect(!Self.issues { $0.name = name }.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL"), "\(name)")
     }
+  }
+
+  /// The opt-out downgrades the refusal to a warning and nothing else: an operator who really
+  /// wants the collision still sees it in every validation run.
+  @Test func hostedLabelShadowingCanBeAcknowledged() {
+    let issues = Self.issues {
+      $0.name = "macos-26"
+      $0.allowHostedLabelShadowing = true
+    }
+    #expect(!issues.errors.contains { $0.code.hasPrefix("PROFILE_NAME_SHADOWS_HOSTED_LABEL") })
+    #expect(issues.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL_ALLOWED"))
   }
 
   @Test(arguments: [

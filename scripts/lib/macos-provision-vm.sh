@@ -3,9 +3,9 @@
 # Sourced, never executed: `source scripts/lib/macos-provision-vm.sh`.
 #
 # Same convention as scripts/lib/live-common.sh: every function reads its context (NAME, SOURCE,
-# FORCE, SSH_USER, SSH_PASSWORD, SSH_KEY, GUEST_IP, TART_PID, WORK, the *_TIMEOUT values) from
-# globals the sourcing script sets first, and log/warn/die come from there too. Nothing here sets
-# `set -euo pipefail`; the caller already did.
+# FORCE, SSH_USER, SSH_PASSWORD, SSH_KEY, GUEST_IP, TART_PID, WORK, GRACEFUL_SHUTDOWN, the
+# *_TIMEOUT values) from globals the sourcing script sets first, and log/warn/die come from there
+# too. Nothing here sets `set -euo pipefail`; the caller already did.
 #
 # This file exists because provisioning macOS needs a real login channel -- there is no cloud-init
 # for a macOS guest -- and that transport is the one part of the script with no place in the
@@ -81,10 +81,23 @@ shutdown_guest() {
     log "halting the guest"
     # The halt tears down this very ssh session, so its exit status carries no information.
     guest_ssh "sudo shutdown -h now" >/dev/null 2>&1 || true
+    wait_for_guest_down
+}
+
+# Waits for a halt that has already been issued -- by `shutdown_guest` above, or by the guest
+# itself at the end of the seal-time lockdown, which runs after SSH is gone.
+#
+# Sets GRACEFUL_SHUTDOWN=1 only when the guest brought itself down. A forced `tart stop` is a power
+# cut: APFS is then merely crash-consistent, and the caller (`require_clean_shutdown`) refuses to
+# seal an image out of those bytes. The VM is still stopped either way -- leaving a runaway guest
+# behind would be worse than a failed build.
+wait_for_guest_down() {
     local deadline=$((SECONDS + SHUTDOWN_TIMEOUT))
+    GRACEFUL_SHUTDOWN=1
     while kill -0 "$TART_PID" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
             warn "guest still running after ${SHUTDOWN_TIMEOUT}s; forcing tart stop"
+            GRACEFUL_SHUTDOWN=0
             tart stop "$NAME" || true
             break
         fi
@@ -92,7 +105,11 @@ shutdown_guest() {
     done
     wait "$TART_PID" 2>/dev/null || true
     TART_PID=""
-    log "guest is down"
+    if [ "$GRACEFUL_SHUTDOWN" -eq 1 ]; then
+        log "guest is down (graceful)"
+    else
+        warn "guest is down after a forced stop"
+    fi
 }
 
 # --------------------------------------------------------------------------

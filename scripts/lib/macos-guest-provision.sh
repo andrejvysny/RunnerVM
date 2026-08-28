@@ -16,10 +16,24 @@
 #   RUNNER_SUDO      yes|no -- passwordless sudo for the runner account (default yes)
 #   AGENT_VERSION    guest agent version string the host recorded (informational)
 #   IMAGE_NAME       image name written into /etc/runnervm-image.json
+#   AGENT_SHA256     expected sha256 of the staged guest agent binary, re-verified here
+#   PLIST_SHA256     expected sha256 of the staged LaunchDaemon plist, re-verified here
 #   SHUTDOWN         yes|no -- halt the guest when done (default yes; the host passes no so it can
 #                    read the self-check off a still-live ssh session first)
+#   STAGE            all|harden -- `all` provisions (default); `harden` runs only the seal-time
+#                    lockdown below, which the host invokes in its own ssh session
+#   HARDEN_USER      the build-time SSH account to lock down (default admin)
+#   HARDEN_OLD_PASSWORD_FILE
+#                    path to a 0600 file holding that account's current password, so the rotation
+#                    can be done with `dscl . -passwd` and *proved* by re-authenticating with the
+#                    old one afterwards. A file rather than a value: the host stages it with `scp`,
+#                    so the secret never appears in any argv, on either side. Read and unlinked
+#                    before anything else in the harden stage.
+#   HARDEN_OLD_PASSWORD
+#                    the same value inline, for a manual run. Prefer the file.
 #
-# Output: a `RVM-SELFCHECK-V1` block of KEY=value lines on stdout, which the host parses.
+# Output: a `RVM-SELFCHECK-V1` (STAGE=all) or `RVM-HARDEN-V1` (STAGE=harden) block of KEY=value
+# lines on stdout, which the host parses and refuses to seal without.
 set -euo pipefail
 
 STAGE_DIR="${STAGE_DIR:-/tmp/rvm-provision}"
@@ -29,7 +43,13 @@ RUNNER_SUDO="${RUNNER_SUDO:-yes}"
 RUNNER_USER="${RUNNER_USER:-runner}"
 AGENT_VERSION="${AGENT_VERSION:-dev}"
 IMAGE_NAME="${IMAGE_NAME:-runnervm-macos-base}"
+AGENT_SHA256="${AGENT_SHA256:-}"
+PLIST_SHA256="${PLIST_SHA256:-}"
 SHUTDOWN="${SHUTDOWN:-yes}"
+STAGE="${STAGE:-all}"
+HARDEN_USER="${HARDEN_USER:-admin}"
+HARDEN_OLD_PASSWORD="${HARDEN_OLD_PASSWORD:-}"
+HARDEN_OLD_PASSWORD_FILE="${HARDEN_OLD_PASSWORD_FILE:-}"
 
 RUNNER_HOME="/Users/$RUNNER_USER"
 RUNNER_DIR="$RUNNER_HOME/actions-runner"
@@ -38,6 +58,9 @@ AGENT_STATE_DIR="/var/lib/runnervm-guest-agent"
 PLIST_LABEL="com.runnervm.guest-agent"
 PLIST_PATH="/Library/LaunchDaemons/$PLIST_LABEL.plist"
 SELFCHECK_LOG="/var/log/runnervm-provision-selfcheck.txt"
+HARDEN_LOG="/var/log/runnervm-harden.txt"
+SSHD_SERVICE="system/com.openssh.sshd"
+NEWSYSLOG_CONF="/etc/newsyslog.d/runnervm-guest-agent.conf"
 
 log()  { printf '[guest %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[guest] warning: %s\n' "$*" >&2; }
@@ -50,6 +73,41 @@ check_inputs() {
     [ -n "$RUNNER_SHA256" ] || die "RUNNER_SHA256 is required"
     case "$RUNNER_SUDO" in yes | no) ;; *) die "RUNNER_SUDO must be yes or no" ;; esac
     case "$SHUTDOWN" in yes | no) ;; *) die "SHUTDOWN must be yes or no" ;; esac
+}
+
+# `harden` needs neither the staged payload nor the runner inputs -- it runs after all of that,
+# in its own ssh session, against a guest that is already provisioned.
+check_harden_inputs() {
+    [ "$(id -u)" = "0" ] || die "must run as root (sudo bash $0)"
+    [ -n "$HARDEN_USER" ] || die "HARDEN_USER is required"
+    case "$SHUTDOWN" in yes | no) ;; *) die "SHUTDOWN must be yes or no" ;; esac
+    read_old_password
+}
+
+# Consumes HARDEN_OLD_PASSWORD_FILE: read once, unlinked immediately. The file is how the host
+# gets the credential in without putting it in an ssh command line, and the unlink is what keeps it
+# out of the sealed image if the run stops early.
+read_old_password() {
+    [ -n "$HARDEN_OLD_PASSWORD_FILE" ] || return 0
+    if [ -r "$HARDEN_OLD_PASSWORD_FILE" ]; then
+        HARDEN_OLD_PASSWORD="$(cat "$HARDEN_OLD_PASSWORD_FILE")"
+    else
+        warn "HARDEN_OLD_PASSWORD_FILE is not readable: $HARDEN_OLD_PASSWORD_FILE"
+    fi
+    rm -f "$HARDEN_OLD_PASSWORD_FILE"
+}
+
+# Fails unless the file hashes to the expected value. An empty expectation is itself a failure:
+# the host always computes one, so a missing value means the payload was staged by something that
+# did not, and installing it unverified is exactly what this exists to prevent.
+verify_sha256() {
+    local file="$1" expected="$2" what="$3" actual
+    [ -n "$expected" ] || die "no expected sha256 for $what; re-run scripts/provision-macos-tart.sh"
+    [ -f "$file" ] || die "$what is missing: $file"
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [ "$actual" = "$expected" ] ||
+        die "$what sha256 mismatch: expected $expected, got $actual"
+    log "$what verified (sha256 ${expected:0:16})"
 }
 
 # --------------------------------------------------------------------------
@@ -107,9 +165,15 @@ runner_uid() { dscl . -read "/Users/$RUNNER_USER" UniqueID 2>/dev/null | awk '{p
 # --------------------------------------------------------------------------
 # 2. Guest agent + LaunchDaemon
 # --------------------------------------------------------------------------
+# Fail-closed, with one deliberate exception.
+#
+# "the agent cannot *connect*" is fine here -- tart attaches no virtio-socket device, so the agent
+# has no vsock peer during provisioning and restarts in a loop. "the LaunchDaemon cannot *load*" is
+# not fine: it is the single thing that has to work on the first cold boot under RunnerVM, and an
+# image that seals with a broken daemon looks perfect until a job is waiting on it.
 install_agent() {
-    [ -f "$STAGE_DIR/runnervm-guest-agent" ] || die "staged agent binary missing"
-    [ -f "$STAGE_DIR/$PLIST_LABEL.plist" ] || die "staged LaunchDaemon plist missing"
+    verify_sha256 "$STAGE_DIR/runnervm-guest-agent" "$AGENT_SHA256" "guest agent binary"
+    verify_sha256 "$STAGE_DIR/$PLIST_LABEL.plist" "$PLIST_SHA256" "LaunchDaemon plist"
     install -d -m 0755 /usr/local/bin
     install -m 0755 "$STAGE_DIR/runnervm-guest-agent" "$AGENT_BIN"
     # --state-dir's default; the agent does not create it itself.
@@ -119,19 +183,40 @@ install_agent() {
     # toolchain that does not sign -- fail here, with the fix, rather than at first boot.
     "$AGENT_BIN" --version >/dev/null 2>&1 ||
         die "$AGENT_BIN will not execute; if it is unsigned, run: codesign -s - --force $AGENT_BIN"
+    # launchd silently ignores a plist it cannot parse, so lint before installing it.
+    plutil -lint "$STAGE_DIR/$PLIST_LABEL.plist" >/dev/null ||
+        die "$PLIST_LABEL.plist is not a valid property list"
     install -o root -g wheel -m 0644 "$STAGE_DIR/$PLIST_LABEL.plist" "$PLIST_PATH"
+    # launchd refuses a LaunchDaemon that is not root-owned and not group-writable-free.
+    local owner
+    owner="$(stat -f '%Su:%Sg:%Lp' "$PLIST_PATH")"
+    [ "$owner" = "root:wheel:644" ] ||
+        die "$PLIST_PATH is $owner, not root:wheel:644 -- launchd would refuse to load it"
     # bootout first so a re-run picks up the binary just installed instead of leaving the old one
-    # running; both calls are tolerant because "not loaded"/"already loaded" are both fine states.
+    # running. Only *this* call is tolerant: "not loaded" is a fine state to boot out of.
     launchctl bootout "system/$PLIST_LABEL" >/dev/null 2>&1 || true
-    launchctl bootstrap system "$PLIST_PATH" 2>&1 | sed 's/^/[launchctl] /' || true
-    launchctl enable "system/$PLIST_LABEL" || warn "launchctl enable failed"
-    if launchctl print "system/$PLIST_LABEL" >/dev/null 2>&1; then
-        log "LaunchDaemon $PLIST_LABEL loaded"
-    else
-        # Not fatal: RunAtLoad in the plist starts it on the next boot regardless, and the agent
-        # cannot reach a vsock peer during provisioning anyway.
-        warn "LaunchDaemon $PLIST_LABEL is not loaded right now"
-    fi
+    launchctl bootstrap system "$PLIST_PATH" 2>&1 | sed 's/^/[launchctl] /' ||
+        die "launchctl bootstrap system $PLIST_PATH failed"
+    launchctl enable "system/$PLIST_LABEL" || die "launchctl enable system/$PLIST_LABEL failed"
+    launchctl print "system/$PLIST_LABEL" >/dev/null 2>&1 ||
+        die "$PLIST_LABEL bootstrapped but does not appear in \`launchctl print\`"
+    log "LaunchDaemon $PLIST_LABEL loaded"
+    install_log_rotation
+}
+
+# The agent appends to /var/log/runnervm-guest-agent.log for the life of the guest. An ephemeral
+# VM never lives long enough for that to matter; a reusable or long-lived debugging guest does, and
+# an unbounded log on a disk that cannot grow (macOS guests do not resize) is a real failure mode.
+install_log_rotation() {
+    install -d -m 0755 /etc/newsyslog.d
+    cat >"$NEWSYSLOG_CONF" <<'CONF'
+# logfilename                        [owner:group]  mode count size(KB) when  flags
+/var/log/runnervm-guest-agent.log    root:wheel     640  5     8192     *     GJ
+CONF
+    chmod 0644 "$NEWSYSLOG_CONF"
+    # `-n` is a dry run: it parses the file and prints what it would do, without rotating anything.
+    newsyslog -nvv -f "$NEWSYSLOG_CONF" >/dev/null 2>&1 ||
+        warn "newsyslog did not accept $NEWSYSLOG_CONF"
 }
 
 launchd_loaded() {
@@ -146,8 +231,7 @@ install_runner() {
     [ -f "$tarball" ] || die "staged runner tarball missing: $tarball"
     # Verified on the host before the copy and again here: a mismatch means the bytes changed in
     # transit, so nothing unverified is ever unpacked.
-    echo "$RUNNER_SHA256  $tarball" | shasum -a 256 -c - >/dev/null ||
-        die "runner tarball sha256 mismatch in the guest (expected $RUNNER_SHA256)"
+    verify_sha256 "$tarball" "$RUNNER_SHA256" "actions/runner tarball"
     # The image may already carry a runner under this path (Tart base images pre-install one,
     # owned by admin); it is replaced wholesale so the tree is exactly the verified tarball.
     [ -e "$RUNNER_DIR" ] && rm -rf "$RUNNER_DIR"
@@ -289,7 +373,157 @@ self_check() {
     } | tee "$SELFCHECK_LOG"
 }
 
+# --------------------------------------------------------------------------
+# 8. Seal-time lockdown (STAGE=harden)
+# --------------------------------------------------------------------------
+# The Tart base image ships a well-known `admin`/`admin` administrator with Remote Login on. That
+# is fine for a disposable build VM and unacceptable in an image cloned for untrusted CI: every
+# clone would carry the same working credential, reachable on the guest's NAT address.
+#
+# The account is *not* deleted -- it is the first administrator and the Secure Token owner, and
+# removing it breaks more than it fixes. Instead its password becomes a value nobody knows, its
+# authorized keys go, and sshd is disabled persistently. RunnerVM manages the finished guest over
+# vsock, so nothing here costs any capability the daemon actually uses.
+
+# 64 characters of base64 with the shell-hostile bytes dropped, generated in the guest and never
+# printed, logged or returned. Reaches `dscl` through argv, briefly visible to `ps` inside this
+# throwaway build VM, which is acceptable precisely because nothing ever needs the value again.
+random_password() {
+    openssl rand -base64 96 | tr -d '/+=\n' | cut -c1-64
+}
+
+rotate_build_account_password() {
+    local new
+    new="$(random_password)"
+    [ "${#new}" -ge 32 ] || die "could not generate a replacement password"
+    if [ -n "$HARDEN_OLD_PASSWORD" ]; then
+        # `dscl . -passwd` with the old password is the path that works on a SecureToken account
+        # without prompting; `sysadminctl -resetPasswordFor` as root does not, on a FileVault or
+        # SecureToken guest.
+        dscl . -passwd "/Users/$HARDEN_USER" "$HARDEN_OLD_PASSWORD" "$new" ||
+            die "could not rotate the password for $HARDEN_USER"
+    else
+        sysadminctl -resetPasswordFor "$HARDEN_USER" -newPassword "$new" 2>&1 |
+            sed 's/^/[sysadminctl] /' ||
+            die "could not rotate the password for $HARDEN_USER (no old password was supplied)"
+    fi
+    unset new
+    log "rotated the password for $HARDEN_USER to a discarded random value"
+}
+
+# The proof, not the intent: the credential the host authenticated with must no longer work.
+# `dscl . -authonly` is the local-directory authentication check, so this holds whether or not
+# sshd is still listening.
+old_password_rejected() {
+    [ -n "$HARDEN_OLD_PASSWORD" ] || { echo unknown; return 0; }
+    if dscl . -authonly "$HARDEN_USER" "$HARDEN_OLD_PASSWORD" >/dev/null 2>&1; then
+        echo no
+    else
+        echo yes
+    fi
+}
+
+# Sets AUTHORIZED_KEYS_REMOVED rather than printing it: `log` writes to stdout, so a command
+# substitution around this would capture the log lines too.
+AUTHORIZED_KEYS_REMOVED=0
+remove_authorized_keys() {
+    local home
+    AUTHORIZED_KEYS_REMOVED=0
+    while IFS= read -r home; do
+        [ -n "$home" ] || continue
+        case "$home" in /Users/* | /var/root) ;; *) continue ;; esac
+        [ -f "$home/.ssh/authorized_keys" ] || [ -f "$home/.ssh/authorized_keys2" ] || continue
+        rm -f "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
+        AUTHORIZED_KEYS_REMOVED=$((AUTHORIZED_KEYS_REMOVED + 1))
+    done <<EOF
+$(dscl . -list /Users NFSHomeDirectory | awk '{print $2}')
+EOF
+    rm -f /etc/ssh/authorized_keys 2>/dev/null || true
+    log "removed authorized_keys from $AUTHORIZED_KEYS_REMOVED home directories"
+}
+
+# `launchctl disable` writes the persistent override database, so the service stays disabled across
+# reboots -- unlike `bootout`, which only affects this boot. The bootout that would actually close
+# the port right now is deferred to `finish_harden`, because it kills the ssh session running this
+# script.
+#
+# Sets SSHD_DISABLED_READBACK. The readback is advisory: `launchctl print-disabled` has spelled the
+# value `true`, `disabled` and `1` across macOS releases, so an unrecognized line is reported as
+# `unknown` rather than failing a correct lockdown. The authoritative proof is the cold-boot check
+# in scripts/qualify-macos-image.sh, which dials TCP/22 on a clone.
+SSHD_DISABLED_READBACK=unknown
+disable_remote_login() {
+    local line
+    launchctl disable "$SSHD_SERVICE" ||
+        die "could not disable $SSHD_SERVICE; the sealed image would still accept SSH"
+    line="$(launchctl print-disabled system 2>/dev/null | grep -F '"com.openssh.sshd"' || true)"
+    case "$line" in
+    *"=> false"* | *"=> enabled"* | *"=> 0"*)
+        die "$SSHD_SERVICE reads back as still enabled: $line"
+        ;;
+    "")
+        SSHD_DISABLED_READBACK=unknown
+        warn "com.openssh.sshd is not listed by launchctl print-disabled system"
+        ;;
+    *)
+        SSHD_DISABLED_READBACK=yes
+        log "$SSHD_SERVICE is disabled for every future boot"
+        ;;
+    esac
+}
+
+harden_guest() {
+    local rejected
+    rotate_build_account_password
+    remove_authorized_keys
+    disable_remote_login
+    rejected="$(old_password_rejected)"
+    [ "$rejected" != "no" ] ||
+        die "the build-time password for $HARDEN_USER still authenticates after rotation"
+    # Written before anything that can drop this ssh session, so the host has the evidence even if
+    # the connection dies during the shutdown below.
+    {
+        echo "RVM-HARDEN-V1"
+        echo "harden_user=$HARDEN_USER"
+        echo "password_rotated=yes"
+        echo "old_password_rejected=$rejected"
+        echo "authorized_keys_removed=$AUTHORIZED_KEYS_REMOVED"
+        echo "sshd_disabled=yes"
+        echo "sshd_disabled_readback=$SSHD_DISABLED_READBACK"
+        echo "remote_login_off_at=next-boot"
+        echo "RVM-HARDEN-END"
+    } | tee "$HARDEN_LOG"
+    chmod 0644 "$HARDEN_LOG"
+}
+
+# Everything that can kill the session, detached so it cannot: remove this script (the host staged
+# it outside STAGE_DIR precisely so the provisioning stage could not unlink the file bash was still
+# reading, and it must not reach the sealed image), turn Remote Login off for this boot too, then
+# halt gracefully. A forced `tart stop` is what the host refuses to seal after, so the guest is the
+# thing that has to bring itself down cleanly.
+finish_harden() {
+    [ "$SHUTDOWN" = "yes" ] || return 0
+    local self
+    self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    log "removing $self, disabling Remote Login and halting the guest"
+    nohup /bin/sh -c "rm -f '$self'
+systemsetup -f -setremotelogin off >/dev/null 2>&1
+sleep 3
+/sbin/shutdown -h now" >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null || true
+}
+
 main() {
+    case "$STAGE" in
+    harden)
+        check_harden_inputs
+        harden_guest
+        finish_harden
+        return 0
+        ;;
+    all) ;;
+    *) die "STAGE must be all or harden" ;;
+    esac
     check_inputs
     create_runner_account
     install_agent

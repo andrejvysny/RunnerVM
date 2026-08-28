@@ -4,8 +4,10 @@
 # There is no cloud-init for a macOS guest, so unlike scripts/build-ubuntu-image.sh this cannot
 # drive the build from outside: the base image is provisioned once, over SSH, at build time. Clone
 # the pulled base, boot it headless, push the payload in, run scripts/lib/macos-guest-provision.sh
-# as root, halt, seal a metadata.json beside Tart's own disk.img/nvram.bin. SSH is a build-time
-# channel only -- the finished image is managed over vsock by the guest agent.
+# as root, lock the build-time SSH account down, halt, seal a metadata.json beside Tart's own
+# disk.img/nvram.bin. SSH is a build-time channel only -- the finished image is managed over vsock
+# by the guest agent, and the seal-time lockdown is what makes sure the *image* cannot be reached
+# over SSH with the base image's well-known admin/admin credential.
 #
 # Output: <out>/<name>/metadata.json (+ selfcheck.txt) and the `runnerctl image import` command.
 set -euo pipefail
@@ -30,10 +32,19 @@ FORCE=0
 IMPORT_NAME=""
 OUT=""
 KEEP_VM_RUNNING=0
+DEBUG_SSH=0
+ALLOW_DIRTY_SEAL=0
+AGENT_SHA256=""
+PLIST_SHA256=""
+GUEST_SCRIPT_SHA256=""
+HARDEN_REPORT=""
+GRACEFUL_SHUTDOWN=0
 
 TART_HOME="${TART_HOME:-$HOME/.tart}"
 STAGE_DIR="/tmp/rvm-provision"
 GUEST_SCRIPT_REMOTE="/tmp/rvm-provision.sh"
+GUEST_PASSWORD_REMOTE="/tmp/rvm-harden-pw"
+PLIST_SOURCE=""
 PROVISION_TIMEOUT="${RVM_PROVISION_TIMEOUT:-3600}"
 
 GUEST_IP=""
@@ -53,8 +64,13 @@ Source and target VM:
   --source <ref>           Pulled Tart base image (default: ghcr.io/cirruslabs/macos-tahoe-base:latest).
   --name <name>            Local Tart VM to create (default: runnervm-macos-base).
   --force                  Delete an existing --name VM first. The only VM this script ever deletes.
-  --keep-vm-running        Do not halt the guest afterwards. Leaves disk.img inconsistent:
-                           for debugging, never for importing.
+  --keep-vm-running        Do not halt the guest, do not lock the SSH account down, and do not
+                           seal. disk.img is inconsistent while the guest runs: for debugging only.
+  --debug-ssh              Keep the base image's SSH access and its admin password in the sealed
+                           image. Off by default; the image is then a debugging artifact, and its
+                           metadata records capabilities.ssh: true.
+  --allow-dirty-seal       Seal even when the guest had to be force-stopped. A forced stop leaves
+                           APFS merely crash-consistent, so the default is to fail the build.
 
 actions/runner (resolved and verified on the host, like build-ubuntu-image.sh):
   --runner-version <v>     Version, or "latest" (default: latest).
@@ -113,6 +129,8 @@ parse_args() {
         --import) IMPORT_NAME="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --keep-vm-running) KEEP_VM_RUNNING=1; shift ;;
+        --debug-ssh) DEBUG_SSH=1; shift ;;
+        --allow-dirty-seal) ALLOW_DIRTY_SEAL=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
         esac
@@ -143,8 +161,12 @@ check_preconditions() {
         command -v expect >/dev/null 2>&1 || die \
             "password auth needs /usr/bin/expect (macOS ships no sshpass); pass --ssh-key instead"
     fi
-    [ -f "$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist" ] ||
-        die "LaunchDaemon plist missing from the tree"
+    PLIST_SOURCE="$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist"
+    [ -f "$PLIST_SOURCE" ] || die "LaunchDaemon plist missing from the tree"
+    if [ "$DEBUG_SSH" -eq 0 ] && [ -z "$SSH_KEY" ] && [ -z "$SSH_PASSWORD" ]; then
+        die "the seal-time lockdown needs the build account's password to rotate and to prove the
+old one no longer authenticates; pass --ssh-password, or --debug-ssh to skip the lockdown"
+    fi
     vm_exists "$SOURCE" || die "source image not in \`tart list\`: $SOURCE
 run: tart pull $SOURCE"
 }
@@ -165,6 +187,40 @@ resolve_guest_agent() {
     # from one tree report the same guestAgentVersion.
     AGENT_VERSION="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
     log "guest agent: $AGENT_BINARY ($AGENT_VERSION, sha256 $(sha256_hex "$AGENT_BINARY" | cut -c1-16))"
+}
+
+# The payload manifest. `actions/runner` already gets this treatment against GitHub's own release
+# digest; these are RunnerVM's own files, hashed on the host, verified by the host after the copy,
+# and verified a third time inside the guest before anything is installed. The SSH transport into a
+# throwaway NAT VM is deliberately not authenticated (see scripts/lib/macos-provision-vm.sh), so
+# the content is what carries the trust, not the channel.
+hash_payload() {
+    AGENT_SHA256="$(sha256_hex "$AGENT_BINARY")"
+    PLIST_SHA256="$(sha256_hex "$PLIST_SOURCE")"
+    GUEST_SCRIPT_SHA256="$(sha256_hex "$REPO_ROOT/scripts/lib/macos-guest-provision.sh")"
+}
+
+# Reads every staged file back through the guest's own shasum and compares. Catches a truncated
+# scp, a stale file left by an earlier run, and anything that rewrote the payload between the copy
+# and the run.
+verify_staged_payload() {
+    local expected actual
+    expected="$(printf '%s  %s\n' \
+        "$AGENT_SHA256" "$STAGE_DIR/runnervm-guest-agent" \
+        "$PLIST_SHA256" "$STAGE_DIR/com.runnervm.guest-agent.plist" \
+        "$RUNNER_SHA256" "$STAGE_DIR/$(runner_asset_name "$RUNNER_VERSION")" \
+        "$GUEST_SCRIPT_SHA256" "$GUEST_SCRIPT_REMOTE")"
+    actual="$(guest_ssh "shasum -a 256 $(shq "$STAGE_DIR")/runnervm-guest-agent \
+$(shq "$STAGE_DIR")/com.runnervm.guest-agent.plist \
+$(shq "$STAGE_DIR/$(runner_asset_name "$RUNNER_VERSION")") \
+$(shq "$GUEST_SCRIPT_REMOTE")" | tr -d '\r')"
+    [ "$(printf '%s\n' "$actual" | sort)" = "$(printf '%s\n' "$expected" | sort)" ] || die \
+        "the staged payload does not hash to what this host sent:
+expected:
+$expected
+in the guest:
+$actual"
+    log "staged payload verified (4 files)"
 }
 
 # --------------------------------------------------------------------------
@@ -290,7 +346,7 @@ stage_payload() {
     log "staging the payload in $STAGE_DIR"
     guest_ssh "rm -rf $(shq "$STAGE_DIR") && mkdir -p $(shq "$STAGE_DIR") && chmod 0755 $(shq "$STAGE_DIR")"
     guest_scp "$AGENT_BINARY" "$SSH_USER@$GUEST_IP:$STAGE_DIR/runnervm-guest-agent"
-    guest_scp "$REPO_ROOT/GuestAgent/packaging/launchd/com.runnervm.guest-agent.plist" \
+    guest_scp "$PLIST_SOURCE" \
         "$SSH_USER@$GUEST_IP:$STAGE_DIR/com.runnervm.guest-agent.plist"
     guest_scp "$RUNNER_TARBALL" \
         "$SSH_USER@$GUEST_IP:$STAGE_DIR/$(runner_asset_name "$RUNNER_VERSION")"
@@ -301,6 +357,7 @@ stage_payload() {
     # World-readable staging: the unprivileged runner account has to read the tarball it unpacks,
     # and /Users/<admin> is not reliably traversable by another user.
     guest_ssh "chmod 0644 $(shq "$STAGE_DIR")/* && chmod 0755 $(shq "$GUEST_SCRIPT_REMOTE")"
+    verify_staged_payload
 }
 
 run_guest_provisioning() {
@@ -310,6 +367,7 @@ run_guest_provisioning() {
     remote="sudo -H env STAGE_DIR=$(shq "$STAGE_DIR") RUNNER_VERSION=$(shq "$RUNNER_VERSION")"
     remote="$remote RUNNER_SHA256=$(shq "$RUNNER_SHA256") RUNNER_SUDO=$(shq "$RUNNER_SUDO")"
     remote="$remote AGENT_VERSION=$(shq "$AGENT_VERSION") IMAGE_NAME=$(shq "$NAME") SHUTDOWN=no"
+    remote="$remote STAGE=all AGENT_SHA256=$(shq "$AGENT_SHA256") PLIST_SHA256=$(shq "$PLIST_SHA256")"
     remote="$remote bash $(shq "$GUEST_SCRIPT_REMOTE")"
     log "running the in-guest provisioner (installs Command Line Tools if absent; minutes)"
     SELFCHECK="$OUT/$NAME/selfcheck.txt"
@@ -325,9 +383,15 @@ run_guest_provisioning() {
     [ -s "$SELFCHECK" ] || die "the guest printed no RVM-SELFCHECK block; see $SELFCHECK.raw"
     PROVISIONED=1
     check_selfcheck
-    # The guest script lives outside STAGE_DIR (which it deletes itself), so the host is what
-    # keeps it out of the sealed image.
-    guest_ssh "sudo rm -f $(shq "$GUEST_SCRIPT_REMOTE")" || warn "could not remove $GUEST_SCRIPT_REMOTE"
+}
+
+# The guest script lives outside STAGE_DIR (which the guest deletes itself), so something has to
+# keep it out of the sealed image. Not here, though: the lockdown stage runs the same file in a
+# second ssh session, so on the normal path the guest removes it from its own detached shutdown
+# tail. This is the `--debug-ssh` path, where there is no second stage.
+remove_guest_script() {
+    guest_ssh "sudo rm -f $(shq "$GUEST_SCRIPT_REMOTE")" ||
+        warn "could not remove $GUEST_SCRIPT_REMOTE"
 }
 
 # Pure: value of key $2 in self-check file $1. Empty when the key is absent.
@@ -349,10 +413,72 @@ check_selfcheck() {
     # helper on a headless guest blocks forever with no prompt anyone can answer.
     [ "$helper" = "<empty>" ] || die \
         "git credential.helper for the runner account is '$helper', not the required empty override"
-    [ "$loaded" = "yes" ] ||
-        warn "the guest agent LaunchDaemon is not loaded (RunAtLoad still applies on the next boot)"
+    # Fatal, not a warning. "the agent cannot connect" is expected during provisioning (tart
+    # attaches no virtio-socket device); "the LaunchDaemon did not load" means the one thing that
+    # has to work on the first cold boot under RunnerVM is broken, and the image would look perfect
+    # right up until a job was waiting on it.
+    [ "$loaded" = "yes" ] || die \
+        "the guest agent LaunchDaemon is not loaded; the image would boot with no control channel"
     [ -n "$GUEST_PRODUCT_VERSION" ] || warn "self-check reported no macOS product version"
     log "guest self-check: runner uid $uid, macOS $GUEST_PRODUCT_VERSION ($build), $git_version"
+}
+
+# --------------------------------------------------------------------------
+# Seal-time lockdown
+# --------------------------------------------------------------------------
+# Runs in its own ssh session, after the self-check has been read, because it ends by disabling the
+# very channel it arrives on and halting the guest. The guest writes its RVM-HARDEN-V1 block before
+# any of that, so the evidence survives the session dying.
+run_guest_hardening() {
+    local remote
+    remote="sudo -H env STAGE=harden HARDEN_USER=$(shq "$SSH_USER") SHUTDOWN=yes"
+    if [ -z "$SSH_KEY" ]; then
+        # Staged as a 0600 file rather than passed as an environment assignment: an `ssh
+        # ... env HARDEN_OLD_PASSWORD=...` command line is visible in `ps` on *this* host, which is
+        # not a throwaway VM. Same reasoning as the expect helper's password file.
+        stage_old_password
+        remote="$remote HARDEN_OLD_PASSWORD_FILE=$(shq "$GUEST_PASSWORD_REMOTE")"
+    fi
+    remote="$remote bash $(shq "$GUEST_SCRIPT_REMOTE")"
+    log "locking the build-time SSH account down and halting the guest"
+    HARDEN_REPORT="$OUT/$NAME/harden.txt"
+    mkdir -p "$(dirname "$HARDEN_REPORT")"
+    # The session may be cut short by the lockdown itself, so a non-zero status here is not by
+    # itself a failure -- the parsed block below is what decides.
+    guest_ssh "$remote" 2>&1 | tee "$HARDEN_REPORT.raw" || true
+    tr -d '\r' <"$HARDEN_REPORT.raw" |
+        sed -n '/^RVM-HARDEN-V1$/,/^RVM-HARDEN-END$/p' >"$HARDEN_REPORT"
+    [ -s "$HARDEN_REPORT" ] ||
+        die "the guest printed no RVM-HARDEN block; see $HARDEN_REPORT.raw"
+    check_harden_report
+    log "lockdown recorded in $HARDEN_REPORT"
+}
+
+# The guest reads the file once and unlinks it, so nothing is left for the seal.
+stage_old_password() {
+    local local_file="$WORK/harden-old-password"
+    (umask 077; printf '%s' "$SSH_PASSWORD" >"$local_file")
+    guest_scp "$local_file" "$SSH_USER@$GUEST_IP:$GUEST_PASSWORD_REMOTE"
+    guest_ssh "chmod 600 $(shq "$GUEST_PASSWORD_REMOTE")"
+    rm -f "$local_file"
+}
+
+check_harden_report() {
+    local rotated rejected sshd keys
+    rotated="$(selfcheck_value "$HARDEN_REPORT" password_rotated)"
+    rejected="$(selfcheck_value "$HARDEN_REPORT" old_password_rejected)"
+    sshd="$(selfcheck_value "$HARDEN_REPORT" sshd_disabled)"
+    keys="$(selfcheck_value "$HARDEN_REPORT" authorized_keys_removed)"
+    [ "$rotated" = "yes" ] || die "the guest did not rotate the $SSH_USER password"
+    [ "$sshd" = "yes" ] || die "the guest did not disable com.openssh.sshd"
+    case "$rejected" in
+    yes) ;;
+    no) die "the build-time password for $SSH_USER still authenticates after rotation" ;;
+    *) warn "could not prove the old $SSH_USER password is rejected (key auth); \
+scripts/qualify-macos-image.sh dials TCP/22 on a cold-booted clone instead" ;;
+    esac
+    log "lockdown: password rotated, old credential rejected=$rejected, sshd disabled, \
+authorized_keys cleared from $keys home directories"
 }
 
 # --------------------------------------------------------------------------
@@ -382,6 +508,12 @@ write_metadata() {
     # refused only when there is a real figure to compare against.
     min_cpu="$(jq -r '.cpuCountMin // 0' "$config")"
     min_mem="$(jq -r '.memorySizeMin // 0' "$config")"
+    # Mandatory since the admission check stopped tolerating their absence: without them the first
+    # real compatibility failure would land inside a worker, after a clone and a boot, as a bare
+    # `VZVirtualMachineConfiguration validation failed`.
+    { [ "$min_cpu" -gt 0 ] && [ "$min_mem" -gt 0 ]; } || die \
+        "tart config.json states no cpuCountMin/memorySizeMin ($config); RunnerVM refuses a macOS
+image that cannot say what it needs to boot -- add the values the source VM reports and re-run"
     mkdir -p "$(dirname "$dest")"
     jq -n --sort-keys \
         --argjson virtualBytes "$VIRTUAL_BYTES" \
@@ -393,6 +525,7 @@ write_metadata() {
         --arg agentVersion "$AGENT_VERSION" \
         --arg createdAt "$CREATED_AT" \
         --arg tartImage "$SOURCE" \
+        --argjson ssh "$([ "$DEBUG_SSH" -eq 1 ] && echo true || echo false)" \
         '{
           schemaVersion: 1,
           os: "macos",
@@ -409,7 +542,7 @@ write_metadata() {
             + (if $minCPU > 0 then { minimumCPUCount: $minCPU } else {} end)
             + (if $minMem > 0 then { minimumMemoryBytes: $minMem } else {} end)),
           capabilities: {
-            docker: false, ssh: true, guestAgent: true,
+            docker: false, ssh: $ssh, guestAgent: true,
             labels: { "runnervm.source": "tart", "runnervm.tart.image": $tartImage }
           }
         }' >"$dest"
@@ -431,6 +564,17 @@ seal() {
     printf '\nImport it with:\n\n  runnerctl image import %s \\\n    --os macos --nvram %s \\\n    --metadata %s \\\n    --name %s\n\n' \
         "$disk" "$dir/nvram.bin" "$metadata" "${IMPORT_NAME:-$NAME}"
     [ -z "$IMPORT_NAME" ] || run_import "$disk" "$dir/nvram.bin" "$metadata"
+}
+
+# A forced `tart stop` is a power cut. APFS is then merely crash-consistent, and the keychain,
+# launchd state and Spotlight metadata may all have been mid-write -- fine for a disposable
+# development VM, not for bytes every future CI guest is cloned from.
+require_clean_shutdown() {
+    [ "$GRACEFUL_SHUTDOWN" -eq 1 ] && return 0
+    [ "$ALLOW_DIRTY_SEAL" -eq 1 ] || die \
+        "the guest did not shut down gracefully, so disk.img is only crash-consistent: refusing to
+seal it. Re-run the build, or pass --allow-dirty-seal if you are debugging and accept the risk"
+    warn "--allow-dirty-seal: sealing after a forced stop; this image is a debugging artifact"
 }
 
 find_runnerctl() {
@@ -472,6 +616,7 @@ main() {
     check_preconditions
     resolve_guest_agent
     resolve_runner
+    hash_payload
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/rvm-macos-provision-XXXXXX")"
     chmod 700 "$WORK"
     trap cleanup EXIT
@@ -482,11 +627,22 @@ main() {
     stage_payload
     run_guest_provisioning
     if [ "$KEEP_VM_RUNNING" -eq 1 ]; then
-        warn "--keep-vm-running: $NAME is still up, so disk.img is inconsistent -- do not import it"
+        warn "--keep-vm-running: $NAME is still up, so disk.img is inconsistent"
+        warn "nothing was sealed and the build-time SSH account was left as it is"
         warn "halt it with: tart stop $NAME"
-    else
-        shutdown_guest
+        return 0
     fi
+    if [ "$DEBUG_SSH" -eq 1 ]; then
+        warn "--debug-ssh: the sealed image keeps SSH and the base image's admin credential"
+        remove_guest_script
+        shutdown_guest
+    else
+        # The guest halts itself at the end of the lockdown, so there is no session left to issue
+        # `shutdown` from.
+        run_guest_hardening
+        wait_for_guest_down
+    fi
+    require_clean_shutdown
     seal
 }
 

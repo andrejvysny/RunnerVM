@@ -234,6 +234,8 @@ struct ErrorTests {
   }
 
   /// M8: `os: macos` is a supported guest OS, so a macOS profile now loads *and* validates.
+  /// The name is prefixed because a bare `macos-15` is refused outright — see
+  /// `hostedLabelShadowingIsRefusedUnlessExplicitlyAllowed`.
   @Test func macOSProfileLoadsAndValidates() throws {
     let yaml = """
     version: 1
@@ -241,14 +243,48 @@ struct ErrorTests {
       scopes:
         - {name: engineering, type: organization, owner: acme}
     profiles:
-      - name: macos-15
+      - name: rvm-macos-15
         scope: engineering
         image: ghcr.io/acme/runners/macos-15:stable
         os: macos
     """
     let (config, issues) = try ConfigLoader.loadAndValidate(yaml: yaml, host: Fixtures.hostFacts)
-    #expect(config.profile(named: "macos-15")?.guestOS == .macos)
+    #expect(config.profile(named: "rvm-macos-15")?.guestOS == .macos)
     #expect(!issues.contains { $0.severity == .error })
+  }
+
+  /// A profile named like a GitHub-hosted label silently sends jobs to GitHub's own runners, so
+  /// the name is an error; `allowHostedLabelShadowing: true` is the documented opt-out and leaves
+  /// a warning behind.
+  @Test func hostedLabelShadowingIsRefusedUnlessExplicitlyAllowed() throws {
+    func yaml(_ extra: String) -> String {
+      """
+      version: 1
+      github:
+        scopes:
+          - {name: engineering, type: organization, owner: acme}
+      profiles:
+        - name: macos-15
+          scope: engineering
+          image: ghcr.io/acme/runners/macos-15:stable
+          os: macos
+      \(extra)
+      """
+    }
+    let error = #expect(throws: ConfigLoadError.self) {
+      try ConfigLoader.loadAndValidate(yaml: yaml(""), host: Fixtures.hostFacts)
+    }
+    guard case let .validationFailed(issues) = try #require(error) else {
+      Issue.record("unexpected error \(String(describing: error))")
+      return
+    }
+    #expect(issues.contains { $0.code == "PROFILE_NAME_SHADOWS_HOSTED_LABEL" && $0.severity == .error })
+
+    let (config, allowed) = try ConfigLoader.loadAndValidate(
+      yaml: yaml("    allowHostedLabelShadowing: true"), host: Fixtures.hostFacts)
+    #expect(config.profile(named: "macos-15")?.allowHostedLabelShadowing == true)
+    #expect(!allowed.contains { $0.severity == .error })
+    #expect(allowed.contains { $0.code == "PROFILE_NAME_SHADOWS_HOSTED_LABEL_ALLOWED" })
   }
 
   /// macOS guests stay ephemeral-only: the between-jobs reset has no macOS equivalent yet.

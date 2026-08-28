@@ -186,6 +186,56 @@ import Testing
     }
   }
 
+  /// One script for both guests, branching on `uname -s` inside the guest rather than on anything
+  /// the host has to plumb through: a macOS guest has no journal, no systemd unit and no readable
+  /// `dmesg`, so the Linux-only version silently collected an empty `guest-agent.log`.
+  @Test func theDiagnosticsScriptCollectsFromBothGuestFamilies() {
+    let script = InstanceManager.diagnosticsScript(unit: InstanceManager.guestAgentUnit)
+
+    #expect(script.contains("uname -s"))
+    // Linux
+    #expect(script.contains("journalctl -u runnervm-guest-agent"))
+    #expect(script.contains("dmesg"))
+    #expect(script.contains("/etc/os-release"))
+    // macOS: the LaunchDaemon's stdio file is the log, and `sw_vers` identifies the guest.
+    #expect(script.contains("/var/log/runnervm-guest-agent.log"))
+    #expect(script.contains("sw_vers"))
+    // The runner's own `_diag` is the point of the exercise, on either family.
+    #expect(script.contains("/Users/*/actions-runner"))
+    #expect(script.contains("/home/*/actions-runner"))
+  }
+
+  /// The keys that survive the VM. Written before the guest is contacted, so it exists even when
+  /// the agent never answers -- which is exactly the case that needs it most.
+  @Test func aContextFileTiesTheArchiveBackToTheProfileAndImage() async throws {
+    try await withHarness { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      var script = FakeGuestAgent.Script()
+      script.exec = [.stdout("PRETEND-GZIP-BYTES"), .exit(0)]
+      script.runnerStatusSequence = [.online, .busy, .exited].map {
+        RunnerStatus(state: $0, pid: 4_242)
+      }
+      let (instance, agent) = try await harness.idleInstance(script: script)
+
+      let session = try await harness.runners.startSession(instanceId: instance.id)
+      #expect(try await harness.awaitTerminal(session.id).state == .completed)
+      try await waitUntil("the ephemeral instance to be deleted") {
+        try await harness.record(instance.id).state == .deleted
+      }
+
+      let context = harness.paths.instanceDiagnosticsDir(instance.id)
+        .appending(path: "context.json")
+      let json = try JSONSerialization.jsonObject(with: try Data(contentsOf: context))
+      let fields = try #require(json as? [String: Any])
+      #expect(fields["instanceId"] as? String == instance.id.rawValue)
+      #expect(fields["imageDigest"] as? String == instance.imageDigest.rawValue)
+      #expect(fields["profileId"] as? String == instance.profileId.rawValue)
+      #expect(fields["name"] as? String == instance.name)
+      await agent.stop()
+    }
+  }
+
   @Test func theHostSideLogsAreMovedOutOfTheInstanceDirectoryBeforeItIsDeleted() async throws {
     try await withHarness { harness in
       harness.stubGitHub()

@@ -23,6 +23,15 @@ public enum VMError: RunnerError {
   case macOSAuxiliaryStorageMissing(path: String)
   case macOSProfileCPUTooSmall(requested: Int, minimum: Int)
   case macOSProfileMemoryTooSmall(requestedBytes: UInt64, minimumBytes: UInt64)
+  /// A macOS profile whose `resources.disk` is not the image's own size. The host would truncate
+  /// `disk.img` up, but nothing inside the guest grows the APFS container into that space
+  /// (`agent.resizeDisk` answers `NOT_SUPPORTED` on darwin), so the profile would advertise
+  /// capacity the job never receives; asking for less is refused by the instance store anyway.
+  case macOSDiskResizeUnsupported(requestedBytes: UInt64, imageBytes: UInt64)
+  /// A macOS image that never recorded what it needs to boot. Optional on Linux-era metadata; a
+  /// macOS image without it moves the first real compatibility failure out of admission and into
+  /// `VZVirtualMachineConfiguration.validate()`.
+  case macOSImageMinimumsMissing(field: String)
 
   public var code: String {
     switch self {
@@ -44,6 +53,8 @@ public enum VMError: RunnerError {
     case .macOSAuxiliaryStorageMissing: "VM_MACOS_AUXILIARY_STORAGE_MISSING"
     case .macOSProfileCPUTooSmall: "VM_MACOS_PROFILE_CPU_TOO_SMALL"
     case .macOSProfileMemoryTooSmall: "VM_MACOS_PROFILE_MEMORY_TOO_SMALL"
+    case .macOSDiskResizeUnsupported: "VM_MACOS_DISK_RESIZE_UNSUPPORTED"
+    case .macOSImageMinimumsMissing: "VM_MACOS_IMAGE_MINIMUMS_MISSING"
     }
   }
 
@@ -71,6 +82,13 @@ public enum VMError: RunnerError {
     case .macOSProfileMemoryTooSmall(let requested, let minimum):
       "profile requests \(ByteSize(bytes: requested)) of memory but the image requires at least "
         + "\(ByteSize(bytes: minimum))"
+    case .macOSDiskResizeUnsupported(let requested, let image):
+      "profile requests \(ByteSize(bytes: requested)) of disk but macOS guests cannot resize their "
+        + "APFS container in this release; set resources.disk to the image's own "
+        + "\(ByteSize(bytes: image)) exactly (or rebuild the image at the size you want)"
+    case .macOSImageMinimumsMissing(let field):
+      "macOS image metadata has no macos.\(field); re-import it with the value the restore image "
+        + "or the source VM reports, so a profile too small to boot is refused at admission"
     }
   }
 
@@ -84,7 +102,7 @@ public enum VMError: RunnerError {
     case .specInvalid, .workerFenced, .forceStopFailed, .unsupportedGuestOS, .hostCapabilityMissing,
          .macOSHardwareModelMissing, .macOSHardwareModelInvalid, .macOSHardwareModelUnsupported,
          .macOSMachineIdentifierInvalid, .macOSAuxiliaryStorageMissing, .macOSProfileCPUTooSmall,
-         .macOSProfileMemoryTooSmall:
+         .macOSProfileMemoryTooSmall, .macOSDiskResizeUnsupported, .macOSImageMinimumsMissing:
       false
     }
   }

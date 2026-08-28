@@ -333,8 +333,68 @@ or a missing `git` fails the build — then halts, and the host writes
 `runnerctl image import` command (`--import <name>` runs it, and needs a reachable daemon).
 
 `--force` is the only thing that deletes a VM, and only the `--name` one. A VM whose
-`config.json` reports a non-raw `diskFormat` (tart's `asif`) is refused rather than sealed.
-SSH (`admin`/`admin` on Tart base images, driven by `/usr/bin/expect`; `--ssh-key` for key auth)
-is a build-time channel only — the finished image is managed over vsock.
-`scripts/tests/provision-macos-tart-test.sh` covers the metadata rendering, the asif refusal, the
-osx-arm64 asset resolution and the self-check parsing with no VM, tart or network.
+`config.json` reports a non-raw `diskFormat` (tart's `asif`) is refused rather than sealed, as is
+one that states no `cpuCountMin`/`memorySizeMin` — admission needs both.
+
+SSH (`admin`/`admin` on Tart base images, driven by `/usr/bin/expect`; `--ssh-key` for key auth) is
+a build-time channel only, and the run **ends by taking it away**: the build account's password is
+rotated to a discarded random value, every `authorized_keys` is removed, `com.openssh.sshd` is
+disabled, the old credential is proved rejected, and the guest halts itself. The host refuses to
+seal unless the guest reported that (`RVM-HARDEN-V1`, written to `<out>/<name>/harden.txt`), and
+refuses to seal at all if the guest had to be force-stopped — a forced stop leaves APFS merely
+crash-consistent. `--debug-ssh` keeps SSH and records `capabilities.ssh: true`;
+`--allow-dirty-seal` overrides the forced-stop refusal. Both make the result a debugging artifact,
+not an image to run jobs on.
+
+`scripts/tests/provision-macos-tart-test.sh` covers the metadata rendering, the asif and
+missing-minimums refusals, the osx-arm64 asset resolution, the self-check and lockdown-report
+parsing and the forced-stop gate, with no VM, tart or network.
+
+## macOS image qualification (`scripts/qualify-macos-image.sh`)
+
+The gate between "the build script finished" and "this image can run jobs". Cold-boots a clone of
+the profile's image under RunnerVM and destroys it again:
+
+```sh
+scripts/qualify-macos-image.sh --profile rvm-macos-26 \
+  --state-dir ~/runnervm-dev --socket /tmp/rvm/runnerd.sock
+```
+
+It creates one instance, waits for `idle` (which *is* the cold-boot-plus-vsock proof), checks the
+agent handshake, `agent.metrics` and `exec sw_vers`, that the guest-agent LaunchDaemon is loaded
+from a real boot, and that the lockdown survived the reboot — nothing listening on TCP/22,
+`com.openssh.sshd` disabled, `admin`/`admin` rejected by `dscl . -authonly`, and the port
+unreachable from the host. Then it deletes the instance and asserts no live instances, no instance
+directory and an unchanged image digest. Exit 0 means qualified; a JSON report is written either
+way. `--allow-ssh` records the SSH checks as skipped for a `--debug-ssh` image, `--dry-run` prints
+the plan with no daemon.
+
+## macOS concurrency, recovery and soak (`scripts/live-macos-e2e.sh`)
+
+The macOS counterpart of `live-github-e2e.sh`, driving the same `e2e.yml` (its steps branch on
+`uname -s`, so one workflow file serves both guest families).
+
+```sh
+scripts/live-macos-e2e.sh --profile rvm-macos-26 --repo acme/runnervm-e2e \
+  --state-dir ~/runnervm-dev --scenario concurrency
+scripts/live-macos-e2e.sh --profile rvm-macos-26 --scenario recovery
+scripts/live-macos-e2e.sh --profile rvm-macos-26 --scenario soak --soak-jobs 100
+```
+
+- `concurrency` dispatches three jobs at a two-slot ceiling and asserts a peak VM count of exactly
+  2 (3 means the third was never queued; 1 means the second slot was never used), plus distinct
+  machine identifier, MAC and auxiliary storage sampled *while both guests are running* — which is
+  the state Apple's rule is actually about.
+- `recovery` walks `startingVM waitingForAgent idle configuringRunner runnerOnline busy`, restarting
+  and `SIGKILL`ing runnerd at each, and requires convergence every time. A state too short to catch
+  on a warm host is recorded as a skip, not a pass.
+- `soak` runs `--soak-jobs` short jobs at `--soak-concurrency`.
+
+Every scenario ends in the same invariant set (`scripts/lib/live-macos.sh`): no GitHub runner for
+the profile, no non-terminal session, no capacity-consuming instance, no instance directory, no
+`vmworker` process, both `macos-slot-N.lock` files free, and the image digest unchanged. A soak
+that reports 100 successes and leaks a guest is a failed soak.
+
+`scripts/tests/live-macos-e2e-test.sh` and `scripts/tests/qualify-macos-image-test.sh` cover both
+drivers' pure helpers — scenario selection, the identity and leak assertions against a fake state
+directory, the report shape — with no daemon, VM or GitHub.

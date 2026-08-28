@@ -2,6 +2,75 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## 2026-08-28 — macOS hardening pass (H1–H2)
+
+The runtime from M8.0–M8.4 works; this pass makes its bad states impossible rather than adding
+features. Nothing here is a new capability, and none of it is qualified as production-ready until
+the H3–H5 live runs below are recorded.
+
+- **Sealed macOS images no longer carry `admin`/`admin` or SSH.** The Tart base image ships a
+  well-known administrator with Remote Login on, which every clone would otherwise inherit and
+  offer to whatever can reach the guest's NAT address. `scripts/provision-macos-tart.sh` now ends
+  with a seal-time lockdown (`STAGE=harden`): the build account's password is rotated to a
+  discarded 64-character random value, every `authorized_keys` is removed, `com.openssh.sshd` is
+  disabled persistently, and the old credential is *proved* rejected (`dscl . -authonly`) before
+  the guest halts. The build fails unless the guest reports an `RVM-HARDEN-V1` block.
+  `--debug-ssh` opts out and records `capabilities.ssh: true` in the sealed metadata.
+- **`resources.disk` on a macOS profile must equal the image's own disk, exactly.** The host
+  truncates `disk.img` up before boot and the *guest* is what turns that into filesystem, which a
+  macOS guest cannot do (`agent.resizeDisk` answers `NOT_SUPPORTED` on darwin). A profile asking
+  for more was silently advertising capacity the job never received; it is now
+  `VM_MACOS_DISK_RESIZE_UNSUPPORTED`, refused in `plan` before any row or clone exists. Asking for
+  less is refused there too, rather than by `InstanceStore.materialize` after the row exists.
+- **`PROFILE_NAME_SHADOWS_HOSTED_LABEL` is an error, not a warning.** A profile named `macos-26`
+  sends jobs to GitHub's hosted runners — different billing, secrets, network, toolchain and
+  caches, with nothing on this host to show for it. `allowHostedLabelShadowing: true` is the
+  explicit opt-out and leaves a warning behind.
+- **The machine identifier is written durably.** `DurableFile.atomicReplace` (unique `O_EXCL`
+  temporary, write-all with `EINTR` handling, `fsync(file)`, `rename`, `fsync(directory)`) replaces
+  the previous write-fsync-rename. Losing that file makes the next boot mint a *second* virtual Mac
+  against auxiliary storage bound to the first, so the directory `fsync` is not academic.
+- **A forced `tart stop` can no longer produce an image.** A forced stop is a power cut and leaves
+  APFS merely crash-consistent; the build now fails unless `--allow-dirty-seal` is passed.
+- **The guest-agent LaunchDaemon fails closed.** `plutil -lint`, `root:wheel:644` ownership and
+  `launchctl bootstrap`/`enable`/`print` are all fatal in the guest, and a self-check reporting
+  `launchd_loaded=no` fails the build. "The agent cannot connect" stays tolerated — there is no
+  vsock peer during provisioning — but "the LaunchDaemon cannot load" does not.
+- **A second fence on the two-guest ceiling.** `MacOSGuestSlot` takes an `fcntl` lock on
+  `<runtime>/macos-slot-N.lock` inside `vmworker` itself and holds it for the process's life, so
+  the limit holds even when runnerd is not what started the worker. The kernel frees the slot when
+  the worker dies.
+- **The Tart bootstrap payload is content-verified.** The guest agent binary, the LaunchDaemon
+  plist, the in-guest provisioning script and the runner tarball are hashed on the host, read back
+  through the guest's own `shasum` after the copy, and verified again before installation — the
+  SSH transport into a throwaway NAT VM is not an authenticated channel, so the content carries
+  the trust.
+- **macOS image sizing floors are mandatory** (`VM_MACOS_IMAGE_MINIMUMS_MISSING`), and the
+  provisioner refuses a tart `config.json` with no `cpuCountMin`/`memorySizeMin`. Without them the
+  first real compatibility failure lands inside a worker, after a clone and a boot.
+- **`scripts/qualify-macos-image.sh`**: an image is valid because RunnerVM cold-booted a clone of
+  it, not because the build script finished. Import → create → cold boot → agent handshake →
+  `agent.metrics` → `exec sw_vers` → LaunchDaemon loaded after a real boot → TCP/22 closed,
+  `com.openssh.sshd` disabled, `admin/admin` rejected → destroy → no leftovers → image digest
+  unchanged. JSON report; `--allow-ssh` for `--debug-ssh` images.
+- **`scripts/live-macos-e2e.sh` + `scripts/lib/live-macos.sh`**: the H3–H5 driver. Concurrency
+  (two guests, a third job queued, distinct machine identifier / MAC / auxiliary storage sampled
+  while both are running), a recovery matrix (runnerd restart and `SIGKILL` at each state), and a
+  soak — each ending in the same invariants: no GitHub runner, no non-terminal session, no
+  capacity-consuming instance, no instance directory, no `vmworker`, both macOS slots free, image
+  digest unchanged.
+- **A profile whose instances fail to boot is held down.** `create` only throws for failures
+  *before* the row exists; a boot failure — a macOS hardware model this host cannot run, say —
+  reports itself by leaving the returned record in a failed state, which the orchestrator ignored.
+  A permanently broken image therefore meant a full disk clone and a dead VM on every tick, for
+  ever. `InstanceState.isFailedStart` now feeds the same hold-down a thrown `create` already used.
+- Guest diagnostics are OS-aware: a macOS guest has no journal and no systemd unit, so the
+  collection script branches on `uname -s` and reads `/var/log/runnervm-guest-agent.log` plus
+  `log show`/`sw_vers` instead of `journalctl`/`dmesg`. A `context.json` beside the archive ties it
+  back to the profile, image and host. The image now ships a `newsyslog.d` drop-in so the agent log
+  is bounded.
+- 1375 Swift tests / 174 suites; 4 bash unit-test suites in CI (two new).
+
 ## 2026-08-28 — macOS guests, runtime milestone (M8.0–M8.4)
 
 - macOS is a guest platform now: `MacOSVMPlatform` builds `VZMacOSBootLoader` +
@@ -20,8 +89,9 @@ Dates are when the work landed on `master`; see `docs/verification.md` for what 
   SSH provisioning of a Tart macOS base into a RunnerVM image (runner account, guest-agent
   LaunchDaemon, sha256-verified `actions/runner` osx-arm64, CLT, empty git credential helper as
   `runner`, sealed `metadata.json`); 57 bash unit tests in CI.
-- New warning `PROFILE_NAME_SHADOWS_HOSTED_LABEL`: a profile named like a GitHub-hosted label
-  (`macos-26`, `ubuntu-24.04`, `windows-2025`, `*-latest`) sends jobs to GitHub's runners, not yours.
+- New validation `PROFILE_NAME_SHADOWS_HOSTED_LABEL`: a profile named like a GitHub-hosted label
+  (`macos-26`, `ubuntu-24.04`, `windows-2025`, `*-latest`) sends jobs to GitHub's runners, not
+  yours. Landed as a warning; promoted to an error in the hardening pass above.
 - Live on this host (see `docs/verification.md` "M8"): Tart `macos-tahoe-base` (26.6.2) boots under
   `vmworker`, restart keeps its identity, guest agent over vsock, one GitHub JIT job on
   `rvm-macos-26` with a 23 s cold start and the VM removed afterwards. Still open: two concurrent

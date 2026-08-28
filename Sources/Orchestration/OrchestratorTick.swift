@@ -151,12 +151,24 @@ extension Orchestrator {
   private func performStart(_ profileId: RunnerProfileID, name: String) async {
     do {
       let record = try await instances.create(profileName: name)
+      // `create` only throws for failures *before* the row exists (admission, a refused profile).
+      // Everything from the clone onwards -- and every boot failure, including a permanently
+      // incompatible macOS image -- is reported by leaving the returned record in a failed state.
+      // Without this branch the next tick would immediately clone and boot the same broken image
+      // again, forever: a full disk clone and a failed VM per tick, with nothing slowing it down.
+      guard !record.state.isFailedStart else {
+        holdDownProfile(profileId, name: name, reason: record.failureCode ?? record.state.rawValue)
+        return
+      }
       note(.instanceStarted(profile: name, instance: record.id.rawValue))
     } catch {
-      let reason = Self.describe(error)
-      holdDown[profileId] = now().addingTimeInterval(Double(tuning.startHoldDown.components.seconds))
-      note(.instanceStartFailed(profile: name, reason: reason))
+      holdDownProfile(profileId, name: name, reason: Self.describe(error))
     }
+  }
+
+  private func holdDownProfile(_ profileId: RunnerProfileID, name: String, reason: String) {
+    holdDown[profileId] = now().addingTimeInterval(Double(tuning.startHoldDown.components.seconds))
+    note(.instanceStartFailed(profile: name, reason: reason))
   }
 
   private func finishStart(_ token: Int, profile: RunnerProfileID) {

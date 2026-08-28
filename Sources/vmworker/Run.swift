@@ -28,6 +28,9 @@ struct Run: ParsableCommand {
     let paths = VMRuntimePaths(directory: specURL.deletingLastPathComponent())
 
     let lock = try Self.acquireLock(paths: paths, logger: logger)
+    // Held for the process's whole life, like `lock` itself. Taken before anything expensive so a
+    // host already running its two macOS guests fails immediately rather than after a boot.
+    let slot = try Self.acquireMacOSSlot(spec: loaded.spec, socketDir: socketDir, logger: logger)
     // Linux images may ship without an EFI variable store; the store is per-instance state.
     if loaded.spec.os == .linux, !FileManager.default.fileExists(atPath: paths.nvram.path) {
       try LinuxVMPlatform.createVariableStore(at: paths.nvram)
@@ -49,7 +52,10 @@ struct Run: ParsableCommand {
         Foundation.exit(WorkerExitCode.vzStartFailed.rawValue)
       }
     }
-    logger.info("worker locked instance", metadata: ["lock_fd": .stringConvertible(lock.descriptor)])
+    logger.info(
+      "worker locked instance",
+      metadata: ["lock_fd": .stringConvertible(lock.descriptor)]
+        .merging(slot.map { ["macos_slot": .string($0.url.lastPathComponent)] } ?? [:]) { $1 })
     // Parks the process on the queue the VM was created with; never returns.
     dispatchMain()
   }
@@ -89,6 +95,29 @@ struct Run: ParsableCommand {
       return try WorkerLock.acquire(url: paths.workerLock)
     } catch let error as WorkerLockError {
       logger.error("instance lock unavailable", metadata: ["error": .string("\(error)")])
+      throw ExitCode(WorkerExitCode.lockHeld.rawValue)
+    }
+  }
+
+  /// Defence in depth on `HostConstants.macOSGuestLimit`: runnerd's admission check is what an
+  /// operator normally hits, but the two-guest ceiling is host policy and has to hold even when
+  /// runnerd is not the thing that started this worker.
+  private static func acquireMacOSSlot(
+    spec: VMInstanceSpec, socketDir: String, logger: Logger
+  ) throws -> WorkerLock? {
+    guard spec.os == .macos else { return nil }
+    do {
+      let lock = try MacOSGuestSlot.acquire(
+        in: URL(fileURLWithPath: socketDir, isDirectory: true))
+      logger.info("macOS guest slot acquired", metadata: ["slot": .string(lock.url.lastPathComponent)])
+      return lock
+    } catch {
+      logger.error(
+        "macOS guest slot unavailable",
+        metadata: [
+          "error": .string("\(error)"),
+          "limit": .stringConvertible(HostConstants.macOSGuestLimit),
+        ])
       throw ExitCode(WorkerExitCode.lockHeld.rawValue)
     }
   }

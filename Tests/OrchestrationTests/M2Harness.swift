@@ -236,13 +236,40 @@ struct M2Harness {
       disk: disk, nvram: nil, os: .linux, name: Self.linuxImageName)
   }
 
+  /// A macOS image only passes admission when it declares its platform *and* its sizing floors,
+  /// and when its disk is exactly the profile's `resources.disk` (macOS guests can neither grow
+  /// nor shrink their APFS container). The `mac` profile asks for 1 GiB; the file is sparse, so it
+  /// still costs nothing.
   @discardableResult
-  func importMacImage() async throws -> ManagedImage {
-    let disk = try sparseFile(named: "mac.img", bytes: 32 << 20)
+  func importMacImage(
+    minimumCPUCount: Int = 1, minimumMemoryBytes: UInt64 = ByteSize.mebibytes(512).bytes
+  ) async throws -> ManagedImage {
+    let bytes = ByteSize.gibibytes(1).bytes
+    let disk = try sparseFile(named: "mac.img", bytes: bytes)
     let nvram = try sparseFile(named: "mac-nvram.bin", bytes: 64 << 10)
+    let metadata = try macMetadataFile(
+      diskBytes: bytes, minimumCPUCount: minimumCPUCount,
+      minimumMemoryBytes: minimumMemoryBytes)
     return try await images.importLocal(
-      disk: disk, nvram: nvram, os: .macos, name: Self.macImageName,
-      hardwareModel: "ZmFrZS1tb2RlbA==")
+      disk: disk, nvram: nvram, os: .macos, name: Self.macImageName, metadataPath: metadata)
+  }
+
+  func macMetadataFile(
+    named name: String = "mac-metadata.json", diskBytes: UInt64, minimumCPUCount: Int?,
+    minimumMemoryBytes: UInt64?
+  ) throws -> URL {
+    let metadata = ImageMetadata(
+      os: .macos, virtualDiskSizeBytes: diskBytes, createdAt: Self.imageClock,
+      boot: ImageMetadata.Boot(type: .macos),
+      macos: ImageMetadata.MacOSPlatform(
+        hardwareModel: "ZmFrZS1tb2RlbA==", sourceVersion: "26.0",
+        minimumCPUCount: minimumCPUCount, minimumMemoryBytes: minimumMemoryBytes))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+    let url = tree.root.appending(path: name)
+    try encoder.encode(metadata).write(to: url)
+    return url
   }
 
   func sparseFile(named name: String, bytes: UInt64) throws -> URL {

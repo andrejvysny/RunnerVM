@@ -177,6 +177,38 @@ import Testing
     }
   }
 
+  /// A boot that fails does not throw out of `create`: the ladder reports it by leaving the row in
+  /// a failed state. Without the hold-down that covers it, a permanently unbootable image (a macOS
+  /// hardware model this host cannot run, say) would be cloned and booted again on every single
+  /// tick -- a full disk clone and a dead VM per tick, forever.
+  @Test func anInstanceThatFailsToBootAlsoHoldsTheProfileDown() async throws {
+    try await withHarness { harness in
+      try await harness.importLinuxImage()
+      var behaviour = FakeWorkerLauncher.Behaviour()
+      behaviour.statesAfterStart = [.error]
+      await harness.launcher.set(behaviour)
+      let profile = try await harness.profileID("linux")
+      let manual = ManualDemandProvider()
+      await manual.set(profile: profile, assignedJobs: 1)
+      let orchestrator = await harness.orchestrator(demand: manual)
+
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      let afterFirst = await orchestrator.recentEvents()
+        .count { if case .instanceStartFailed = $0.event { true } else { false } }
+      #expect(afterFirst == 1)
+
+      // The second tick must not start anything: the profile is held down, so the count of both
+      // failures and instances stays where it was.
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      let afterSecond = await orchestrator.recentEvents()
+        .count { if case .instanceStartFailed = $0.event { true } else { false } }
+      #expect(afterSecond == 1)
+      #expect(try await harness.instanceCount(profile: "linux") == 1)
+    }
+  }
+
   @Test func warmPoolKeepsOneIdleInstanceWithoutASession() async throws {
     let config = M2Harness.configuration(warmPool: WarmPoolPolicy(minIdle: 1, maxIdle: 1))
     try await withHarness(configuration: config) { harness in
