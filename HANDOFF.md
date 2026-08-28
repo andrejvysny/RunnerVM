@@ -1,78 +1,101 @@
-# Handoff — RunnerVM production hardening pass
+# Handoff — first headless deployment (Mac mini `blackpen`)
 
-Session 1 · 2026-08-27
+Session 2 · 2026-08-28 · previous session's notes are in `git log` (`a3cca52`)
 
 ## Goal
 
-Harden the single-host RunnerVM daemon for production ephemeral Linux/arm64 runners: deterministic
-CI, restart recovery, fail-closed capacity, isolation of build inputs and reusable VMs, bounded
-caches, and live GitHub / GHCR / fault-injection evidence — with every claim tiered (unit /
-integration / hardware / live / production-qualified). Spec: the WP0–WP11 brief in the first
-message of this session; plan: `~/.claude/plans/runnervm-production-hardening-indexed-sun.md`.
+Deploy RunnerVM onto the Mac mini reached as `ssh blackpen` and exercise it for real: functionality,
+autoscaling, parallel VMs, cleanup, and at least one macOS guest. Not a rehearsal — a live host
+serving `andrejvysny/github-managed-runners`.
 
-## Original plan
+## What happened
 
-WP0 determinism → WP1 session recovery → WP2 build-recovery capacity → WP3 NUL tar list →
-WP4 reusable guard + HOME reset → WP5 bounded base cache → WP6/WP11 ARG semantics + debt →
-WP8 fault-injection harness → WP7/WP10 live scripts and runs → WP9 doctor/qualify → docs.
-Implementation delegated per `fable-orchestrator` (Opus/Sonnet worktrees, each reviewed, merged
-by cherry-pick onto master, pushed after every green local run).
+The Mac mini is the first host that is not the development Mac, and the first one with **no GUI
+login session** — which is the state a LaunchDaemon and any unattended Mac are actually in. That
+single difference exposed five defects, two of which made the daemon completely non-functional
+there. All five are fixed; the deployment then passed everything asked of it.
 
-## Done so far (and why)
+Full record, including host layout, sizing rationale and the tested/skipped list:
+`docs/verification.md`, "Mac mini deployment". What shipped: `CHANGELOG.md`.
 
-- **All eleven work packages landed on master** (`74ecb12` … `a771905`, 20 commits). Evidence and
-  root causes: `docs/verification.md` "Production hardening pass"; state: `docs/status.md`;
-  what shipped: `CHANGELOG.md`.
-- **Defects only the live runs found, all fixed:** `system drain --wait` exited 1 on an idle host
-  (`drained:false`); restart-terminalized sessions kept their VM running for the 2 h retention;
-  first pass after a restart cancelled a just-booted VM on registration-time `assignedJobs: 0`
-  (now `DemandSnapshot.confirmed`); `image delete` of any image that had run a job failed with
-  `DB_FOREIGN_KEY`; the push's immutable `@sha256:` reference was thrown away; e2e workflow's
-  `long` job ignored cancellation (bash + foreground `sleep`); `BuildContextPackerTests` green on
-  macOS 26 but red on CI's macOS 15 (Foundation relative-URL/`resolvingSymlinksInPath` drift).
-- **Dead-ends / decisions:** do not widen timeouts to fix flakes (root causes fixed; waits are
-  event-driven); `interrupt` must write the row before dropping the guest client; never `swift
-  build` while a live run boots VMs (relink strips vmworker's signature — run `scripts/sign-dev.sh`
-  after every build); after struct-layout changes `swift package clean` (stale `.build` SIGSEGVs the
-  test process); `pkill -f` patterns kill Monitor scripts that contain the same string — use the
-  `[l]ive-…` trick; the dev repo is its own e2e test repo (`.github/workflows/e2e.yml`).
-- **Skipped on operator instruction:** `long-job` live scenario; LaunchDaemon install + 10-reboot /
-  cold-power-cycle qualification (tooling for it is done and hardware-verified).
-- **In flight at hand-off:** `scripts/live-builder-faults.sh --phase all`. The daemon behaved
-  as designed at every phase seen so far (`booting`: kill -9 → `recoveryPending=yes` while the
-  orphaned vmworker lived → `failed`/`BUILD_INTERRUPTED` once it was gone; `provisioning` same
-  without the pending window). Both were *reported* as fail by a **driver bug**: the script builds
-  every phase under one `--name faults-<ts>`, so by the third phase three succeeded images answer
-  to that alias and the "at most one image" assertion trips. `queued/resolving/staging` are
-  unobservable on a warm local-base build (they pass in <200 ms). Fix the driver (per-phase alias
-  or scope the image check to the phase's own `imageDigest`; treat "never observed" as skipped),
-  rerun, record in `docs/verification.md`.
+## Results
+
+- **Linux, on blackpen:** `image build` 2/2 (`ubuntu-24-minimal` 2 m 56 s, `ubuntu-24` 1 m 30 s);
+  single job with the guest agent ready 5.5 s after demand; 3-way matrix at capacity; 6-way matrix
+  at 2× capacity (never exceeded 3, drained and refilled in waves); 4-way matrix;
+  `scripts/live-github-e2e.sh` **11/11** including both restart-during-job scenarios and the
+  `kill -9` one. `long-job` (65 min) skipped.
+- **Storage:** after ten jobs — 0 VMs, 0 instance directories, 0 `vmworker` processes, 0 stranded
+  GitHub runner registrations, free disk unchanged. Per-job storage is fully reclaimed; what
+  outlives a job is now bounded explicitly in that host's config (`images.cache.maxSize`,
+  `logging.retention.instanceLogs`, `build.cache.maxBytes`, `diagnostics.failedInstanceRetention`).
+- **macOS:** one guest proven on the **development Mac**, on a freshly re-provisioned hardened
+  image `macos-26` — GitHub run 33159698945, 7 s job, ~23 s cold start, `capabilities.ssh: false`,
+  clean teardown. It does not fit on the Mac mini (below).
+
+## Defects fixed (all in `3d8fae8`)
+
+1. `APFSClone.freeSpace` returned **0** in any session without a login window, because
+   `volumeAvailableCapacityForImportantUsage` is computed by a per-login-session service. Daemon sat
+   in permanent `critical` disk pressure and advertised `capacity=0` — no VM ever scheduled. Would
+   have broken the documented LaunchDaemon variant identically. Falls back to
+   `volumeAvailableCapacity`; `doctor` now delegates to the same function instead of reading the
+   volume keys a second time.
+2. `ImageBuilder.updateConfiguration` was **never called**, so the whole `build:` block was ignored
+   and `host.reserve.disk` stayed at its 50 GiB default — every build refused. Added to the
+   `ImageBuildService` protocol, wired into both config-application paths.
+3. Disabling a profile did **not** close its scale-set message session, so a stale daemon kept
+   answering job messages and took the session back at the other host's next restart — it stole a
+   live job mid-suite. `refresh()` now retires sessions whose profile is no longer enabled.
+4. `scripts/provision-macos-tart.sh` could never verify its payload over password SSH: the `expect`
+   pty's `password:` prompt leaked into the compared output.
+5. `runnerctl status` hardcoded "Scale sets: 0 healthy".
+
+## Dead-ends / decisions worth keeping
+
+- **Do not give `ImageBuildService.updateConfiguration` a default implementation.** A
+  protocol-extension no-op outranks the actor's own method at a concrete call site; the version that
+  had one silently disabled the build harness's configuration and four lifecycle tests started
+  failing (6.7 s green → 80 s with four failures).
+- **In `retire`, cancel the poll task before closing the session.** `ensureSession` re-opens a
+  missing session at the top of every poll, so closing first just hands the loop a fresh one.
+- **Never run two daemons against one scope with the same profile name.** Disabling the profile is
+  the remedy and now actually works (defect 3). Nothing calls `deleteScaleSet`, so removing a
+  profile from one host's config leaves the other host's scale set alone.
+- **Virtualization.framework needed no unlocked login keychain** on macOS 26.5.2 — every VM booted
+  with `doctor` reporting `FAIL Login keychain`. Documented as counter-evidence in
+  `packaging/launchd/README.md` and `docs/qualification.md`, not as a qualification.
+- macOS profile disk must be **`50000000000` bytes exactly**; `47GiB` is rejected by the exact-size
+  rule.
 
 ## How to resume
 
-1. Run the `handoff` skill with "resume".
-2. `swift build && scripts/sign-dev.sh && swift test --parallel`; `gh run list --branch master
-   --workflow ci --limit 3` (confirm `a771905` green).
-3. Live environment: `RUNNERVM_VMWORKER=$PWD/.build/debug/vmworker .build/debug/runnerd --foreground
-   --state-dir ~/runnervm-dev --socket-dir /tmp/rvm` (config already applied: scale-set demand,
-   `security.allowPublicRepositories: true`, PAT in keychain via `runnerctl auth login`, GHCR
-   credential stored). Env for scripts: `RUNNERVM_E2E_OWNER=andrejvysny
-   RUNNERVM_E2E_REPO=andrejvysny/github-managed-runners RUNNERVM_GITHUB_TOKEN=$(gh auth token)`.
-4. Next task: finish/rerun the builder fault phases
-   (`RUNNERVM_FAULTS_DAEMON_UP_TIMEOUT=600 scripts/live-builder-faults.sh --recipe
-   images/recipes/ubuntu-24 --phase booting --phase provisioning --phase sealing --state-dir
-   ~/runnervm-dev --socket-dir /tmp/rvm`; stop any foreground runnerd first — the script runs its
-   own), fix the driver's "phase never observed" handling for warm builds, record results in
-   `docs/verification.md`.
+1. Run the `handoff` skill with "resume". Read `CURRENT_STATE.md`, then
+   `docs/verification.md` "Mac mini deployment".
+2. `swift build && scripts/sign-dev.sh && swift test --parallel` (expect 1379 pass, 1 known issue).
+3. Mac mini: `ssh blackpen '/Users/blackpen/.local/bin/runnerctl --socket
+   /Users/blackpen/runnervm/run/runnerd.sock status'`. If `runnerd` is not up (it does not survive a
+   reboot), start it with `/Users/blackpen/rvm-restart.sh`.
+4. Next tasks are in `TODO.md`, "Mac mini deployment (2026-08-28) — follow-ups".
 
-## Open questions
+## Open — needs the operator
 
-- Startup stall: twice a restarted `runnerd` sat silent for minutes after "demand provider"; not
-  reproduced on demand. Retried GitHub/Actions calls are now logged — if it recurs, the log names
-  the call; otherwise `sample <pid>` while stalled.
-- LaunchDaemon qualification remains open until the operator schedules reboots.
+- **`sudo` on the Mac mini**, for three things: install the LaunchDaemon (plist already rendered and
+  lint-clean at `/Users/blackpen/com.runnervm.runnerd.daemon.plist`), create the dedicated
+  `_runnervm` account/group so the install stops relying on `--group staff` plus a hand-set 0700
+  state directory, and run the reboot qualification loop in `docs/qualification.md`.
+- **macOS on the Mac mini is blocked on disk** — needs ~20 GiB more than exists. A guest reserves
+  the image's full 50 GB virtual disk (no APFS resize), so one guest needs ~80 GiB free; the host
+  has 62 GiB and ~11 GiB reclaimable. The only large reclaimable area is another user's home.
+  Either free space, produce a smaller macOS image, or accept Linux-only there.
+- **`scripts/qualify-macos-image.sh` (H2) cannot pass as written** — its `vm create` instance is
+  surplus with zero GitHub demand, so scale-to-zero removes it before the agent connects. Needs
+  `demand: manual`, a pin, or a mode that suspends scale-to-zero.
+- **`doctor`'s `Login keychain` check is a false negative on macOS 26.5.2** — decide whether it
+  should warn, probe for what it actually cares about, or go.
 
 ## Pointers
 
-- Tasks → TODO.md ("Production hardening pass" section) · Snapshot → CURRENT_STATE.md ·
-  Evidence → docs/verification.md · Memory → `runnervm-hardening-pass.md`
+- Tasks → `TODO.md` ("Mac mini deployment (2026-08-28) — follow-ups", "M8") · Snapshot →
+  `CURRENT_STATE.md` · Evidence → `docs/verification.md` · Install layout → `docs/install.md`
+  ("One host per profile name, per scope") · macOS → `docs/macos-guests.md`

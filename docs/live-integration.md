@@ -46,6 +46,15 @@ repo's workflow file — cannot be verified locally and must be set up first.
 - `github.demand: scaleSet` in the applied configuration (the default), so the profile has a
   live scale set (`runnerctl scaleset list` shows it `ready`) that GitHub actually assigns jobs
   to. `manual` demand mode will not exercise the flows this suite is testing.
+- **No other RunnerVM host is registered against the same scope with the same profile name.** A
+  scale set has exactly one message session, so a second daemon takes the session away
+  (`HTTP 409 RunnerScaleSetSessionConflictException`) and answers the suite's jobs from the wrong
+  machine. This is not hypothetical: it invalidated a `redelivery` run on 2026-08-28
+  (`docs/verification.md`, "Mac mini deployment"). Check `runnerctl scaleset list` on every host
+  that can see the scope, and see `docs/install.md`, "One host per profile name, per scope".
+- `--restart-cmd` must actually restart *this* daemon. The default assumes a launchd job; a
+  daemon started by hand needs an explicit command, and the `pkill` pattern inside it must not
+  match the script that contains it (see "Known non-determinism" below).
 
 ### PAT scopes
 
@@ -368,6 +377,14 @@ unreachable from the host. Then it deletes the instance and asserts no live inst
 directory and an unchanged image digest. Exit 0 means qualified; a JSON report is written either
 way. `--allow-ssh` records the SSH checks as skipped for a `--debug-ssh` image, `--dry-run` prints
 the plan with no daemon.
+
+**Known defect (2026-08-28, first run): it cannot pass against an ephemeral profile whose scale set
+is live and idle.** `vm create` produces an instance with no confirmed GitHub demand behind it, so
+the scheduler correctly cancels it as surplus before the guest agent connects —
+`FAIL cold_boot_to_idle — instance reached deleted`, daemon log
+`instance.cancelled (demand dropped)` — even though the clone booted normally. Run it with
+`github.demand: manual` applied, or fix the script to pin the instance it creates, before treating
+a failure here as an image problem.
 
 ## macOS concurrency, recovery and soak (`scripts/live-macos-e2e.sh`)
 

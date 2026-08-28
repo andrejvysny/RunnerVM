@@ -5,9 +5,20 @@
 every instance has its own machine identifier, and on 2026-08-27 a Tart-derived macOS 26.6.2 image
 ran a real GitHub Actions job end to end on this host (23 s cold start, VM removed afterwards —
 evidence in `docs/verification.md` "M8"). The 2026-08-28 hardening pass closed the security and
-correctness gaps below. Open: the H3–H5 live runs (two concurrent guests + third-job-waits,
-crash/restart recovery, the 100-job soak) and the native IPSW builder (M8.6). Track progress in
-`TODO.md` ("M8"). Treat macOS as **experimental** until H3–H5 are recorded.
+correctness gaps below, and the whole path was **re-proven on a freshly re-provisioned, hardened
+image the same day**: `macos-26` (`capabilities.ssh: false`, 46.6 GiB virtual / 30.6 GiB on disk)
+ran GitHub run 33159698945 in 7 s with a ~23 s cold start, `Darwin … RELEASE_ARM64_VMAPPLE`, the
+guest agent loaded, and a clean teardown — `docs/verification.md` "Mac mini deployment".
+
+Open: the H3–H5 live runs (two concurrent guests + third-job-waits, crash/restart recovery, the
+100-job soak), the H2 gate script itself (it cannot pass as written — see "Image qualification"
+below), and the native IPSW builder (M8.6). Track progress in `TODO.md` ("M8"). Treat macOS as
+**experimental** until H3–H5 are recorded.
+
+Sizing note for anyone planning a host: a macOS guest reserves the image's **entire** virtual disk
+(50 GB here) because it cannot resize its APFS container, so one guest needs roughly
+`image-on-disk + image-virtual-size + host.reserve.disk` free — about 80 GiB for this image. That
+is why macOS guests do not fit on every Mac that runs Linux guests happily.
 
 ## Shape of the milestone
 
@@ -177,6 +188,16 @@ flowchart LR
 
 It exits non-zero if any check fails and writes a JSON report either way. `--allow-ssh` records the
 SSH checks as skipped for an image built with `--debug-ssh`.
+
+**As written it cannot pass on a host whose scale set is live and idle** (first run, 2026-08-28).
+The script creates its instance with `runnerctl vm create`; an ephemeral instance with no confirmed
+GitHub demand behind it is surplus, so the scheduler scales it away before the guest agent connects:
+`FAIL cold_boot_to_idle — instance reached deleted` after 11 s, daemon log
+`instance.cancelled (demand dropped)`. Nothing is wrong with the image or the VM — the clone reached
+`waitingForAgent` in 6 s — and the run's other four checks (teardown, no live instances, instance
+directory removed, image digest unchanged) passed. The gate needs `github.demand: manual`, a pin on
+the instance it creates, or a host mode that suspends scale-to-zero while it runs. Until then the
+acceptance path for a macOS image is a real GitHub job, not this script.
 
 ## Guest side
 

@@ -4,11 +4,35 @@
 
 - [ ] `scripts/live-builder-faults.sh`: per-phase image alias (or scope the "≤1 image" check to the phase's `imageDigest`), treat unobservable warm phases as skipped, rerun `--phase booting --phase provisioning --phase sealing`, record in `docs/verification.md`
 - [x] Confirm CI green for `a771905` — flake, rerun green (see M8.0)
-- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27)
+- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27). Now also blocked on `sudo` for the Mac mini — the plist is rendered at `/Users/blackpen/com.runnervm.runnerd.daemon.plist` and lint-clean, and the keychain objection to this variant did not reproduce on macOS 26.5.2 (see the deployment section below)
 
 
 Plans: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (M0–M13) and
 `~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (M14/M15). Current state: `docs/status.md`.
+
+## Mac mini deployment (2026-08-28) — follow-ups
+
+First deployment onto a host that is not the development Mac, and the first headless run (no GUI
+login session). Evidence, host layout, and the full tested/skipped list: `docs/verification.md`
+"Mac mini deployment". Five defects found and fixed there; what is left:
+
+- [ ] **Persistence on the Mac mini.** `runnerd` runs as a detached foreground process and does not
+      survive a reboot. Needs `sudo` to install `/Library/LaunchDaemons/com.runnervm.runnerd.daemon.plist`
+      (already rendered on the host) and `launchctl bootstrap system`.
+- [ ] **Dedicated `_runnervm` account/group on the Mac mini.** The daemon runs as `blackpen` with
+      `--group staff --allow-staff-group`, mitigated only by a hand-set `0700` state directory on a
+      machine with three other `staff` accounts. Fix when root is available.
+- [ ] **`runnerctl doctor`'s `Login keychain` check is a false negative on macOS 26.5.2** — it fails
+      while every VM starts fine headless. Decide whether it should warn, probe for the condition it
+      actually cares about, or be dropped; do not leave a permanent red FAIL on a healthy host.
+- [ ] **`scripts/qualify-macos-image.sh` cannot pass as written** (H2) — see the M8 section.
+- [ ] **macOS guests do not fit on the Mac mini** (~20 GiB short; the reservation is the image's
+      full 50 GB and a macOS guest cannot resize its APFS container). Either free the space, or
+      produce a smaller macOS image, or accept Linux-only there.
+- [ ] Consider making the free-space fallback visible: the daemon now silently uses a less accurate
+      figure on a host with no login session. A one-line startup log ("purgeable-aware free space
+      unavailable; using volumeAvailableCapacity") would save the next person the same hunt.
+
 
 ## M8 — macOS guests (started 2026-08-27; runtime first, native IPSW builder last)
 
@@ -24,6 +48,7 @@ auto-update disabled.
 - [x] M8.3 (LIVE 2026-08-27: provisioned Tart base, imported `macos-26-base`, agent over vsock) guest agent over vsock in macOS (provision Tart image over SSH: `runner` user, darwin guest-agent + LaunchDaemon, actions/runner osx-arm64, `git config --global credential.helper ""` as runner) · hello/health/guestInfo · `startSession`
 - [x] M8.4 (LIVE 2026-08-27: run 33118688632 on `rvm-macos-26`, 23 s cold start, VM removed after job) (`runs-on: [self-hosted, macos, arm64]`; `sw_vers`, `uname -m`, checkout)
 - [ ] M8.5 (restart-keeps-id proven; 2-VM test blocked by disk: needs ~95 GiB free) identity uniqueness across clones, restart keeps id, 2 concurrent + 3rd blocked by scheduler, crash/restart recovery, 100 short jobs, no leaks
+- [x] M8 re-provisioned and re-proven on the hardened path 2026-08-28: image `macos-26` (`capabilities.ssh: false`, 46.6 GiB virtual / 30.6 GiB on disk), live GitHub JIT job run 33159698945 passed in 7 s, ~23 s cold start, `Darwin … RELEASE_ARM64_VMAPPLE`, guest agent loaded, clean teardown. Profile `rvm-macos-26` needs `disk: 50000000000` (bytes) — `47GiB` is rejected by the exact-size rule
 - [ ] M8.6 native IPSW builder (`runnerctl image build-macos`), separate from the Runnerfile builder — **not started until H1–H6 below are done**; separate risk domain from hardening
 - [x] validation: profile name shadowing a GitHub-hosted label (`macos-*`, `ubuntu-*`, `windows-*`, `*-latest`) — found live; now an **error** with `allowHostedLabelShadowing: true` as the opt-out (H1)
 - [ ] docs: rewrite `docs/macos-guests.md` (graphics not an Apple requirement; 2-guest rationale = Apple license/framework operating model), `docs/status.md`, `CHANGELOG.md`
@@ -38,6 +63,7 @@ auto-update disabled.
 - [x] P1 no seal after a forced stop: `wait_for_guest_down` records `GRACEFUL_SHUTDOWN`; `require_clean_shutdown` fails the build unless `--allow-dirty-seal`
 - [x] P1 LaunchDaemon fails closed: `plutil -lint`, `root:wheel:644` ownership, `launchctl bootstrap`/`enable`/`print` all fatal in the guest, and `launchd_loaded != yes` is fatal on the host
 - [x] P1 hosted-label collision is an error (above)
+- [x] **H1 payload check fixed 2026-08-28** — it could never pass over password SSH: `verify_staged_payload` compared raw `ssh` output, which carries the `expect` pty's own `password:` prompt, so the run died with all four digests visibly identical (`the staged payload does not hash to what this host sent`). Only digest lines are compared now. The check had never been run against the transport it defaults to
 - [x] P2 second macOS-capacity fence: `MacOSGuestSlot` `fcntl` locks (`<runtime>/macos-slot-N.lock`) taken by `vmworker` itself, so the two-guest ceiling holds even without runnerd
 - [x] P2 Tart bootstrap payload manifest: agent binary, plist, guest script and runner tarball hashed on the host, read back through the guest's own `shasum`, verified a third time before install
 - [x] P2 macOS image minimums are mandatory (`VM_MACOS_IMAGE_MINIMUMS_MISSING`); the provisioner refuses a tart `config.json` with no `cpuCountMin`/`memorySizeMin`
@@ -48,7 +74,8 @@ auto-update disabled.
 **H2 — image qualification (an image is valid because RunnerVM cold-booted a clone of it)**
 
 - [x] `scripts/qualify-macos-image.sh`: import → create → cold boot → agent hello/health/guestInfo → `exec sw_vers` → TCP/22 unreachable → `admin/admin` rejected → destroy → report
-- [ ] run it against the live `macos-26-base` image (needs the host + a re-provisioned image)
+- [x] re-provisioned image produced 2026-08-28 (`macos-26`, hardened; the old `macos-26-base` predated the lockdown)
+- [ ] **the script cannot pass as written — fix it, then run it.** First run 2026-08-28 against `macos-26`: `FAIL cold_boot_to_idle — instance reached deleted` after 11 s. Not the image: the clone booted normally and reached `waitingForAgent` in 6 s, then the scheduler correctly scaled it away because a `vm create` instance is surplus with zero confirmed GitHub demand (`instance.cancelled (demand dropped)`). The other four checks (teardown, no live instances, instance directory removed, image digest unchanged) passed. Needs `github.demand: manual`, a pin on the instance it creates, or a host mode that suspends scale-to-zero for the duration
 
 **H3–H5 — concurrency, recovery, soak (need hardware; 2-VM test still blocked on disk)**
 

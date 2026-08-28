@@ -29,10 +29,16 @@ account) see [`docs/install.md`](docs/install.md) — including installing via
 See [`docs/status.md`](docs/status.md) for the full capability matrix and
 [`CHANGELOG.md`](CHANGELOG.md) for what landed when.
 
-- Supported guest: Linux/arm64 only. macOS guests are not implemented; `runnerctl config
-  validate` (and `config apply`) reject `os: macos` with `GUEST_OS_UNSUPPORTED`.
+- Supported guest: **Linux/arm64** — the mode the project is validated against. **macOS guests are
+  experimental** (`os: macos`, ephemeral only): the runtime works and has run real GitHub jobs, but
+  the concurrency, recovery and soak runs are not recorded yet — see
+  [docs/macos-guests.md](docs/macos-guests.md).
 - Live end-to-end proven on GitHub.com (Linux/arm64 ephemeral runner, full job; autoscaling with
   parallel jobs) — see [docs/verification.md](docs/verification.md).
+- **Deployed and exercised on a dedicated Mac mini, headless** (no GUI login session), 2026-08-28:
+  images built on the host, 3 concurrent VMs, 11/11 live E2E scenarios, nothing left on disk after a
+  job — [docs/verification.md](docs/verification.md) "Mac mini deployment". Note that a host serving
+  a scope must not share profile names with another host ([docs/install.md](docs/install.md)).
 - Images: build them on the host with `runnerctl image build` and the shipped `Runnerfile` recipes
   ([docs/image-build.md](docs/image-build.md); bootstrap ~4 min, derived ~1 min, verified live),
   pull RunnerVM images from any OCI registry, or import tart images read-only

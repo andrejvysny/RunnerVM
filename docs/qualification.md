@@ -64,6 +64,31 @@ trade-off that matters for unattended operation specifically.
   qualify here; skip straight to running `runnerd --foreground` under whatever external supervisor
   you use, and adapt §3 to that supervisor's own restart-on-boot behavior.
 
+### Counter-evidence for the keychain premise (2026-08-28, macOS 26.5.2, Apple M4)
+
+The keychain argument above is the whole reason the LaunchAgent is recommended. On one host it did
+not reproduce. A `runnerd` started over SSH on a Mac mini with **no GUI login session at all** —
+nobody logged in, no auto-login user, `/dev/console` owned by `root`, the `blackpen` login keychain
+locked — booted every VM asked of it: two in-daemon image builds, ten GitHub jobs and eleven live
+E2E scenarios, all green. `vmworker probe` reported `virtualizationSupported: true` in the same
+session. Meanwhile `runnerctl doctor` reported
+
+```
+FAIL  Login keychain    login keychain for blackpen is locked (security exit 36); VM start needs
+                        an unlocked login keychain for the account runnerd runs as
+```
+
+so on that host the `login_keychain` check (and `qualify-host.sh`'s `daemon_keychain`) is a **false
+negative**: it fails while everything it is warning about works. Evidence:
+`docs/verification.md`, "Mac mini deployment".
+
+This is one host and one OS version, and — importantly — it says nothing about whether the job
+comes *back* after a reboot, which is what §3 measures and what actually decides the variant. So
+the LaunchDaemon stays experimental. But do not treat the keychain requirement as settled fact on
+macOS 26 without re-measuring it yourself: if it does not hold on your hardware either, the
+LaunchDaemon's remaining risk is just boot ordering, and it needs no auto-login user and no
+FileVault compromise.
+
 The project deliberately does not auto-select either variant — run the loop in §3 against your own
 hardware and macOS version and pick the one that actually recovers from a cold boot.
 
