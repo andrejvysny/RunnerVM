@@ -31,6 +31,11 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   case imagePush = "image.push"
   case imageDelete = "image.delete"
   case imagePrune = "image.prune"
+  /// Re-resolve every tracked source against its registry and stop there (phase D6).
+  case imageUpdateCheck = "image.update.check"
+  /// Resolve, pull, qualify and promote; returns before the cycle finishes.
+  case imageUpdateRun = "image.update.run"
+  case imageUpdateStatus = "image.update.status"
   /// Phase 5 image builder. `runnerd` answers `BUILD_UNAVAILABLE` until it lands.
   case imageBuild = "image.build"
   case buildList = "build.list"
@@ -77,6 +82,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     switch self {
     case .systemReconcile, .systemDrain, .systemResume, .systemOffline, .systemShutdown,
          .configApply, .imageDelete, .imagePrune, .imagePull, .imagePush,
+         .imageUpdateCheck, .imageUpdateRun,
          .registryLogin, .registryLogout,
          .instanceStop, .instanceDelete, .instanceTaint, .authLogin, .authLogout,
          .debugDemandSet, .debugScaleSetReconnect, .buildCancel:
@@ -101,6 +107,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .profileList, .profileGet, .scopeList, .scopeGet,
     .imageList, .imageGet, .imageInspectRemote, .imageImport, .imagePull, .imagePush,
     .imageDelete, .imagePrune,
+    .imageUpdateCheck, .imageUpdateRun, .imageUpdateStatus,
     .imageBuild, .buildList, .buildGet, .buildLog, .buildCancel,
     .registryLogin, .registryLogout, .registryStatus,
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,

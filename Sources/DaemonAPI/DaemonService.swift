@@ -39,6 +39,15 @@ public protocol DaemonService: Sendable {
   func imageDelete(_ request: ImageDeleteRequest) async throws -> ImageDeleteResponse
   func imagePrune(_ request: ImagePruneRequest) async throws -> ImagePruneResponse
 
+  /// Re-resolves every tracked source (or the one named) against its registry and returns the
+  /// refreshed snapshots. Resolve-only: nothing is transferred, qualified or promoted.
+  func imageUpdateCheck(_ request: ImageUpdateCheckRequest) async throws -> ImageUpdateStatusResponse
+  /// Kicks a full update cycle and returns immediately, like `image.pull`: the pull, the
+  /// qualification and the promotion all outlive the call. Poll `image.update.status`.
+  func imageUpdateRun(_ request: ImageUpdateRunRequest) async throws -> ImageUpdateStatusResponse
+  /// Every `managed_images` row. Answers even on a daemon with no update service wired in.
+  func imageUpdateStatus() async throws -> ImageUpdateStatusResponse
+
   /// Starts an in-daemon image build (Phase 5). `BUILD_UNAVAILABLE` until the builder lands.
   func imageBuild(_ request: ImageBuildRequest) async throws -> ImageBuildResponse
   func buildList() async throws -> BuildListResponse

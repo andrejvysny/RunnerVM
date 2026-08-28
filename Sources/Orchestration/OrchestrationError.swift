@@ -40,6 +40,15 @@ public enum OrchestrationError: RunnerError {
   /// `imageOverride` on a runner create. A runner VM must always be the image its profile names,
   /// otherwise `scaleset.list` and the image-update machinery describe a fleet that is not there.
   case imageOverrideMaintenanceOnly
+  /// `image.update.*` naming a `managed_images` row this host does not track.
+  case managedImageUnknown(name: String)
+  /// `image.update.check`/`run` on a daemon with no `ImageUpdateService` wired in.
+  case imageUpdatesUnavailable
+  /// Two profiles point at the same registry tag with different `guestOS`. One of them is wrong,
+  /// and no candidate can satisfy both, so the track refuses to promote rather than pick a side.
+  case managedImageMixedGuestOS(name: String, guestKinds: [String])
+  /// A candidate failed the pre-promotion checks. The promoted image is untouched.
+  case managedImageQualificationFailed(name: String, reason: String)
 
   public var code: String {
     switch self {
@@ -67,6 +76,10 @@ public enum OrchestrationError: RunnerError {
     case .maintenanceTTLRequired: "MAINTENANCE_TTL_REQUIRED"
     case .maintenanceTTLInvalid: "MAINTENANCE_TTL_INVALID"
     case .imageOverrideMaintenanceOnly: "IMAGE_OVERRIDE_MAINTENANCE_ONLY"
+    case .managedImageUnknown: "MANAGED_IMAGE_NOT_FOUND"
+    case .imageUpdatesUnavailable: "IMAGE_UPDATES_UNAVAILABLE"
+    case .managedImageMixedGuestOS: "MANAGED_IMAGE_MIXED_GUEST_OS"
+    case .managedImageQualificationFailed: "MANAGED_IMAGE_QUALIFICATION_FAILED"
     }
   }
 
@@ -120,6 +133,15 @@ public enum OrchestrationError: RunnerError {
       "maintenance ttl \(ttl)ms is outside \(minimum)ms...\(maximum)ms"
     case .imageOverrideMaintenanceOnly:
       "an image override is only allowed with purpose 'maintenance'"
+    case let .managedImageUnknown(name):
+      "no managed image or tracked reference named '\(name)'"
+    case .imageUpdatesUnavailable:
+      "this daemon has no image update service wired in"
+    case let .managedImageMixedGuestOS(name, kinds):
+      "profiles using '\(name)' disagree about the guest OS (\(kinds.joined(separator: ", "))); "
+        + "no candidate image can satisfy both"
+    case let .managedImageQualificationFailed(name, reason):
+      "candidate for '\(name)' failed qualification: \(reason)"
     }
   }
 

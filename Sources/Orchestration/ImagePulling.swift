@@ -77,6 +77,9 @@ extension ImageManager {
     guard let ref = Self.registryReference(reference) else {
       return try await record(for: reference)
     }
+    if let promoted = try await promotedRecord(ref) {
+      return try await touch(promoted)
+    }
     if let known = try await cachedRegistryRecord(ref) {
       return try await touch(known)
     }

@@ -130,6 +130,18 @@ public actor DaemonClient {
     try await call(.imagePrune, ImagePruneRequest(dryRun: dryRun))
   }
 
+  public func imageUpdateCheck(managed: String? = nil) async throws -> ImageUpdateStatusResponse {
+    try await call(.imageUpdateCheck, ImageUpdateCheckRequest(managed: managed))
+  }
+
+  public func imageUpdateRun(managed: String? = nil) async throws -> ImageUpdateStatusResponse {
+    try await call(.imageUpdateRun, ImageUpdateRunRequest(managed: managed))
+  }
+
+  public func imageUpdateStatus() async throws -> ImageUpdateStatusResponse {
+    try await call(.imageUpdateStatus)
+  }
+
   public func imageBuild(_ request: ImageBuildRequest) async throws -> ImageBuildResponse {
     try await call(.imageBuild, request)
   }

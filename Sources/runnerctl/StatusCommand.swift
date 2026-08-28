@@ -25,6 +25,7 @@ struct Status: AsyncParsableCommand {
     blocks.append(section("GitHub", githubFields(status.github)))
     blocks.append(section("Images", imageFields(status.images)))
     if let line = buildsLine(status.builds) { blocks.append(line) }
+    if let updates = updatesBlock(status.updates) { blocks.append(updates) }
     blocks.append("Profiles\n" + profileLines(status.profiles))
     blocks.append(section("Reconciliation", reconciliationFields(status.reconciliation)))
     return blocks.joined(separator: "\n\n")
@@ -35,6 +36,20 @@ struct Status: AsyncParsableCommand {
   private static func buildsLine(_ builds: BuildsSummary?) -> String? {
     guard let builds else { return nil }
     return "Builds: \(builds.running) running, \(builds.queued) queued"
+  }
+
+  /// Same precedent as the `Builds:` line: `nil` (a daemon predating the update service) drops the
+  /// block, and so does a host that tracks nothing -- an empty `Updates` heading would only make
+  /// every operator wonder what was supposed to be under it.
+  private static func updatesBlock(_ tracks: [ImageUpdateTrackDTO]?) -> String? {
+    guard let tracks, !tracks.isEmpty else { return nil }
+    return section(
+      "Updates",
+      tracks.map {
+        ($0.name,
+         "\($0.state), current \(Format.optional($0.currentImageDigest.map(Format.shortDigest))), "
+           + "checked \(ImageUpdate.ago($0.lastCheckedAt))")
+      })
   }
 
   private static func imageFields(_ images: ImageSummary) -> [(String, String)] {

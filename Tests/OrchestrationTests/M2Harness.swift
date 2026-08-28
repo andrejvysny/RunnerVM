@@ -113,7 +113,11 @@ struct M2Harness {
     runnerVersions = RunnerVersionMonitor(gateway: gateway, now: now)
     images = ImageManager(
       store: imageStore, images: imageRows, instances: instanceRows,
-      operations: GRDBOperationRepository(db: database), architecture: "arm64", paths: paths,
+      operations: GRDBOperationRepository(db: database),
+      // Wired the way `DaemonRuntime` wires it, so `resolveRecord` sees a promoted digest. With no
+      // `managed_images` rows -- every suite but `ImageUpdateTests` -- it changes nothing.
+      managed: GRDBManagedImageRepository(db: database),
+      architecture: "arm64", paths: paths,
       registries: FakeRegistryClientFactory(
         registry: registry, credentials: registryCredentials.chain()),
       metrics: metrics,
@@ -304,7 +308,7 @@ struct M2Harness {
   }
 
   /// The service `DaemonServer` fronts, wired to the same managers the runtime would use.
-  func service() -> DaemonServiceImpl {
+  func service(updates: ImageUpdateService? = nil) -> DaemonServiceImpl {
     DaemonServiceImpl(
       paths: paths, hostId: hostId, database: database, images: images, instances: instances,
       supervisor: supervisor,
@@ -313,7 +317,7 @@ struct M2Harness {
       parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
       startedAt: Date(), actorName: "test", gateway: gateway, scopeHealth: scopeHealth,
       runnerVersions: runnerVersions, runners: runners, metrics: metrics,
-      registryCredentials: registryCredentials,
+      registryCredentials: registryCredentials, updates: updates,
       logger: Logger(label: "test"))
   }
 

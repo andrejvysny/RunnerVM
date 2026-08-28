@@ -50,6 +50,10 @@ public actor ImageManager {
   /// `nil` in callers that don't care about the "pending operation" prune rule (spec §110) or
   /// about tracking a pull as an operation.
   let operations: (any OperationRepository)?
+  /// `managed_images`, consulted by `resolveRecord` before any registry round trip so a promotion
+  /// is what a profile's tag resolves to (phase D6). `nil` -- the M1-M5 test wiring, and anything
+  /// that builds an `ImageManager` by hand -- means "no tracks", i.e. pre-D6 behavior exactly.
+  let managed: (any ManagedImageRepository)?
   let architecture: String
   let paths: RunnerPaths
   let registries: any RegistryClientFactory
@@ -90,7 +94,8 @@ public actor ImageManager {
 
   public init(
     store: ImageStore, images: any ImageRepository, instances: any InstanceRepository,
-    operations: (any OperationRepository)? = nil, architecture: String, paths: RunnerPaths,
+    operations: (any OperationRepository)? = nil, managed: (any ManagedImageRepository)? = nil,
+    architecture: String, paths: RunnerPaths,
     registries: any RegistryClientFactory = DefaultRegistryClientFactory(
       credentials: ChainedRegistryCredentials.standard()),
     metrics: MetricRegistry = MetricRegistry(),
@@ -101,6 +106,7 @@ public actor ImageManager {
     self.images = images
     self.instances = instances
     self.operations = operations
+    self.managed = managed
     self.architecture = architecture
     self.paths = paths
     self.registries = registries

@@ -103,6 +103,10 @@ public actor DaemonRuntime {
   private var shutdownForce = false
   private var reconcileTask: Task<Void, Never>?
   private var maintenanceTask: Task<Void, Never>?
+  /// Not `private`: `Managed/ImageUpdateLoop.swift` extends this actor from a separate file, and
+  /// cross-file extensions cannot see `private` members.
+  var imageUpdates: ImageUpdateService?
+  var imageUpdateTask: Task<Void, Never>?
   private var metricsEndpoint: MetricsEndpoint?
   private var shutdownTask: Task<Void, Never>?
   private var hostId: HostID?
@@ -189,6 +193,7 @@ public actor DaemonRuntime {
     try await startMetricsEndpoint(service)
     reconcileTask = startReconcileLoop()
     maintenanceTask = startMaintenanceLoop(service)
+    if let imageUpdates { imageUpdateTask = startImageUpdateLoop(imageUpdates) }
     logger.info(
       "runnerd ready",
       metadata: [
@@ -214,6 +219,11 @@ public actor DaemonRuntime {
     maintenanceTask?.cancel()
     await maintenanceTask?.value
     maintenanceTask = nil
+    imageUpdateTask?.cancel()
+    await imageUpdateTask?.value
+    imageUpdateTask = nil
+    await imageUpdates?.stop()
+    imageUpdates = nil
     await server?.stop()
     server = nil
     // Before the orchestrator: a build owns a VM, a worker and an image pin, and its teardown has
@@ -332,9 +342,11 @@ public actor DaemonRuntime {
       store: instanceStore, instances: instanceRows)
     self.supervisor = supervisor
     let registryCredentials = RegistryCredentials()
+    let managedRows = GRDBManagedImageRepository(db: database)
     let images = ImageManager(
       store: imageStore, images: imageRows, instances: instanceRows,
-      operations: GRDBOperationRepository(db: database), architecture: probe.architecture,
+      operations: GRDBOperationRepository(db: database), managed: managedRows,
+      architecture: probe.architecture,
       paths: options.paths,
       registries: options.registries
         ?? DefaultRegistryClientFactory(credentials: registryCredentials.chain()),
@@ -379,6 +391,12 @@ public actor DaemonRuntime {
       instanceRows: instanceRows, executable: executable, gateway: gateway,
       runnerVersions: runnerVersions)
     self.builder = builder
+    // After the instance manager: qualification boots a maintenance VM through it, and promotion
+    // retires the reusable VMs the superseded digest left behind (spec §138).
+    let imageUpdates = ImageUpdateService(
+      managed: managedRows, imageRows: imageRows, images: images, instances: instances,
+      instanceRows: instanceRows, runnerVersions: runnerVersions, metrics: metrics)
+    self.imageUpdates = imageUpdates
     // Both admission paths and the scheduler must charge for a running build, so the builder is
     // registered with them the moment it exists (spec §121).
     await instances.attachImageBuilds(builder)
@@ -423,6 +441,7 @@ public actor DaemonRuntime {
       registryCredentials: registryCredentials,
       eventLog: eventLog,
       builder: builder,
+      updates: imageUpdates,
       logger: logger)
   }
 

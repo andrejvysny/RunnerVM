@@ -54,6 +54,7 @@ public actor DaemonServer {
     await unary(.runnerList) { try await service.runnerList() }
     await unary(.scaleSetList) { try await service.scaleSetList() }
     await unary(.registryStatus) { try await service.registryStatus() }
+    await unary(.imageUpdateStatus) { try await service.imageUpdateStatus() }
     await unary(.authStatus) { try await service.authStatus() }
     await unary(.authLogout) { try await service.authLogout() }
     await unary(.githubTest) { try await service.githubTest() }
@@ -75,6 +76,8 @@ public actor DaemonServer {
     await request(.registryLogout) { try await service.registryLogout($0) }
     await request(.imageDelete) { try await service.imageDelete($0) }
     await request(.imagePrune) { try await service.imagePrune($0) }
+    await request(.imageUpdateCheck) { try await service.imageUpdateCheck($0) }
+    await request(.imageUpdateRun) { try await service.imageUpdateRun($0) }
     await request(.imageBuild) { try await service.imageBuild($0) }
     await request(.buildGet) { try await service.buildGet($0) }
     await request(.buildLog) { try await service.buildLog($0) }

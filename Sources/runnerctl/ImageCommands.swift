@@ -8,7 +8,8 @@ struct Image: ParsableCommand {
     commandName: "image",
     abstract: "Import and inspect local VM images.",
     subcommands: [
-      Import.self, Pull.self, Push.self, Build.self, List.self, Inspect.self, Delete.self, Prune.self,
+      Import.self, Pull.self, Push.self, Build.self, List.self, Inspect.self, Delete.self,
+      Prune.self, ImageUpdate.self,
     ])
 
   @OptionGroup var options: GlobalOptions

@@ -44,6 +44,12 @@ public enum RunnerVMMetrics {
   public static let imageRunnerVersionHealth = "runnervm_image_runner_version_health"
   public static let runnerLatestReleaseAgeSeconds = "runnervm_runner_latest_release_age_seconds"
 
+  // Automatic image updates (`images.updates`, phase D6).
+  public static let imageUpdateChecksTotal = "runnervm_image_update_checks_total"
+  public static let imageUpdatePromotionsTotal = "runnervm_image_update_promotions_total"
+  public static let imageUpdateFailuresTotal = "runnervm_image_update_failures_total"
+  public static let imageUpdateLastCheckTimestamp = "runnervm_image_update_last_check_timestamp"
+
   // Host-observed worker figures (spec §40). Never guest memory — see the help text.
   public static let workerRSSBytes = "runnervm_worker_rss_bytes"
   public static let workerCPUPercent = "runnervm_worker_cpu_percent"
@@ -74,6 +80,8 @@ public enum RunnerVMMetrics {
   public static let instructionLabel = "instruction"
   public static let reasonLabel = "reason"
   public static let outcomeLabel = "outcome"
+  /// `ManagedImageKind`: `registryTag` or `macosTart`.
+  public static let kindLabel = "kind"
 
   /// `runnervm_disk_pressure_state` is numeric so it can be alerted on: 0 ok, 1 warning,
   /// 2 critical (spec §17).
@@ -174,6 +182,20 @@ public enum RunnerVMMetrics {
       name: runnerLatestReleaseAgeSeconds, kind: .gauge,
       help: "Seconds since GitHub published the newest actions/runner release; absent until it "
         + "has been read."),
+    MetricDefinition(
+      name: imageUpdateChecksTotal, kind: .counter,
+      help: "Managed-image tracks re-resolved against their upstream source, by track kind."),
+    MetricDefinition(
+      name: imageUpdatePromotionsTotal, kind: .counter,
+      help: "Candidate images that qualified and were promoted to a track's current digest, by "
+        + "track kind."),
+    MetricDefinition(
+      name: imageUpdateFailuresTotal, kind: .counter,
+      help: "Update cycles that failed before promoting, by track kind. The previously promoted "
+        + "image is untouched by every one of them."),
+    MetricDefinition(
+      name: imageUpdateLastCheckTimestamp, kind: .gauge,
+      help: "Unix time of the last completed update check; absent until one has run."),
   ]
 
   private static let workers: [MetricDefinition] = [

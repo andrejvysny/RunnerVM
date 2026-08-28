@@ -14,6 +14,10 @@ public struct SystemStatus: Codable, Sendable, Hashable {
   /// never wired a builder into `DaemonServiceImpl`) simply omits the field, and the synthesized
   /// `Decodable` conformance leaves it `nil` rather than failing to decode.
   public var builds: BuildsSummary?
+  /// Phase D6 managed-image tracks. Optional for the same reason `builds` is: a daemon that
+  /// predates the update service omits it, and `runnerctl status` then drops the `Updates` block
+  /// entirely rather than claiming a host tracks nothing.
+  public var updates: [ImageUpdateTrackDTO]?
 
   public init(
     daemon: DaemonHealth,
@@ -24,7 +28,8 @@ public struct SystemStatus: Codable, Sendable, Hashable {
     profiles: [ProfileRuntimeSummary],
     reconciliation: ReconciliationSummary,
     diskPressure: DiskPressureSummary,
-    builds: BuildsSummary? = nil
+    builds: BuildsSummary? = nil,
+    updates: [ImageUpdateTrackDTO]? = nil
   ) {
     self.daemon = daemon
     self.host = host
@@ -35,6 +40,7 @@ public struct SystemStatus: Codable, Sendable, Hashable {
     self.reconciliation = reconciliation
     self.diskPressure = diskPressure
     self.builds = builds
+    self.updates = updates
   }
 }
 

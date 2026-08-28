@@ -251,6 +251,37 @@ actor FakeDaemonService: DaemonService {
       keptPinned: [], reclaimedBytes: request.dryRun ? 0 : 2_000_000_000, staleStagingRemoved: 1)
   }
 
+  // MARK: - image.update.*
+
+  var tracks: [ImageUpdateTrackDTO] = []
+  var lastUpdateCheck: ImageUpdateCheckRequest?
+  var lastUpdateRun: ImageUpdateRunRequest?
+
+  func setTracks(_ rows: [ImageUpdateTrackDTO]) { tracks = rows }
+  func updateCheckRequest() -> ImageUpdateCheckRequest? { lastUpdateCheck }
+  func updateRunRequest() -> ImageUpdateRunRequest? { lastUpdateRun }
+
+  func imageUpdateCheck(
+    _ request: ImageUpdateCheckRequest
+  ) async throws -> ImageUpdateStatusResponse {
+    lastUpdateCheck = request
+    return ImageUpdateStatusResponse(tracks: filtered(request.managed))
+  }
+
+  func imageUpdateRun(_ request: ImageUpdateRunRequest) async throws -> ImageUpdateStatusResponse {
+    lastUpdateRun = request
+    return ImageUpdateStatusResponse(tracks: filtered(request.managed))
+  }
+
+  func imageUpdateStatus() async throws -> ImageUpdateStatusResponse {
+    ImageUpdateStatusResponse(tracks: tracks)
+  }
+
+  private func filtered(_ managed: String?) -> [ImageUpdateTrackDTO] {
+    guard let managed else { return tracks }
+    return tracks.filter { $0.name == managed }
+  }
+
   // MARK: - image.build / build.*
 
   var builds: [BuildInfoDTO] = []

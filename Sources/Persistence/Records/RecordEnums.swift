@@ -51,6 +51,14 @@ public enum ImagePinOwnerType: String, Codable, Sendable, Hashable, CaseIterable
   /// `.planning` holds one for an instance: the base cannot be reclaimed out from under a build
   /// that has not finished cloning it yet. `ownerId` is the `ImageBuildID`.
   case build
+  /// Exactly one per managed-image track, on its currently promoted digest (`ImageUpdateService`,
+  /// phase D6). `ownerId` is `managed_images.name`. This is what makes a promoted image immune to
+  /// `image.prune` while it is the answer a profile's registry tag resolves to.
+  case managed
+  /// Held on each superseded digest a track still retains (`images.updates.keepPrevious`).
+  /// `ownerId` is `managed_images.name`, so one track can hold several of these at once; dropping
+  /// the pin is what makes a digest past the retention count deletable.
+  case managedPrevious = "managed-previous"
 }
 
 /// `image_builds.from_kind` (`docs/db_schema_v2.sql`).

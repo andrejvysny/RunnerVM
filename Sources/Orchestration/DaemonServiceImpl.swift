@@ -29,6 +29,9 @@ actor DaemonServiceImpl: DaemonService {
   /// M1-M5 test harness, and a `list(states:)` query filtered at the database is cheaper than
   /// decoding every `BuildInfoDTO` just to count two buckets.
   let imageBuildRows: any ImageBuildRepository
+  /// `managed_images`. Read directly, not through `updates`, so `image.update.status` and the
+  /// `Updates` block in `system.status` answer even on a daemon with no update service wired in.
+  let managedRows: any ManagedImageRepository
   let audit: any AuditRepository
   let images: ImageManager
   let instances: InstanceManager
@@ -55,6 +58,9 @@ actor DaemonServiceImpl: DaemonService {
   /// `nil` until Phase 5 wires the image builder in; the five `image.build`/`build.*` methods
   /// answer `ImageBuildError.unavailable` until then.
   let builder: (any ImageBuildService)?
+  /// `nil` in the unit-test wiring that only exercises the M1-M5 surface; `image.update.check`
+  /// and `image.update.run` then answer `IMAGE_UPDATES_UNAVAILABLE`.
+  let updates: ImageUpdateService?
   let logger: Logger
 
   /// Set by `DaemonRuntime` once it owns both halves. `nil` means nothing can stop the process,
@@ -75,7 +81,8 @@ actor DaemonServiceImpl: DaemonService {
     runnerVersions: RunnerVersionMonitor, runners: RunnerSessionManager,
     orchestrator: Orchestrator? = nil, metrics: MetricRegistry = MetricRegistry(),
     registryCredentials: RegistryCredentials = RegistryCredentials(),
-    eventLog: LifecycleEventLog? = nil, builder: (any ImageBuildService)? = nil, logger: Logger
+    eventLog: LifecycleEventLog? = nil, builder: (any ImageBuildService)? = nil,
+    updates: ImageUpdateService? = nil, logger: Logger
   ) {
     self.paths = paths
     self.hostId = hostId
@@ -86,6 +93,7 @@ actor DaemonServiceImpl: DaemonService {
     self.imageRows = GRDBImageRepository(db: database)
     self.instanceRows = GRDBInstanceRepository(db: database)
     self.imageBuildRows = GRDBImageBuildRepository(db: database)
+    self.managedRows = GRDBManagedImageRepository(db: database)
     // Every audit row is mirrored into `logs/events.jsonl` by the decorator, so the two can never
     // disagree about what an operator did.
     let auditRows = GRDBAuditRepository(db: database)
@@ -95,6 +103,7 @@ actor DaemonServiceImpl: DaemonService {
     self.audit = audit
     self.eventLog = eventLog
     self.builder = builder
+    self.updates = updates
     self.images = images
     self.instances = instances
     self.supervisor = supervisor
@@ -160,6 +169,7 @@ actor DaemonServiceImpl: DaemonService {
     await gateway.updateConfiguration(appliedConfig)
     await orchestrator?.updateConfiguration(appliedConfig)
     await builder?.updateConfiguration(appliedConfig)
+    await updates?.updateConfiguration(appliedConfig)
   }
 
   private static func read(_ url: URL) throws -> String {
@@ -223,7 +233,8 @@ actor DaemonServiceImpl: DaemonService {
       diskPressure: DiskPressureSummary(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes,
         state: pressure.state.rawValue),
-      builds: await buildsSummary())
+      builds: await buildsSummary(),
+      updates: await updateTracks())
   }
 
   /// Profile ids by name, for the API surfaces that take a profile name.
@@ -276,6 +287,9 @@ actor DaemonServiceImpl: DaemonService {
     await gateway.updateConfiguration(config)
     await orchestrator?.updateConfiguration(config)
     await builder?.updateConfiguration(config)
+    // Before `retireOutdatedReusable`: a profile that now names a tracked reference has to have
+    // its row before the retirement pass resolves that reference through it.
+    await updates?.updateConfiguration(config)
     // Spec §138: a profile whose image now resolves to a different digest retires the reusable
     // VMs still on the old one. Running instances keep their image identity either way.
     _ = await instances.retireOutdatedReusable()
