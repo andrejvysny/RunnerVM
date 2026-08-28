@@ -1,0 +1,33 @@
+#!/bin/bash
+# RunnerVM installer postinstall: verify the shipped vmworker's signature and virtualization
+# entitlement. This is a check only -- it never signs or re-signs anything. Signing happens once,
+# at build time (scripts/build-package.sh), off the target host; see
+# docs/design/distribution.md "Unsigned phase" and "Package layout".
+#
+# Runs as root, installed by pkgbuild's --scripts dir (packaging/pkg/scripts). A failure here
+# means the shipped binary is corrupt or was tampered with in transit/at rest -- the installer
+# already copied the files, but this refuses to let the install be considered trustworthy.
+set -euo pipefail
+
+VMWORKER="/usr/local/libexec/runnervm/vmworker"
+
+if [ ! -f "$VMWORKER" ]; then
+    echo "error: $VMWORKER not found after install" >&2
+    exit 1
+fi
+
+if ! codesign --verify --strict "$VMWORKER" 2>/dev/null; then
+    echo "error: $VMWORKER failed codesign --verify --strict." >&2
+    echo "The package is corrupt or was tampered with. Do not start runnerd; re-download the" >&2
+    echo "release from https://github.com/andrejvysny/RunnerVM/releases and reinstall." >&2
+    exit 1
+fi
+
+if ! codesign -d --entitlements :- "$VMWORKER" 2>&1 | grep -q com.apple.security.virtualization; then
+    echo "error: $VMWORKER is missing the com.apple.security.virtualization entitlement." >&2
+    echo "The package was built incorrectly. Do not start runnerd; re-download the release from" >&2
+    echo "https://github.com/andrejvysny/RunnerVM/releases and reinstall." >&2
+    exit 1
+fi
+
+exit 0

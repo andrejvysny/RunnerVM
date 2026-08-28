@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+RunnerVM installer distribution definition (see docs/design/distribution.md, "Package layout").
+Static on purpose: the version lives on the component pkg (pkgbuild's version flag, set by
+scripts/build-package.sh from Sources/RunnerCore/Version.swift), not here.
+
+arm64 only, macOS 15+ only: RunnerVM needs Apple Virtualization.framework and the hardware this
+milestone targets is Apple Silicon exclusively (no Intel build exists).
+-->
+<installer-gui-script minSpecVersion="1">
+    <title>RunnerVM</title>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <domains enable_localSystem="true"/>
+    <allowed-os-versions>
+        <os-version min="15.0"/>
+    </allowed-os-versions>
+    <choices-outline>
+        <line choice="com.runnervm.pkg"/>
+    </choices-outline>
+    <choice id="com.runnervm.pkg" visible="false">
+        <pkg-ref id="com.runnervm.pkg"/>
+    </choice>
+    <pkg-ref id="com.runnervm.pkg" onConclusion="none">RunnerVM-component.pkg</pkg-ref>
+</installer-gui-script>

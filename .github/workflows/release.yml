@@ -1,0 +1,84 @@
+name: release
+# Tag-triggered release: builds the RunnerVM macOS pkg, proves it actually installs and runs on a
+# clean macos-15 runner, then publishes it as a GitHub release. See docs/design/distribution.md
+# ("Release artifacts and manifest", "Unsigned phase") for the contract this implements, and
+# docs/release.md for the operator-facing version-bump procedure that produces the tag this
+# workflow reacts to.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, install-smoke-test and publish RunnerVM pkg
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+          swift --version
+
+      # Sources/RunnerCore/Version.swift is the single source of truth (docs/design/distribution.md
+      # "Version source of truth"); a tag that disagrees with it is a release-process bug, not
+      # something to silently reconcile.
+      - name: Assert tag matches Sources/RunnerCore/Version.swift
+        run: |
+          version="$(grep -E 'public static let current' Sources/RunnerCore/Version.swift \
+            | sed -E 's/.*"([^"]*)".*/\1/')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "error: tag '$GITHUB_REF_NAME' does not match Sources/RunnerCore/Version.swift" >&2
+            echo "       (RunnerVMVersion.current = '$version', expected tag 'v$version')" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches RunnerVMVersion.current"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: GuestAgent/go.mod
+
+      - name: Build package
+        run: bash scripts/build-package.sh --version "${GITHUB_REF_NAME#v}" --out dist
+
+      - name: Install package
+        run: sudo installer -pkg dist/RunnerVM-macos-arm64.pkg -target /
+
+      - name: Verify installed runnerctl
+        run: /usr/local/bin/runnerctl --version | grep -q "${GITHUB_REF_NAME#v}"
+
+      - name: Verify installed vmworker signature
+        run: codesign --verify --strict /usr/local/libexec/runnervm/vmworker
+
+      - name: Verify installed vmworker entitlement
+        run: |
+          codesign -d --entitlements :- /usr/local/libexec/runnervm/vmworker 2>&1 \
+            | grep -q com.apple.security.virtualization
+
+      - name: Installed vmworker probe
+        run: /usr/local/libexec/runnervm/vmworker probe --json
+
+      - name: Verify installed VERSION file
+        run: test -f "/usr/local/share/runnervm/VERSION"
+
+      - name: Verify package checksum
+        working-directory: dist
+        run: shasum -a 256 -c ./*.sha256
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/RunnerVM-macos-arm64.pkg \
+            dist/RunnerVM-macos-arm64.pkg.sha256 \
+            dist/release-manifest.json \
+            --title "RunnerVM $GITHUB_REF_NAME" \
+            --generate-notes
+          # TODO(D4): upload install.sh once scripts/bootstrap.sh (published as install.sh) exists,
+          # so the curl-fsSL-from-latest-release one-liner in docs/design/distribution.md works.

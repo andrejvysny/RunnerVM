@@ -22,8 +22,8 @@ manual `runnerctl upgrade`. Version source of truth becomes `RunnerVMVersion.cur
       `Version.swift`, `runnerctl --version`, atomic token write, doctor `skip` status +
       service-mode/filevault/reboot-persistence checks, launchd README tier flip, dscl-only
       service account in install.sh
-- [ ] D2 pkg: `scripts/build-package.sh`, `packaging/pkg/`, release-manifest.json, tests
-- [ ] D3 `.github/workflows/release.yml` (tag == RunnerVMVersion gate, pkg install smoke, gh release)
+- [x] D2 pkg: `scripts/build-package.sh`, `packaging/pkg/`, release-manifest.json, tests
+- [x] D3 `.github/workflows/release.yml` (tag == RunnerVMVersion gate, pkg install smoke, gh release)
 - [ ] D4 `scripts/bootstrap.sh` (published as install.sh) + `Sources/HostSetup` + `runnerctl setup`
       (wizard, dscl account, launchd, PAT, pull, profiles-last flow, dry-run) + tests
 - [ ] D5 publish-images.yml (self-hosted) + docs; first `ubuntu-24-base:stable` publish = user step

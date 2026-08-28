@@ -423,9 +423,12 @@ check_socket_path_lengths "$RUNTIME_DIR"
 if [ -n "$PREBUILT_DIR" ]; then
     log "using prebuilt artifacts from $PREBUILT_DIR (skipping swift build)"
 else
-    step "swift build -c release (runnerd, runnerctl, vmworker)" \
-        env -C "$REPO_ROOT" swift build -c release \
-        --product runnerd --product runnerctl --product vmworker
+    # One invocation per product: SwiftPM keeps only the LAST --product flag when the flag is
+    # repeated, so the old single call silently built vmworker alone.
+    for product in runnerd runnerctl vmworker; do
+        step "swift build -c release --product $product" \
+            env -C "$REPO_ROOT" swift build -c release --product "$product"
+    done
 fi
 
 # --------------------------------------------------------------------------
