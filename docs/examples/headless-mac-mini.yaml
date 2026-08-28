@@ -1,18 +1,23 @@
 # RunnerVM — blackpen (olympics-Mac-mini, Apple M4, 10 cores, 32 GiB RAM)
 #
-# Sized for the deployment goal: exercise autoscaling and parallel VMs.
-# Disk is the binding constraint. Instance disk reservation is
-# max(profile.resources.disk, image.virtualBytes) and the shipped ubuntu-24
-# image carries a 16 GiB disk layer, so every instance reserves 16 GiB no
-# matter what the profile asks for. ~67 GiB free - 4 GiB floor => 3 concurrent.
+# Sized for one Linux runner at a time (2026-08-28). Disk is the binding
+# constraint: instance disk reservation is max(profile.resources.disk,
+# image.virtualBytes) and the shipped ubuntu-24 image carries a 16 GiB disk
+# layer, so every instance reserves 16 GiB no matter what the profile asks for.
+#
+# A macOS profile is deliberately NOT here. A macOS guest cannot resize its APFS
+# container, so its reservation is the image's entire 50 GB virtual disk; with
+# the 30 GiB image stored this host would need ~48 GiB free for one macOS guest
+# alone and ~65 GiB to run one beside the Ubuntu one. It has 62 GiB free and
+# ~8.5 GiB reclaimable. See docs/verification.md, "Mac mini deployment".
 version: 1
 
 host:
   reserve:
-    cpu: 2          # 10 logical - 2 => 8 vCPU budget => 4x 2-vCPU guests
+    cpu: 2          # 10 logical - 2 => 8 vCPU budget
     memory: 6GiB    # 32 - 6 => 26 GiB budget
     disk: 4GiB      # absolute free-space floor
-  maxVMs: 3         # disk-bound: 3 x 16 GiB + 4 GiB floor = 52 GiB of ~67 GiB free
+  maxVMs: 1         # one runner at a time on this host
 
 github:
   demand: scaleSet
@@ -58,11 +63,11 @@ profiles:
     image: ubuntu-24
     lifecycle: ephemeral
     resources:
-      cpu: 2
-      memory: 4GiB
-      disk: 16GiB
+      cpu: 4          # the only guest, so give it more than the 2/4GiB used when 3 ran
+      memory: 8GiB
+      disk: 16GiB     # must be >= the image's 16 GiB disk layer
     limits:
-      maxInstances: 3
+      maxInstances: 1
     ssh:
       enabled: true
     timeouts:
