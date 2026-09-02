@@ -1,5 +1,5 @@
 {
-  "originHash" : "f5d26a5139a1585d904635039bec462ded199c6dcf2853743d7ee620cd10c1ec",
+  "originHash" : "ae5ce986bd4f925ec3b37ebaa6acb127619510507e75ffb9607b7fd766df18c5",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/jpsim/Yams",
       "state" : {
-        "revision" : "3d6871d5b4a5cd519adf233fbb576e0a2af71c17",
-        "version" : "5.4.0"
+        "revision" : "a27b21e0c81c5bf42049b897a62aaf387e80f279",
+        "version" : "6.2.2"
       }
     }
   ],
