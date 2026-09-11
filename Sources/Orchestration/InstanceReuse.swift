@@ -164,7 +164,7 @@ extension InstanceManager {
     let timeout = profile.effectiveTimeouts.cleanup
     do {
       try await withDeadline(timeout) { [self] in
-        try await runCleanup(cleaning, session: session)
+        try await runCleanup(cleaning, session: session, profile: profile)
       }
     } catch {
       let runnerError = error as? any RunnerError
@@ -203,11 +203,15 @@ extension InstanceManager {
 
   /// Spec §9.2 cleanup list, then the three proofs the VM is still the one we booted: the agent
   /// is ready, the guest did not reboot, and the root filesystem still has room.
-  private func runCleanup(_ record: InstanceRecord, session: RunnerSessionID) async throws {
+  private func runCleanup(
+    _ record: InstanceRecord, session: RunnerSessionID, profile: RunnerProfileConfig
+  ) async throws {
     let client = try await agentClient(record.id)
     // Best effort: the happy path reaches here because the runner already exited.
     _ = try? await client.stopRunner(
-      StopRunnerRequest(sessionId: session.rawValue, graceMs: tuning.gracefulShutdownMs))
+      StopRunnerRequest(
+        sessionId: session.rawValue,
+        graceMs: profile.effectiveTimeouts.gracefulShutdown.milliseconds))
     // `epoch` is `jobs_consumed` after this session's increment, so a retry of the same session
     // replays the same epoch and the agent answers it as a no-op.
     let cleanup = try await client.cleanup(epoch: Int64(record.jobsConsumed))
@@ -289,31 +293,13 @@ extension InstanceManager {
     // The directory is the evidence, not the VM: keep the former, take the latter down so a failed
     // session does not keep a booted guest burning cpu/memory for the whole retention window
     // (seen live: an `interrupted` row with its vmworker still running).
-    try? await supervisor.shutdown(
-      id: record.id, reason: .stop, gracefulTimeoutMs: tuning.gracefulShutdownMs)
-    _ = await waitForWorkerExit(id: record.id)
+    let graceMs = await gracefulShutdownMs(for: record)
+    try? await supervisor.shutdown(id: record.id, reason: .stop, gracefulTimeoutMs: graceMs)
+    _ = await waitForWorkerExit(id: record.id, graceMs: graceMs)
   }
 
   static func seconds(_ value: DurationValue) -> Double {
     let parts = value.duration.components
     return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
-  }
-}
-
-/// Races `body` against the cleaning deadline (`timeouts.cleanup`, spec §73). A guest that hangs
-/// mid-cleanup must not park the VM in `cleaning` forever.
-func withDeadline<T: Sendable>(
-  _ timeout: DurationValue, _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-  guard timeout.isPositive else { return try await body() }
-  return try await withThrowingTaskGroup(of: T.self) { group in
-    group.addTask { try await body() }
-    group.addTask {
-      try await Task.sleep(for: timeout.duration)
-      throw ReuseFailure.timedOut(timeout)
-    }
-    defer { group.cancelAll() }
-    guard let first = try await group.next() else { throw ReuseFailure.timedOut(timeout) }
-    return first
   }
 }

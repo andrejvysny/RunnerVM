@@ -62,6 +62,15 @@ public struct GitHubCredential: Sendable, CustomStringConvertible, CustomDebugSt
 /// PAT to a GitHub App touches nothing but wiring.
 public protocol GitHubCredentialProvider: Sendable {
   func credential() async throws -> GitHubCredential
+
+  /// Drops whatever is cached so the next `credential()` fetches a fresh one. A 401 is the only
+  /// reliable signal that GitHub revoked or rotated a token early (spec §12).
+  func invalidate() async
+}
+
+public extension GitHubCredentialProvider {
+  /// A provider that holds no cache has nothing to drop: a PAT that is rejected stays rejected.
+  func invalidate() async {}
 }
 
 /// A credential that is already in hand. Used for the app JWT leg of the App flow and in tests.

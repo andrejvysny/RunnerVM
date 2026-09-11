@@ -13,11 +13,22 @@ public struct ReleaseManifest: Codable, Sendable, Hashable {
   public var version: String
   public var architecture: String
   public var minimumMacOS: String
-  /// The pkg asset's file name, e.g. `RunnerVM-macos-arm64.pkg`.
+  /// The pkg asset's file name, e.g. `RunnerVM-macos-arm64.pkg`. Validated on decode: it is
+  /// appended to a URL and handed to `installer`, so it may not be an arbitrary string.
   public var package: String
   /// 64 lowercase hex characters.
   public var sha256: String
+  /// A Developer ID Installer signature was present when the release was built.
   public var signed: Bool
+  /// The Apple Team ID that signed the release, `""` on an unsigned build.
+  ///
+  /// A claim, never a reference. It travels in the same document as the package it describes, so
+  /// anyone who can publish a manifest can publish this field; the install-side gate compares the
+  /// signature's own team against `RunnerVMSigning.expectedTeamID` and ignores this value.
+  public var teamId: String
+  /// The release was stapled with a notary ticket when it was built. Same status as `teamId`: it
+  /// is what `--check` reports, not what `upgrade` decides on.
+  public var notarized: Bool
   public var license: String
 
   public init(
@@ -27,6 +38,8 @@ public struct ReleaseManifest: Codable, Sendable, Hashable {
     package: String,
     sha256: String,
     signed: Bool = false,
+    teamId: String = "",
+    notarized: Bool = false,
     license: String = "Apache-2.0"
   ) {
     self.version = version
@@ -35,31 +48,109 @@ public struct ReleaseManifest: Codable, Sendable, Hashable {
     self.package = package
     self.sha256 = sha256
     self.signed = signed
+    self.teamId = teamId
+    self.notarized = notarized
     self.license = license
   }
 
   private enum CodingKeys: String, CodingKey {
-    case version, architecture, minimumMacOS, package, sha256, signed, license
+    case version, architecture, minimumMacOS, package, sha256, signed, teamId, notarized, license
   }
 
+  /// Deliberately more lenient than `bootstrap.sh`, which hard-fails on a missing `architecture`,
+  /// `minimumMacOS` or `signed`. The asymmetry is not an oversight and should not be "fixed" on
+  /// either side: bash only ever reads a manifest it has just downloaded from a current release,
+  /// while this decoder also reads manifests cached on disk by *older* releases -- including the
+  /// one a rollback reads to find the previous package's file name, which predates keys that did
+  /// not exist when it was written. Only the fields an installer cannot proceed without
+  /// (`version`, `package`, `sha256`) are required here; the rest fall back to what a release
+  /// built before that key existed meant.
   public init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
+    let package = try c.decode(String.self, forKey: .package)
+    try ReleaseManifest.validate(packageName: package)
+    let version = try c.decode(String.self, forKey: .version)
+    try ReleaseManifest.validate(version: version)
     self.init(
-      version: try c.decode(String.self, forKey: .version),
+      version: version,
       architecture: try c.decodeIfPresent(String.self, forKey: .architecture) ?? "arm64",
       minimumMacOS: try c.decodeIfPresent(String.self, forKey: .minimumMacOS) ?? "15.0",
-      package: try c.decode(String.self, forKey: .package),
+      package: package,
       sha256: try c.decode(String.self, forKey: .sha256),
       // A release published before the key existed was unsigned; that is the safe default,
       // because it makes `upgrade` warn rather than silently skip the warning.
       signed: try c.decodeIfPresent(Bool.self, forKey: .signed) ?? false,
+      teamId: try c.decodeIfPresent(String.self, forKey: .teamId) ?? "",
+      notarized: try c.decodeIfPresent(Bool.self, forKey: .notarized) ?? false,
       license: try c.decodeIfPresent(String.self, forKey: .license) ?? "Apache-2.0")
+  }
+
+  /// `^[A-Za-z0-9._-]+\.pkg$`, plus no leading `-`: the same rule `bootstrap.sh`'s
+  /// `verify_pkg_name` enforces, because the two installers must refuse the same documents.
+  ///
+  /// The name is appended to a release URL, written into the cache directory and passed to
+  /// `installer` as an argument, so `../`, a shell metacharacter or a leading dash in it is not a
+  /// cosmetic problem. Refused at decode, which is before the download: a name this host will not
+  /// install is not something to discover after `curl` has already written it somewhere.
+  public static func validate(packageName name: String) throws {
+    guard !name.isEmpty else {
+      throw UpgradeError.manifestInvalid(detail: "'package' is empty")
+    }
+    guard !name.hasPrefix("-") else {
+      throw UpgradeError.manifestInvalid(
+        detail: "'package' '\(name)' must not start with '-'")
+    }
+    guard name.hasSuffix(".pkg"), name.count > ".pkg".count else {
+      throw UpgradeError.manifestInvalid(detail: "'package' '\(name)' does not end in .pkg")
+    }
+    guard name.allSatisfy({ character in
+      character.isASCII
+        && (character.isLetter || character.isNumber || character == "." || character == "_"
+          || character == "-")
+    }) else {
+      throw UpgradeError.manifestInvalid(
+        detail: "'package' '\(name)' contains characters outside [A-Za-z0-9._-]")
+    }
+  }
+
+  /// `version` names the cache directory (`upgrades/<version>/`) and rides on the `curl -o` and
+  /// `spctl` command lines, so it is held to the same "plain token" rule as the package name:
+  /// `MAJOR.MINOR.PATCH` with an optional dot/dash/alphanumeric prerelease suffix.
+  ///
+  /// The digit tests are `isASCII && isNumber`, not `isNumber` alone: `Character.isNumber` is true
+  /// for every Unicode decimal digit, so `١.٢.٣` would pass here and fail `bootstrap.sh`'s
+  /// `*[!0-9]*` glob -- and a rule the two installers apply differently is not a rule.
+  public static func validate(version: String) throws {
+    let parts = version.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+    let core = parts[0].split(separator: ".", omittingEmptySubsequences: false)
+    guard core.count == 3, core.allSatisfy({ field in
+      !field.isEmpty && field.allSatisfy { $0.isASCII && $0.isNumber }
+    }) else {
+      throw UpgradeError.manifestInvalid(detail: "'version' '\(version)' is not MAJOR.MINOR.PATCH")
+    }
+    if parts.count == 2 {
+      let suffix = parts[1]
+      guard !suffix.isEmpty, suffix.allSatisfy({ character in
+        character.isASCII
+          && (character.isLetter || character.isNumber || character == "." || character == "-")
+      }) else {
+        throw UpgradeError.manifestInvalid(
+          detail: "'version' '\(version)' has a prerelease suffix outside [0-9A-Za-z.-]")
+      }
+    }
+  }
+
+  /// What the manifest *claims* about its own package, for `--check` and the ladder. Never a
+  /// verification: `Upgrader.signatureStep` reads the package's actual signature on this host.
+  public var signingClaim: String {
+    guard signed else { return "unsigned" }
+    let team = teamId.isEmpty ? "team not stated" : teamId
+    return "\(notarized ? "signed+notarized" : "signed, not notarized") (\(team))"
   }
 
   /// The one-line summary `--check` and the pre-drain confirmation both print.
   public var summary: String {
-    "\(version) (\(package), \(architecture), macOS \(minimumMacOS)+, "
-      + "\(signed ? "signed" : "unsigned"))"
+    "\(version) (\(package), \(architecture), macOS \(minimumMacOS)+, \(signingClaim))"
   }
 
   public static func decode(_ json: String) throws -> ReleaseManifest {
@@ -68,6 +159,10 @@ public struct ReleaseManifest: Codable, Sendable, Hashable {
     }
     do {
       return try JSONDecoder().decode(ReleaseManifest.self, from: data)
+    } catch let error as UpgradeError {
+      // The package-name rule raises its own message; wrapping it in a decoding error would bury
+      // the one sentence that says what is wrong with the release.
+      throw error
     } catch {
       throw UpgradeError.manifestInvalid(detail: "\(error)")
     }
@@ -140,13 +235,18 @@ public struct ReleaseSource: Sendable, Hashable {
     return ReleaseSource(baseURL: "https://github.com/\(repository)/releases/download/\(tag)")
   }
 
-  /// `--version` when given, `RUNNERVM_PKG_URL` when set (the same operator seam `bootstrap.sh`
-  /// exposes, for a mirror or a local `file://` directory), else `latest`.
+  /// `RUNNERVM_PKG_URL` when set (the same operator seam `bootstrap.sh` exposes, for a mirror or
+  /// a local `file://` directory), else `--version` when given, else `latest`.
+  ///
+  /// The override wins because it is the more specific instruction -- an operator who points this
+  /// host at a mirror means that mirror, tag or no tag -- and because `bootstrap.sh` has always
+  /// resolved it that way. Two installers that disagree about where a release comes from is the
+  /// kind of difference that only shows up on the host that has both set.
   public static func resolve(
     version: String?, overrideURL: String? = nil, repository: String = defaultRepository
   ) -> ReleaseSource {
-    if let version, !version.isEmpty { return .tagged(version, repository: repository) }
     if let overrideURL, !overrideURL.isEmpty { return ReleaseSource(baseURL: overrideURL) }
+    if let version, !version.isEmpty { return .tagged(version, repository: repository) }
     return .latest(repository: repository)
   }
 
@@ -165,6 +265,8 @@ public enum UpgradeError: RunnerError {
   case manifestInvalid(detail: String)
   case platformUnsupported(detail: String)
   case checksumMismatch(detail: String)
+  /// Signed by a Developer ID this build is not pinned to. Deliberately has no override.
+  case signatureRejected(found: String, expected: String)
   case declined(step: String)
   case notRoot
 
@@ -174,6 +276,7 @@ public enum UpgradeError: RunnerError {
     case .manifestInvalid: "UPGRADE_MANIFEST_INVALID"
     case .platformUnsupported: "UPGRADE_PLATFORM_UNSUPPORTED"
     case .checksumMismatch: "UPGRADE_CHECKSUM_MISMATCH"
+    case .signatureRejected: "UPGRADE_SIGNATURE_REJECTED"
     case .declined: "UPGRADE_DECLINED"
     case .notRoot: "UPGRADE_NOT_ROOT"
     }
@@ -189,6 +292,9 @@ public enum UpgradeError: RunnerError {
       "\(detail); nothing was installed"
     case let .checksumMismatch(detail):
       "\(detail); nothing was installed"
+    case let .signatureRejected(found, expected):
+      "the package is signed by Apple Team \(found), not \(expected), the publisher this build "
+        + "of RunnerVM is pinned to; nothing was installed"
     case let .declined(step):
       "aborted at \(step); nothing was changed"
     case .notRoot:

@@ -70,9 +70,12 @@ What the pkg must **not** do:
 - create or download an image disk;
 - create the `_runnervm` account (that is `runnerctl setup`'s job, via `dscl`, from `HostSetup/ServiceAccountManager.swift`).
 
-`postinstall` does exactly one thing: verify the shipped `vmworker`'s ad-hoc signature and
-entitlement (`codesign --verify`, entitlement plist check). It never signs or re-signs anything —
-signing happens once, at build time, off the target host.
+`postinstall` does exactly one thing: verify what was just installed. Every shipped Mach-O
+(`runnerd`, `runnerctl`, `vmworker`, the darwin guest agent) must pass `codesign --verify --strict`;
+on a signed release it must additionally satisfy a publisher requirement pinned to our team and
+carry the hardened runtime; `vmworker` must carry `com.apple.security.virtualization`. It never
+signs or re-signs anything — signing happens once, at build time, off the target host. See
+"Signing and notarization" for the team-id templating that decides which of those checks run.
 
 ## Release artifacts and manifest
 
@@ -95,13 +98,28 @@ Each GitHub release (`gh release create "$TAG" dist/*`) carries:
   "package": "RunnerVM-macos-arm64.pkg",
   "sha256": "…64 hex chars…",
   "signed": false,
+  "teamId": "",
+  "notarized": false,
   "license": "Apache-2.0"
 }
 ```
 
+The key set is **constant**: `teamId` is `""` and `notarized` is `false` on an unsigned build
+rather than absent, so every consumer parses one shape. `signed` means a Developer ID Installer
+signature is present on the pkg (`pkgutil --check-signature` says so — not "the build was asked to
+sign"), `teamId` is the Apple Team ID read back out of the shipped `vmworker`'s own signature, and
+`notarized` means a notarization ticket was stapled and `stapler validate` accepted it. The
+manifest is a *description* of the artifact, never the reference an installer trusts: the install
+side checks the pkg itself and compares the leaf team against a compiled-in constant.
+
 `install.sh` and `runnerctl upgrade` both read this file to decide download URLs, and both abort
 before touching the host if `architecture`/`minimumMacOS` do not match, or if the fetched
 `.sha256` does not match the fetched pkg.
+
+`package` must match `^[A-Za-z0-9._-]+\.pkg$` — a plain filename, never a path: no `/`, no leading
+`-` (which a shell could parse as a flag), and it must end in `.pkg`. `install.sh` (`verify_pkg_name`),
+`scripts/build-package.sh` (`assert_pkg_name_valid`, checked before the manifest is written) and the
+Swift `ReleaseManifest` decoder all enforce this constraint independently.
 
 ## Service account
 
@@ -258,6 +276,7 @@ reverse a schema migration automatically.
 | Manifest/pkg/checksum download failure | Aborts before any host change; host is left exactly as it was |
 | Checksum mismatch | Aborts before `installer -pkg` runs; host untouched |
 | pkg install failure (upgrade path) | Existing install is kept; no partial swap |
+| Revoked/rotated GitHub App installation token | The next **idempotent** request sees the 401, drops the cached token once (at most once per `authRefreshInterval`, 60 s) and retries with a freshly minted one; no `config.apply` and no restart. Non-idempotent calls (`generate-jitconfig`) surface the 401 instead of repeating a runner registration |
 | GitHub auth failure (`github test` after PAT write) | Daemon stays installed and running, but is not schedulable; `setup` exits non-zero with the exact permission text needed |
 | Image update (Linux tag) failure | Previous image and alias untouched; `last_error` recorded, retried on the next check |
 | macOS provisioning/qualification failure | Candidate is discarded or left unpromoted; the managed alias is **never** repointed at an unqualified digest |
@@ -265,20 +284,102 @@ reverse a schema migration automatically.
 | `runnerd` crash | `launchd` restarts it (`KeepAlive`); in-flight sessions are recovered or closed out at-most-once on the next reconcile |
 | Reboot | The daemon comes back under `launchd` with no GUI login required — this is the point of running it as a LaunchDaemon under `_runnervm` |
 
-## Unsigned phase
+## Signing and notarization
 
-The pkg is **unsigned** for this milestone; `vmworker` is **ad-hoc signed** at build time
-(`scripts/build-package.sh`, `codesign --sign -` with `Resources/vmworker.entitlements`) as a
-release/build responsibility — the target host never re-signs it; `postinstall` only verifies the
-signature and entitlement already present in the shipped binary.
+### What is signed
 
-`install.sh` and `runnerctl upgrade` print an explicit unsigned-package warning to `/dev/tty` and
-require confirmation (or `RUNNERVM_ALLOW_UNSIGNED=1` for non-interactive use) before installing.
-The published `sha256` protects the download against **corruption and tampering in transit**
-(a truncated download, a bit-flipped mirror) — it does not prove who built the package, since
-anyone who can edit the release can regenerate a matching checksum. Verifying publisher identity
-requires code signing, which this phase does not yet provide.
+`scripts/build-package.sh` signs **four Mach-O files**, on the staged copies (a `cp`/`install` can
+strip a signature, so the file that goes into the pkg is the one that must be proven signed):
 
-Apple Developer ID signing and notarization are a later, separate milestone. They change nothing
-about the curl UX above — the same one-liner keeps working — they only remove the unsigned warning
-and let Gatekeeper vouch for the pkg without an operator override.
+| File | Code-signing identifier | Extra |
+| --- | --- | --- |
+| `libexec/runnervm/runnerd` | `com.runnervm.runnerd` | — |
+| `bin/runnerctl` | `com.runnervm.runnerctl` | — |
+| `libexec/runnervm/vmworker` | `com.runnervm.vmworker` | `Resources/vmworker.entitlements`, then a real `probe --json` |
+| `share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent` | `com.runnervm.guest-agent` | — |
+
+The darwin guest agent is signed even though nothing on the host executes it directly: the Go
+linker leaves it ad-hoc signed as `Identifier=a.out`, and Apple's notary service scans **every**
+Mach-O in the payload, so leaving it alone fails the whole submission. The Linux guest agent is an
+ELF and is deliberately not signed. `--identifier` is explicit on all four because codesign
+otherwise derives an identifier from the file name plus a per-build hash — unstable across builds,
+and therefore useless to pin a `codesign -R` requirement against.
+
+Every signature is made with `--options runtime --timestamp`, **unconditionally**, ad-hoc dev
+builds included. Ad-hoc signing accepts both flags (an ad-hoc signature simply carries no
+timestamp), so a developer's `build-package.sh` run exercises exactly the hardened runtime
+configuration a release does; notarization requires the hardened runtime, and discovering that it
+breaks a binary at release time — on a configuration nothing else ever ran — is the failure mode
+this avoids.
+
+The pkg itself is signed by `productbuild --sign` with a Developer ID **Installer** identity. That
+is sufficient on its own: no `pkgbuild --sign`, no `productsign` pass.
+
+### Notarization and stapling
+
+A release build additionally passes `--notarize-key/--notarize-key-id/--notarize-issuer` (required
+together, refused without `--installer-identity`, refused with an ad-hoc `--sign-identity -`). The
+built pkg is submitted with `notarytool submit --wait --timeout 30m`; any verdict other than
+`Accepted` prints `notarytool log` and fails the build. There is no fallback to publishing an
+unsigned or unnotarized pkg.
+
+`stapler staple` then embeds the ticket so a host that cannot reach Apple still gets a verdict, and
+`stapler validate` confirms it. Ordering is load-bearing: **stapling rewrites the pkg**, so the
+signature re-verification (`pkgutil --check-signature`, `spctl --assess --type install`), the
+`sha256` and the manifest all come *after* it. A checksum taken any earlier describes a file nobody
+will ever download.
+
+Verification uses the two tools a target host actually has — `/usr/sbin/pkgutil` and
+`/usr/sbin/spctl`; `notarytool` and `stapler` are Xcode-only and exist on the build machine alone.
+
+### The trust rule on the install side
+
+`curl` sets no quarantine attribute and `installer` performs no assessment, so nothing verifies the
+publisher unless the installers do it explicitly. They do, keyed on **notarization**, not on the
+manifest:
+
+- notarized **and** the pkg's leaf team equals the compiled-in expected team → proceed silently;
+- signed by a **different** team → hard failure, no override;
+- signed by our team but not notarized → warn and confirm;
+- unsigned → the unsigned-package warning and confirmation this project has always had.
+
+`RUNNERVM_ALLOW_UNSIGNED=1` still exists and still means one thing only: "do not block on a missing
+signature/notarization in a non-interactive install". It never permits a package signed by someone
+else — that case fails with no override, because the only reason to see it is that the artifact is
+not ours.
+
+The published `sha256` protects the download against **corruption and tampering in transit** (a
+truncated download, a bit-flipped mirror) — on its own it does not prove who built the package,
+since anyone who can edit the release can regenerate a matching checksum. That is what the
+signature and the ticket are for. Note also that `release-manifest.json`'s `teamId` is a
+description, never the reference: the expected team is compiled into the installers.
+
+### Postinstall templating
+
+`packaging/pkg/scripts/postinstall` is a **template**. `build-package.sh` copies
+`packaging/pkg/scripts` to a temporary directory, substitutes `@RUNNERVM_TEAM_ID@` with the team id
+derived from the staged `vmworker`'s own signature (empty for an ad-hoc build), `chmod 0755`s the
+copy and hands *that* to `pkgbuild --scripts`. The checked-in file is never modified by a build.
+
+The substituted value decides which checks run on the target host:
+
+- **empty** (dev/unsigned build): `codesign --verify --strict` on all four binaries plus the
+  `vmworker` entitlement check — ad-hoc installs keep working;
+- **a team id**: the above, plus `codesign --verify --strict -R '=anchor apple generic and
+  certificate leaf[subject.OU] = "<TEAM>"'` and a hardened-runtime flag check on each of the four.
+
+Anything else — an unsubstituted placeholder, a malformed value — fails the install rather than
+falling back to the weaker branch: a silently skipped publisher check is exactly what an attacker
+who repackaged the payload would want. (The team id is validated as `[A-Z0-9]{10}` when it is
+derived, which is also what makes substituting it into a `sed` expression and a `codesign -R`
+requirement safe.)
+
+### Certificates
+
+Two certificates, both created by the Account Holder: Developer ID **Application** (the four
+Mach-O files) and Developer ID **Installer** (the pkg). Signatures carry an Apple timestamp, so
+they stay valid after the certificate expires (5 years) — renew, and **never revoke**, or every
+already-published release stops installing. See `docs/release.md`, "One-time signing setup".
+
+`com.apple.security.virtualization` is a non-restricted entitlement: it needs no special
+provisioning profile and works under the hardened runtime with a Developer ID signature.

@@ -45,9 +45,11 @@ struct Harness {
 /// Builds a client bound to an in-process fake: no sockets, no sleeping, no randomness.
 func withHarness(
   token: String = Fixture.token,
+  credentials: (any GitHubCredentialProvider)? = nil,
   policy: RetryPolicy = Fixture.policy,
   maxRetryAfter: Duration = .seconds(120),
-  now: Date = Fixture.now,
+  authRefreshInterval: Duration = .seconds(60),
+  now: @escaping @Sendable () -> Date = { Fixture.now },
   observer: (any GitHubRequestObserver)? = nil,
   _ body: (Harness) async throws -> Void
 ) async throws {
@@ -56,18 +58,44 @@ func withHarness(
   let sleeps = SleepLog()
   let client = GitHubHTTPClient(
     baseURL: server.baseURL,
-    credentials: StaticCredentialProvider(token: token),
+    credentials: credentials ?? StaticCredentialProvider(token: token),
     session: server.makeSession(),
-    options: GitHubHTTPClient.Options(retryPolicy: policy, maxRetryAfter: maxRetryAfter),
+    options: GitHubHTTPClient.Options(
+      retryPolicy: policy, maxRetryAfter: maxRetryAfter, authRefreshInterval: authRefreshInterval
+    ),
     observer: observer,
     sleep: { sleeps.record($0) },
     // Pin jitter to its midpoint so the expected schedule is exact.
     random: { _ in 1.0 },
-    now: { now }
+    now: now
   )
   try await body(
     Harness(server: server, client: client, api: GitHubRunnersAPI(client: client), sleeps: sleeps)
   )
+}
+
+/// Hands out a scripted sequence of tokens and counts how often the client dropped one, so the
+/// 401 self-heal can be asserted without a real credential source.
+actor RecordingCredentialProvider: GitHubCredentialProvider {
+  private let tokens: [String]
+  private var index = 0
+  private(set) var invalidateCount = 0
+
+  init(tokens: [String]) {
+    self.tokens = tokens
+  }
+
+  /// The last token repeats forever, the way `FakeGitHubServer.stub` repeats its last reply.
+  func credential() -> GitHubCredential {
+    GitHubCredential(token: tokens[min(index, tokens.count - 1)], kind: .pat)
+  }
+
+  /// `async` for the same reason the App provider's is: a sync one loses overload resolution to
+  /// the protocol's no-op default at a direct call site.
+  func invalidate() async {
+    invalidateCount += 1
+    index += 1
+  }
 }
 
 /// Collects `GitHubRequestObserver` outcomes in call order.

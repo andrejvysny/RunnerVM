@@ -35,6 +35,9 @@ final class WorkerService {
     /// Grace lease granted at startup so runnerd has time to connect and start renewing.
     var initialLeaseTtlMs: Int64
     var hardDeadline: Date?
+    /// `vmworker run --graceful-ms`: the window the guest gets on a shutdown this process decides
+    /// on its own (hard deadline, orphan idle, SIGTERM), where no request carries one.
+    var gracefulShutdownMs: Int64 = 30_000
     var agentPort: UInt32 = HostConstants.guestAgentVsockPort
   }
 
@@ -61,7 +64,16 @@ final class WorkerService {
     self.server = RPCServer(
       protocol: .worker, socketPath: options.workerSocket, allowedUIDs: [getuid()])
     let port = options.agentPort
-    self.bridge = VsockBridge(socketPath: options.agentSocket) {
+    // The bridge is in VirtualizationCore, which has no logger of its own; a rejected peer is
+    // security-relevant enough that it must not be a silent `close(2)`.
+    let bridgeLogger = logger
+    self.bridge = VsockBridge(
+      socketPath: options.agentSocket,
+      onRejected: { uid in
+        bridgeLogger.warning(
+          "agent bridge rejected connection", metadata: ["peer_uid": .stringConvertible(uid)])
+      }
+    ) {
       try await runtime.connectToGuest(port: port)
     }
     self.vmState = runtime.state
@@ -205,6 +217,9 @@ final class WorkerService {
   private func performShutdown(gracefulTimeoutMs: Int64) async {
     timer?.cancel()
     timer = nil
+    // A guest that survived both stop paths may still hold its disk, so the exit code has to say
+    // so: runnerd must not read this as a clean stop.
+    var code = WorkerExitCode.clean
     if vmState != .stopped {
       let accepted = (try? runtime.requestStop()) ?? false
       logger.info("acpi stop", metadata: ["accepted": .stringConvertible(accepted)])
@@ -212,12 +227,11 @@ final class WorkerService {
       if vmState != .stopped {
         do { try await runtime.forceStop() } catch {
           logger.error("force stop failed", metadata: ["error": .string("\(error)")])
+          code = .vzStopFailed
         }
       }
     }
-    await teardown()
-    logger.info("exit", metadata: ["code": .stringConvertible(0)])
-    Foundation.exit(WorkerExitCode.clean.rawValue)
+    await abort(exitCode: code)
   }
 
   private func waitForStop(timeoutMs: Int64) async {
@@ -239,9 +253,18 @@ final class WorkerService {
     stopWaiters.removeValue(forKey: id)?.resume()
   }
 
+  /// Tears the process down and exits, from anywhere: a startup that never finished publishing is
+  /// as much a reason to unlink the sockets as a completed shutdown, otherwise runnerd keeps
+  /// finding a socket nobody serves. Every step tolerates a never-started server or bridge.
+  func abort(exitCode: WorkerExitCode) async -> Never {
+    await teardown()
+    logger.info("exit", metadata: ["code": .stringConvertible(exitCode.rawValue)])
+    Foundation.exit(exitCode.rawValue)
+  }
+
   /// Sockets are unlinked here rather than left to the accept threads, which may not be scheduled
   /// again before `exit(2)`.
-  private func teardown() async {
+  func teardown() async {
     bridge.stop()
     await server.stop()
     runtime.finishEvents()
@@ -274,9 +297,9 @@ final class WorkerService {
     case .none:
       break
     case .hardDeadline:
-      beginShutdown(reason: "hard-deadline", gracefulTimeoutMs: 30_000)
+      beginShutdown(reason: "hard-deadline", gracefulTimeoutMs: options.gracefulShutdownMs)
     case .orphanIdle:
-      beginShutdown(reason: "orphan-idle", gracefulTimeoutMs: 30_000)
+      beginShutdown(reason: "orphan-idle", gracefulTimeoutMs: options.gracefulShutdownMs)
     }
   }
 
@@ -286,7 +309,8 @@ final class WorkerService {
       let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
       source.setEventHandler {
         MainActor.assumeIsolated {
-          self.beginShutdown(reason: "signal-\(number)", gracefulTimeoutMs: 30_000)
+          self.beginShutdown(
+            reason: "signal-\(number)", gracefulTimeoutMs: self.options.gracefulShutdownMs)
         }
       }
       source.resume()

@@ -33,6 +33,11 @@ extension Orchestrator {
     await metrics.setGauge(
       RunnerVMMetrics.hostFreeDiskBytes, to: Double(Mapping.freeDiskBytes(at: paths.rootDir)))
     await refreshWorkerMetrics(pass, names: names)
+    // Same rule as `workerCPU`: the pass lists `deleted` rows too, and a row that reached `deleted`
+    // — or vanished entirely — can never be cancelled again, so its failure count must not outlive
+    // it. Without this the map grows for the life of the daemon.
+    let live = Set(pass.instances.filter { $0.state != .deleted }.map(\.id))
+    cancelFailures = cancelFailures.filter { live.contains($0.key) }
   }
 
   private func instanceGauges(

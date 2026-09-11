@@ -23,6 +23,7 @@ actor FakeWorker {
   private let socketPath: URL
   private var script: Script
   private var shutdownCount = 0
+  private var shutdownRequestLog: [ShutdownRequest] = []
   private var onExit: @Sendable () async -> Void = {}
 
   init(socketPath: URL, script: Script) {
@@ -48,6 +49,12 @@ actor FakeWorker {
   }
 
   var shutdownRequests: Int { shutdownCount }
+
+  /// Every `worker.shutdown` payload as decoded off the wire, in order. What a test asserts on to
+  /// see which `gracefulTimeoutMs` runnerd actually sent.
+  var shutdownPayloads: [ShutdownRequest] { shutdownRequestLog }
+
+  var lastShutdownRequest: ShutdownRequest? { shutdownRequestLog.last }
 
   var currentState: WorkerVMState { script.vmState }
 
@@ -77,8 +84,9 @@ actor FakeWorker {
       await emit(.stopped)
       return try WorkerCoding.payload(VMStateResponse(vmState: .stopped))
     }
-    await server.register(method: WorkerMethod.shutdown.rawValue, class: .singleShot) { [self] _, _ in
-      await recordShutdown()
+    await server.register(method: WorkerMethod.shutdown.rawValue, class: .singleShot) {
+      [self] envelope, _ in
+      await recordShutdown(try WorkerCoding.decode(ShutdownRequest.self, from: envelope.payload))
       return .emptyObject
     }
   }
@@ -95,8 +103,9 @@ actor FakeWorker {
     return script.vmState
   }
 
-  private func recordShutdown() {
+  private func recordShutdown(_ request: ShutdownRequest) {
     shutdownCount += 1
+    shutdownRequestLog.append(request)
     let handler = onExit
     Task { await handler() }
   }
@@ -122,6 +131,8 @@ actor FakeWorkerLauncher: WorkerLauncher, WorkerLockProbe {
   private var workers: [InstanceID: FakeWorker] = [:]
   private var pids: [InstanceID: Int32] = [:]
   private var nextPid: Int32 = 4_100
+  private var launchGateClosed = false
+  private var launchGateWaiters: [CheckedContinuation<Void, Never>] = []
 
   init(paths: RunnerPaths, behaviour: Behaviour = Behaviour()) {
     self.paths = paths
@@ -133,6 +144,20 @@ actor FakeWorkerLauncher: WorkerLauncher, WorkerLockProbe {
   }
 
   func worker(for id: InstanceID) -> FakeWorker? { workers[id] }
+
+  /// Holds every subsequent `launch` until `openLaunchGate`. A restart or a create that has
+  /// claimed its row but has not yet produced a worker is otherwise not observable from a test:
+  /// the whole ladder is faster than any wait, and a sleep would only be a race with a margin.
+  func closeLaunchGate() {
+    launchGateClosed = true
+  }
+
+  func openLaunchGate() {
+    launchGateClosed = false
+    let waiting = launchGateWaiters
+    launchGateWaiters = []
+    for continuation in waiting { continuation.resume() }
+  }
 
   /// Simulates `kill -9` on the worker: the socket goes away and the lock is released.
   func killWorker(_ id: InstanceID) async {
@@ -153,6 +178,11 @@ actor FakeWorkerLauncher: WorkerLauncher, WorkerLockProbe {
   // MARK: - WorkerLauncher
 
   func launch(_ request: WorkerLaunchRequest) async throws -> WorkerHandle {
+    while launchGateClosed {
+      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        launchGateWaiters.append(continuation)
+      }
+    }
     nextPid += 1
     let pid = nextPid
     guard !behaviour.failToPublish else {

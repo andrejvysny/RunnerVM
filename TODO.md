@@ -2,13 +2,40 @@
 
 ## Now
 
-- [ ] `scripts/live-builder-faults.sh`: per-phase image alias (or scope the "≤1 image" check to the phase's `imageDigest`), treat unobservable warm phases as skipped, rerun `--phase booting --phase provisioning --phase sealing`, record in `docs/verification.md`
-- [ ] LaunchDaemon + reboot qualification (operator-driven; skipped 2026-08-27). Now also blocked on `sudo` for the Mac mini — the plist is rendered at `/Users/blackpen/com.runnervm.runnerd.daemon.plist` and lint-clean, and the keychain objection to this variant did not reproduce on macOS 26.5.2 (see the deployment section below). LaunchDaemon is now the documented production default (`packaging/launchd/README.md`), so this is no longer an open trade-off, just an unrun qualification.
-- [ ] **Milestone-D operator matrix** (2026-08-28 — code-complete per `## D` below, nothing below has run): push `master` and tag `v0.2.0`, cut the first GitHub release (pkg + sha256 + manifest + `install.sh`); first `ubuntu-24-base` publish to GHCR (`publish-images.yml` or the manual command in `docs/published-images.md`, plus the one-time make-public/connect-repo steps); reinstall on blackpen via the curl bootstrap + pkg, retiring the from-source Mac mini deployment (the LaunchDaemon reboot loop above becomes meaningful once it is *this* daemon under test); run a native managed macOS provisioning cycle (`images.managed`) end to end on the dev Mac.
+Updated: 2026-09-02
 
+- [ ] **Operator: commit the tree** (two commits suggested in the last session message; never auto-committed).
+- [ ] Decide: skip `v0.2.1` and cut `v0.3.0-rc.1` after the signing setup (recommended) vs an unsigned
+      release.yml escape hatch for `v0.2.x`. Then retitle the CHANGELOG sections accordingly.
+- [ ] Phase 1.2 right after the first commit: `swiftformat Sources Tests Package.swift` as ONE commit + lint step in ci.yml.
+- [ ] Operator: `gh run cancel 33504120630`; blackpen bootout + remove; dependabot PR #1; Apple certs/p12/notary
+      key/7 secrets + `APPLE_TEAM_ID` variable; set `RunnerVMSigning.expectedTeamID` AND `RUNNERVM_EXPECTED_TEAM_ID`.
+- [ ] Phase 5 hardware matrix on the dev Mac (see PLAN.md) → Phase 6 GHCR publish → Phase 7 tag.
+- [ ] Older items still open: `scripts/live-builder-faults.sh` remaining phases; LaunchDaemon reboot loop
+      (DEFERRED for v0.3.0, documented as unqualified).
 
-Plans: `~/.claude/plans/act-as-senior-swift-calm-cherny.md` (M0–M13) and
-`~/.claude/plans/act-as-senior-swift-ticklish-garden.md` (M14/M15). Current state: `docs/status.md`.
+## v0.3.0 release plan (approved 2026-09-01) — `PLAN.md`
+
+Review + plan: `~/.claude/plans/act-as-senior-swift-giggly-hamming.md` (copied to `PLAN.md`).
+Decisions: v0.2.1 patch first; v0.3.0 = first public release, Developer ID signed + notarized in
+CI; Linux AND macOS supported (H3–H5 + reboot loop on the dev Mac); reusable kept + reaper fixed;
+blackpen decommissioned; GHCR publish manual; FSL-derived files kept and documented.
+
+- [x] Phase 0 `v0.2.1` CODE DONE 2026-09-02 (commit + tag = operator): runnerd startup backoff (`StartupFailure`, EX_CONFIG, ThrottleInterval 30),
+      doc truth (v0.2.0 IS released), publish-images cron off, version 0.2.1. Operator: tag, blackpen bootout.
+- [ ] Phase 1 hygiene: [x] delete 8 stale worktrees (10 GB), [ ] `swiftformat` bulk + CI lint (after the Phase 0 commit), [x] Go module
+      path -> `github.com/andrejvysny/RunnerVM/GuestAgent`, [ ] dependabot PR #1 (operator merge), [x] mixed-licensing docs.
+- [x] Phase 2 defects CODE DONE 2026-09-02 (ProcessSpawn adversarial review pending): D1 reusable reaper, D2 `RunProcess` posix_spawn + group kill, D4 vmworker
+      teardown/exit 79/80, D5 stuck `.deleting` retry, D6 App-token 401 refresh, D7 pkg_name check,
+      D8 freeSpace log, D9 cancel counter, D10 recovery vs in-flight JIT, D11 HostProbe timeout.
+- [x] Phase 3 timeouts CODE DONE 2026-09-02: `Deadline.swift`, gracefulShutdown, jitGeneration, vmBoot (+restart re-arm, CAS fix), imagePull, docs/configuration.md. One flaky test fix in flight.
+- [ ] Phase 4 signing: [x] build-package.sh, [x] install-side gate (bootstrap.sh + `PackageSignature`), [x] release.yml, [x] docs (distribution.md, release.md), [x] seam review + parity fixes. CODE DONE 2026-09-02.
+      Operator: certs, p12, notary key, 8 secrets, then set `RunnerVMSigning.expectedTeamID` + `RUNNERVM_EXPECTED_TEAM_ID`.
+- [ ] Phase 5 hardware (dev Mac): free disk, rc.1 signed install via rc-specific install.sh, Linux
+      matrix, managed macOS provisioning, H3 (overcommit allowed, recorded)/H4/H5, single reboot check
+      (10-reboot loop DEFERRED, documented as unqualified), `docs/verification.md`.
+- [ ] Phase 6 GHCR publish `ubuntu-24-base` (manual, operator PAT), make public, verify pull.
+- [ ] Phase 7 release `v0.3.0`: bump, CHANGELOG, status.md, tag, Homebrew tap, post-release check.
 
 ## D — Distribution hardening (started 2026-08-28)
 
@@ -249,7 +276,7 @@ See plan C2.
 ## Open questions (need user)
 1. LZ4 (assumed) vs zstd for disk layers
 2. GitHub org/repo + PAT for S6/M5/M6
-3. Naming: `runnerd`/`runnerctl`/`vmworker`, `com.runnervm`, `RUNNERVM_` (assumed); Go module path placeholder `github.com/runnervm/guest-agent`
+3. Naming: `runnerd`/`runnerctl`/`vmworker`, `com.runnervm`, `RUNNERVM_` (assumed)
 4. Package lives at workspace root, `tart/` as sibling reference (assumed); repo not `git init`ed (user rule: no git ops unless told)
 5. Auto-login service user acceptable if LaunchDaemon spike fails?
 6. Reusable VMs needed at all?

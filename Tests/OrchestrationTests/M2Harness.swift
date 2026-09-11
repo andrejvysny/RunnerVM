@@ -126,9 +126,16 @@ struct M2Harness {
       // which side of a second boundary the two calls land.
       now: { M2Harness.imageClock })
     await images.updateConfiguration(configuration)
+    // The pull deadline still comes from the profile; only the spacing of a waiter's reads is
+    // compressed, so a test that asks for a millisecond `imagePull` sees it enforced without
+    // waiting a poll interval for it.
+    await images.setPullWaitPollInterval(.milliseconds(5))
     var instanceTuning = InstanceManager.Tuning()
     instanceTuning.workerExitPollInterval = .milliseconds(5)
     instanceTuning.workerExitPollAttempts = 200
+    // The boot deadline still comes from the profile; only the spacing of the watcher's reads is
+    // compressed, so a test that asks for a millisecond `vmBoot` sees it enforced without waiting.
+    instanceTuning.vmRunningPollInterval = .milliseconds(5)
     // The readiness deadline still comes from the profile; only the poll spacing is compressed,
     // so readiness is driven by the fake agent's health script instead of by elapsed time.
     instanceTuning.agentReadiness = GuestAgentClient.ReadinessPolicy(
@@ -167,6 +174,9 @@ struct M2Harness {
     // cancelled, so cleanup never waits on a fake long poll.
     scaleSetPlane.close()
     await runners.detachObservers()
+    // What `DaemonRuntime.teardown` does, and for the same reason: a readiness poll or a boot
+    // watcher left running would keep reading a database whose test has already finished.
+    await instances.detachGuests()
     github.shutdown()
     registry.shutdown()
     await supervisor.detachAll()
@@ -184,19 +194,34 @@ struct M2Harness {
   /// Reserves nothing: the tests run on whatever free space the developer's Mac happens to have.
   static func configuration(
     linuxMemory: UInt64 = ByteSize.gibibytes(2).bytes, maxInstances: Int? = nil,
-    agentReady: DurationValue = .minutes(2), ssh: SSHPolicy = SSHPolicy(),
+    agentReady: DurationValue = .minutes(2), vmBoot: DurationValue = .minutes(3),
+    ssh: SSHPolicy = SSHPolicy(),
     runnerOnline: DurationValue = .minutes(2), jobMaxRuntime: DurationValue = .hours(6),
     lifecycle: InstanceLifecycle = .ephemeral, allowPublicRepositories: Bool = false,
     warmPool: WarmPoolPolicy = .disabled, concurrentVMStarts: Int = 2,
     reuse: ReusePolicy? = nil, cleanup: DurationValue = .minutes(5),
+    gracefulShutdown: DurationValue = .milliseconds(200),
+    jitGeneration: DurationValue = .seconds(30),
+    imagePull: DurationValue = TimeoutPolicy.default.imagePull,
     linuxImage: String = M2Harness.linuxImageName, concurrentImagePulls: Int = 2,
     reserveDiskBytes: UInt64 = 0
   ) -> RunnerConfiguration {
     var timeouts = TimeoutPolicy.default
     timeouts.agentReady = agentReady
+    // The production default: only a test that asks for a short window watches a boot time out.
+    timeouts.vmBoot = vmBoot
     timeouts.runnerOnline = runnerOnline
     timeouts.jobMaxRuntime = jobMaxRuntime
     timeouts.cleanup = cleanup
+    // Milliseconds by default: the worker-exit wait scales with this window, and the production
+    // 30 s would make every teardown test wait out a real grace period.
+    timeouts.gracefulShutdown = gracefulShutdown
+    // Well past anything a fake answers in, so only a test that asks for a short one sees the JIT
+    // deadline at all; the production default is 2 min.
+    timeouts.jitGeneration = jitGeneration
+    // The production default (60m), so only a test that asks for a short one waits on a transfer
+    // it shares with anybody.
+    timeouts.imagePull = imagePull
     return RunnerConfiguration(
       host: HostConfig(
         reserve: HostConfig.Reserve(cpu: 0, memoryBytes: 0, diskBytes: reserveDiskBytes),
@@ -308,13 +333,17 @@ struct M2Harness {
   }
 
   /// The service `DaemonServer` fronts, wired to the same managers the runtime would use.
-  func service(updates: ImageUpdateService? = nil) -> DaemonServiceImpl {
+  func service(
+    updates: ImageUpdateService? = nil, probe: HostProbeResult = M2Harness.probe(),
+    vmworkerExecutable: URL? = nil
+  ) -> DaemonServiceImpl {
     DaemonServiceImpl(
       paths: paths, hostId: hostId, database: database, images: images, instances: instances,
       supervisor: supervisor,
       applier: ConfigApplier(store: GRDBConfigStore(db: database), stateDir: paths.stateDir),
       reconciler: Reconciler(logger: Logger(label: "test")),
-      parseConfig: { _ in throw OrchestrationError.notStarted }, probe: M2Harness.probe(),
+      parseConfig: { _ in throw OrchestrationError.notStarted }, probe: probe,
+      vmworkerExecutable: vmworkerExecutable,
       startedAt: Date(), actorName: "test", gateway: gateway, scopeHealth: scopeHealth,
       runnerVersions: runnerVersions, runners: runners, metrics: metrics,
       registryCredentials: registryCredentials, updates: updates,

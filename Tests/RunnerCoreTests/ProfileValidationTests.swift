@@ -244,6 +244,27 @@ import Testing
       .contains(code: "PROFILE_TIMEOUT_CLONE_IGNORED"))
   }
 
+  /// The whole grace window is spent waiting, with the row parked in `stopping`/`deleting` and
+  /// its capacity still reserved, so an implausibly long one is worth saying out loud.
+  @Test func warnsWhenTheGracefulShutdownWindowIsImplausiblyLong() throws {
+    let issues = Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.gracefulShutdown = .minutes(11)
+      $0.timeouts = timeouts
+    }
+    let issue = try #require(issues.first(code: "PROFILE_TIMEOUT_GRACEFUL_SHUTDOWN_LONG"))
+    #expect(issue.severity == .warning)
+    #expect(issue.path == "profiles[0].timeouts.gracefulShutdown")
+    #expect(!issues.hasErrors)
+    for accepted in [DurationValue.seconds(30), .minutes(10)] {
+      #expect(!Self.issues {
+        var timeouts = TimeoutPolicy.default
+        timeouts.gracefulShutdown = accepted
+        $0.timeouts = timeouts
+      }.contains(code: "PROFILE_TIMEOUT_GRACEFUL_SHUTDOWN_LONG"))
+    }
+  }
+
   @Test func rejectsDegenerateReuseBounds() {
     #expect(Self.issues {
       $0.lifecycle = .reusable
@@ -279,6 +300,84 @@ import Testing
     #expect(Fixtures.linuxProfile.with { $0.lifecycle = .reusable }.effectiveReuse == .default)
   }
 
+  /// Under a minute is shorter than a credential mint plus a couple of GitHub's own 429/503
+  /// retries, so it turns a slow-but-working GitHub into failed registrations.
+  @Test func warnsWhenTheJITDeadlineIsShorterThanGitHubsOwnRetries() throws {
+    let issues = Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.jitGeneration = .seconds(30)
+      $0.timeouts = timeouts
+    }
+    #expect(
+      try #require(issues.first(code: "PROFILE_TIMEOUT_JIT_GENERATION_SHORT")).severity == .warning)
+    #expect(!issues.hasErrors)
+    #expect(!Self.issues { $0.timeouts = TimeoutPolicy.default }
+      .contains(code: "PROFILE_TIMEOUT_JIT_GENERATION_SHORT"))
+  }
+
+  /// The first create against a new digest pays for the whole transfer inside this budget, and a
+  /// real image is gigabytes: under a minute only ever fails creates that were downloading fine.
+  @Test func warnsWhenTheImagePullBudgetCannotCoverATransfer() throws {
+    let issues = Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.imagePull = .seconds(30)
+      $0.timeouts = timeouts
+    }
+    let issue = try #require(issues.first(code: "PROFILE_TIMEOUT_IMAGE_PULL_SHORT"))
+    #expect(issue.severity == .warning)
+    #expect(issue.path == "profiles[0].timeouts.imagePull")
+    #expect(!issues.hasErrors)
+    for accepted in [DurationValue.seconds(60), .minutes(60)] {
+      #expect(!Self.issues {
+        var timeouts = TimeoutPolicy.default
+        timeouts.imagePull = accepted
+        $0.timeouts = timeouts
+      }.contains(code: "PROFILE_TIMEOUT_IMAGE_PULL_SHORT"))
+    }
+  }
+
+  /// One budget covers the clone, the worker spawn and the guest reporting itself running, and
+  /// only the clone is nearly free. Under 30s the VM that would have booted is failed instead.
+  @Test func warnsWhenTheBootDeadlineLeavesNoRoomForABoot() throws {
+    let issues = Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.vmBoot = .seconds(20)
+      $0.timeouts = timeouts
+    }
+    let issue = try #require(issues.first(code: "PROFILE_TIMEOUT_VM_BOOT_SHORT"))
+    #expect(issue.severity == .warning)
+    #expect(issue.path == "profiles[0].timeouts.vmBoot")
+    #expect(!issues.hasErrors)
+    for accepted in [DurationValue.seconds(30), .minutes(3)] {
+      #expect(!Self.issues {
+        var timeouts = TimeoutPolicy.default
+        timeouts.vmBoot = accepted
+        $0.timeouts = timeouts
+      }.contains(code: "PROFILE_TIMEOUT_VM_BOOT_SHORT"))
+    }
+  }
+
+  /// Virtualization reports a macOS guest `running` before macOS has booted, so `vmBoot` is
+  /// satisfied almost immediately and `agentReady` is the only timeout that covers the boot.
+  @Test func warnsWhenAMacOSProfileGivesItsFirstBootUnderTwoMinutes() throws {
+    let issues = Self.macIssues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.agentReady = .seconds(90)
+      $0.timeouts = timeouts
+    }
+    let issue = try #require(issues.first(code: "PROFILE_TIMEOUT_AGENT_READY_SHORT"))
+    #expect(issue.severity == .warning)
+    #expect(issue.path == "profiles[0].timeouts.agentReady")
+    // Linux guests report `running` when the kernel is up, so the same window is not remarkable.
+    #expect(!Self.issues {
+      var timeouts = TimeoutPolicy.default
+      timeouts.agentReady = .seconds(90)
+      $0.timeouts = timeouts
+    }.contains(code: "PROFILE_TIMEOUT_AGENT_READY_SHORT"))
+    #expect(!Self.macIssues { $0.timeouts = TimeoutPolicy.default }
+      .contains(code: "PROFILE_TIMEOUT_AGENT_READY_SHORT"))
+  }
+
   @Test func rejectsNonPositiveTimeouts() {
     let issues = Self.issues { $0.timeouts = TimeoutPolicy(vmBoot: .zero, agentReady: .seconds(-1)) }
     let paths = issues.filter { $0.code == "PROFILE_TIMEOUT_NOT_POSITIVE" }.map(\.path)
@@ -289,10 +388,17 @@ import Testing
 
   @Test func timeoutDefaultsMatchTheSpec() {
     let timeouts = TimeoutPolicy.default
+    // Raised from 30 min: ~2.9 GiB compressed and ~16 GiB of content to hash, paid inside the
+    // first `vm create` that needs the image because prefetch is off by default.
+    #expect(timeouts.imagePull == .minutes(60))
     #expect(timeouts.vmBoot == .minutes(3))
     #expect(timeouts.agentReady == .minutes(2))
     #expect(timeouts.runnerOnline == .minutes(2))
     #expect(timeouts.gracefulShutdown == .seconds(30))
+    // Raised from 30 s, which does not cover a credential mint plus a couple of 429/503 retries.
+    // It stops well short of the full `RetryPolicy.github` ladder on purpose: giving up earlier and
+    // letting the scheduler's hold-down set the retry cadence is the intent.
+    #expect(timeouts.jitGeneration == .minutes(2))
     #expect(Fixtures.linuxProfile.effectiveTimeouts == .default)
     #expect(timeouts.all.count == 9)
     #expect(timeouts.all.allSatisfy { $0.value.isPositive })

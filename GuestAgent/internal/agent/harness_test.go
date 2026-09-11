@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/keychain"
-	"github.com/runnervm/guest-agent/internal/rpc"
-	"github.com/runnervm/guest-agent/internal/vsock"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/vsock"
 )
 
 // harness runs a Service behind the real framing server over a loopback TCP

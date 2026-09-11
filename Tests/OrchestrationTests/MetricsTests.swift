@@ -144,6 +144,8 @@ import Testing
       // reports it; the pass after that is the one that sees it gone.
       await manual.set(profile: profile, assignedJobs: 0)
       await orchestrator.tick()
+      // The cancel itself runs detached, so the gauge only drops once its delete has landed.
+      await orchestrator.drainCancels()
       await orchestrator.tick()
 
       #expect(

@@ -257,31 +257,18 @@ public struct SmokeTest<Daemon: SmokeTestDaemon>: Sendable {
     return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
   }
 
-  /// The `ps` scan is blocking (`readDataToEndOfFile` + `waitUntilExit`), so it runs on a GCD
-  /// thread rather than parking a cooperative-pool one.
+  /// Through `DefaultCommandRunner` like everything else this module runs: `ps` inherits the
+  /// hop onto a GCD thread, a ceiling, and a stderr that is actually drained. The previous
+  /// `Foundation.Process` here read stdout to EOF with no timeout at all and never touched
+  /// stderr -- a `ps` blocked on an unresponsive filesystem would have hung a leak check that
+  /// exists precisely to run after something already went wrong.
   private static func vmworkerRunning(matching shortId: String) async -> Bool {
-    await withCheckedContinuation { continuation in
-      DispatchQueue.global(qos: .utility).async {
-        continuation.resume(returning: blockingVMWorkerRunning(matching: shortId))
-      }
-    }
-  }
-
-  private static func blockingVMWorkerRunning(matching shortId: String) -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/ps")
-    process.arguments = ["-axo", "command"]
-    let stdout = Pipe()
-    process.standardOutput = stdout
-    process.standardError = Pipe()
-    do {
-      try process.run()
-    } catch {
-      return false
-    }
-    let data = stdout.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    let text = String(decoding: data, as: UTF8.self)
-    return text.split(separator: "\n").contains { $0.contains("vmworker") && $0.contains(shortId) }
+    // 30 s, not the module's minute: `ps -axo command` answers in milliseconds on a healthy host,
+    // and this check runs after something has already gone wrong.
+    guard let result = try? await DefaultCommandRunner().run(
+      ["/bin/ps", "-axo", "command"], stdin: nil, timeout: .seconds(30)), result.isSuccess
+    else { return false }
+    return result.stdout.split(separator: "\n")
+      .contains { $0.contains("vmworker") && $0.contains(shortId) }
   }
 }

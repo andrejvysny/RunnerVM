@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/metrics"
-	"github.com/runnervm/guest-agent/internal/rpc"
-	"github.com/runnervm/guest-agent/internal/system"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/metrics"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/system"
 )
 
 // probeTimeout bounds the external version probes behind agent.getInfo.

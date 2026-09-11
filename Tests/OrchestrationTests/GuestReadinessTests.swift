@@ -46,6 +46,12 @@ import Testing
       let failed = try await harness.record(record.id)
       #expect(failed.failureCode == "AGENT_READY_TIMEOUT")
       #expect(failed.agentReadyAt == nil)
+      // `fail` commits the row first and writes the record afterwards -- nothing an operator reads
+      // as evidence is written for a failure that did not land -- so the file follows the state it
+      // was just polled for rather than arriving with it.
+      try await waitUntil("the failure record to be written") {
+        try await harness.instanceStore.failureRecord(instanceId: record.id) != nil
+      }
       let failure = try await harness.instanceStore.failureRecord(instanceId: record.id)
       #expect(failure?.phase == "waitingForAgent")
       #expect(failure?.code == "AGENT_READY_TIMEOUT")

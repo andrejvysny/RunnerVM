@@ -58,6 +58,8 @@ public enum RunnerVMMetrics {
   public static let sessionsTotal = "runnervm_sessions_total"
   public static let sessionsRecoveredTotal = "runnervm_sessions_recovered_total"
   public static let instanceFailuresTotal = "runnervm_instance_failures_total"
+  public static let instanceDeleteRetriesTotal = "runnervm_instance_delete_retries_total"
+  public static let instanceCancelFailuresTotal = "runnervm_instance_cancel_failures_total"
   public static let reconcileRunsTotal = "runnervm_reconcile_runs_total"
   public static let reconcileErrorsTotal = "runnervm_reconcile_errors_total"
   public static let githubRequestsTotal = "runnervm_github_requests_total"
@@ -218,6 +220,14 @@ public enum RunnerVMMetrics {
     MetricDefinition(
       name: instanceFailuresTotal, kind: .counter,
       help: "Instances that failed to come up, by profile and failure code."),
+    MetricDefinition(
+      name: instanceDeleteRetriesTotal, kind: .counter,
+      help: "Deletes the reconciler retried because the row was still stuck in `deleting` after "
+        + "the grace window. Each one is a teardown that did not finish the first time."),
+    MetricDefinition(
+      name: instanceCancelFailuresTotal, kind: .counter,
+      help: "Scheduler cancellations that threw, by profile and error code. A count that keeps "
+        + "climbing for one profile means a row nothing can reclaim is holding host capacity."),
     MetricDefinition(
       name: reconcileRunsTotal, kind: .counter, help: "Reconcile sweeps run since daemon start."),
     MetricDefinition(

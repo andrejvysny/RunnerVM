@@ -14,6 +14,9 @@ public struct HelloResponse: Codable, Sendable, Equatable {
   public var pid: Int32
   public var protocolVersion: Int
   public var vmState: WorkerVMState
+  /// Deprecated: never populated and no longer documented in `Proto/worker_protocol.md`. The
+  /// worker cannot know the guest's boot id -- that lives behind the agent bridge, which the
+  /// worker only relays bytes through. Kept so old payloads still decode; never emitted.
   public var agentBootId: String?
 
   public init(
@@ -77,6 +80,8 @@ public struct BridgeStatusResponse: Codable, Sendable, Equatable {
 }
 
 public struct ShutdownRequest: Codable, Sendable, Equatable {
+  /// `stop` is what runnerd sends; `drain` is accepted for wire compatibility and is identical to
+  /// `stop` (the worker has never done anything different for it).
   public enum Reason: String, Codable, Sendable { case drain, stop }
   public var reason: Reason
   public var gracefulTimeoutMs: Int64
@@ -112,4 +117,10 @@ public enum WorkerExitCode: Int32, Sendable {
   case lockHeld = 75
   case vzConfigInvalid = 76
   case vzStartFailed = 77
+  /// The guest would not stop: ACPI was refused or timed out and `forceStop` then threw, so the VM
+  /// may still hold its disk. 78 is skipped on purpose -- it is runnerd's `EX_CONFIG`.
+  case vzStopFailed = 79
+  /// This host already runs `HostConstants.macOSGuestLimit` macOS guests. Distinct from 75 so the
+  /// host-policy ceiling is not read as another worker holding this instance's lock.
+  case macOSGuestLimitReached = 80
 }

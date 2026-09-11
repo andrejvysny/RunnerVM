@@ -97,7 +97,7 @@ public enum RunnerVersionPolicy {
 public struct SemanticVersion: Comparable, Hashable, Sendable, CustomStringConvertible {
   let parts: [Int]
   /// Everything after the first `-`, empty for a plain release. `actions/runner` never publishes
-  /// one; RunnerVM's own tags may (`v0.3.0-rc1`), and `runnerctl upgrade` compares those.
+  /// one; RunnerVM's own tags may (`v0.3.0-rc.1`), and `runnerctl upgrade` compares those.
   public let suffix: String
 
   public var major: Int { parts[0] }
@@ -114,7 +114,7 @@ public struct SemanticVersion: Comparable, Hashable, Sendable, CustomStringConve
   /// rather than guessing which side of a release a `-beta` build falls on.
   public init?(_ raw: String?) { self.init(raw, allowingSuffix: false) }
 
-  /// Lenient: a RunnerVM release tag may carry `-rc1`, and `runnerctl upgrade` has to order it
+  /// Lenient: a RunnerVM release tag may carry `-rc.1`, and `runnerctl upgrade` has to order it
   /// against the plain release.
   public init?(tag raw: String?) { self.init(raw, allowingSuffix: true) }
 
@@ -143,12 +143,38 @@ public struct SemanticVersion: Comparable, Hashable, Sendable, CustomStringConve
 
   public static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
     for (left, right) in zip(lhs.parts, rhs.parts) where left != right { return left < right }
-    // A pre-release of X.Y.Z precedes the release itself; two suffixes order lexically, which is
-    // right for rc1 < rc2 and admittedly arbitrary for anything else.
+    // A pre-release of X.Y.Z precedes the release itself.
     if lhs.suffix == rhs.suffix { return false }
     if lhs.suffix.isEmpty { return false }
     if rhs.suffix.isEmpty { return true }
-    return lhs.suffix < rhs.suffix
+    return suffixPrecedes(lhs.suffix, rhs.suffix)
+  }
+
+  /// Dot-separated pre-release identifiers, compared the way semver compares them: a pair of
+  /// all-numeric segments compares numerically, anything else compares as text, and a shorter run
+  /// of otherwise equal segments comes first (`rc` precedes `rc.1`).
+  ///
+  /// Numerically matters at exactly one point, and it is the point that ships: a lexical
+  /// comparison puts `rc.10` *before* `rc.9`, so an `upgrade --check` on an rc host would report
+  /// the tenth release candidate as older than the ninth and offer to install backwards.
+  private static func suffixPrecedes(_ lhs: String, _ rhs: String) -> Bool {
+    let left = lhs.split(separator: ".", omittingEmptySubsequences: false)
+    let right = rhs.split(separator: ".", omittingEmptySubsequences: false)
+    for (l, r) in zip(left, right) where l != r {
+      if let ln = numeric(l), let rn = numeric(r) { return ln < rn }
+      return l < r
+    }
+    return left.count < right.count
+  }
+
+  /// A run of ASCII digits as a number, `nil` for anything else -- including a digit run too long
+  /// to be an `Int` (falls back to the textual comparison rather than trapping) and one with a
+  /// leading zero, which semver does not allow. Excluding `01` keeps the ordering a total one:
+  /// `01` and `1` are different suffixes, so they must not compare as equivalent.
+  private static func numeric(_ field: Substring) -> Int? {
+    guard !field.isEmpty, field.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+    guard field.count == 1 || field.first != "0" else { return nil }
+    return Int(field)
   }
 
   public var description: String {

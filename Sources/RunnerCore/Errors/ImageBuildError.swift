@@ -48,6 +48,10 @@ public enum ImageBuildError: RunnerError {
   case atMaxConcurrent(limit: Int)
   case tooManySteps(count: Int, limit: Int)
   case toolMissing(tool: String)
+  /// A host tool was still running when its wall-clock ceiling expired and its process group
+  /// was killed. Not retryable: a `hdiutil`/`tar`/provisioning run that needed longer than its
+  /// budget needs a bigger budget, not another attempt on the same one.
+  case toolTimedOut(tool: String, seconds: Int)
   case runnerVersionUnresolved
   case runnerDigestUnavailable(version: String)
   case runnerDigestMismatch
@@ -91,6 +95,7 @@ public enum ImageBuildError: RunnerError {
     case .atMaxConcurrent: "BUILD_AT_MAX_CONCURRENT"
     case .tooManySteps: "BUILD_TOO_MANY_STEPS"
     case .toolMissing: "BUILD_TOOL_MISSING"
+    case .toolTimedOut: "BUILD_TOOL_TIMEOUT"
     case .runnerVersionUnresolved: "BUILD_RUNNER_VERSION_UNRESOLVED"
     case .runnerDigestUnavailable: "BUILD_RUNNER_DIGEST_UNAVAILABLE"
     case .runnerDigestMismatch: "BUILD_RUNNER_DIGEST_MISMATCH"
@@ -152,6 +157,8 @@ public enum ImageBuildError: RunnerError {
     case let .tooManySteps(count, limit):
       "the recipe plans \(count) steps, more than the \(limit) `build.maxSteps` allows"
     case let .toolMissing(tool): "required tool '\(tool)' is not available on this host"
+    case let .toolTimedOut(tool, seconds):
+      "'\(tool)' did not finish within \(seconds)s and its process group was killed"
     case .runnerVersionUnresolved: "could not resolve the actions/runner version to bake in"
     case let .runnerDigestUnavailable(version): "no digest available for actions/runner \(version)"
     case .runnerDigestMismatch: "downloaded actions/runner did not match its expected digest"
@@ -174,7 +181,7 @@ public enum ImageBuildError: RunnerError {
          .sealFailed, .cancelled, .notFound, .nameRequired, .toolMissing, .tooManySteps,
          .runnerVersionUnresolved, .runnerDigestUnavailable, .runnerDigestMismatch,
          .notCancellable, .unavailable, .argumentLooksLikeSecret, .macosScriptMissing,
-         .macosProvisionFailed, .macosQualificationFailed:
+         .macosProvisionFailed, .macosQualificationFailed, .toolTimedOut:
       false
     }
   }

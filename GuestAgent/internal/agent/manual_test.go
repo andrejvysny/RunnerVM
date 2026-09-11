@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
 )
 
 // TestManual drives a guest-agent that is already running elsewhere, e.g.

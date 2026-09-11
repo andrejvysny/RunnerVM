@@ -38,6 +38,8 @@ import Testing
     #expect(WorkerExitCode.lockHeld.rawValue == 75)
     #expect(WorkerExitCode.vzConfigInvalid.rawValue == 76)
     #expect(WorkerExitCode.vzStartFailed.rawValue == 77)
+    #expect(WorkerExitCode.vzStopFailed.rawValue == 79)
+    #expect(WorkerExitCode.macOSGuestLimitReached.rawValue == 80)
   }
 }
 
@@ -89,6 +91,8 @@ import Testing
 
   @Test func requestsRoundTrip() throws {
     #expect(try roundTrip(LeaseRequest(ttlMs: 30_000)) == LeaseRequest(ttlMs: 30_000))
+    // `drain` stays on the wire for the mixed-version upgrade window -- an older runnerd talking to
+    // a new worker still sends it -- and means exactly what `stop` means.
     let drain = ShutdownRequest(reason: .drain, gracefulTimeoutMs: 45_000)
     #expect(try roundTrip(drain) == drain)
     #expect(try WorkerCoding.payload(drain)["reason"] == .string("drain"))

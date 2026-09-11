@@ -1,101 +1,78 @@
-# Handoff — first headless deployment (Mac mini `blackpen`)
+# Handoff — v0.3.0 pre-release review, finish & hardening run
 
-Session 2 · 2026-08-28 · previous session's notes are in `git log` (`a3cca52`)
+Session 3 · 2026-09-02 · previous handoffs: `git log` (`a3cca52`, Mac mini deployment)
 
 ## Goal
 
-Deploy RunnerVM onto the Mac mini reached as `ssh blackpen` and exercise it for real: functionality,
-autoscaling, parallel VMs, cleanup, and at least one macOS guest. Not a rehearsal — a live host
-serving `andrejvysny/RunnerVM`.
+Ship RunnerVM's first real public release (`v0.3.0`): a senior review of correctness and long-term quality,
+then finish + harden — signed/notarized pkg, enforced timeouts, reaper/process fixes, and a hardware-validated
+Linux + macOS runner host — per the approved plan.
 
-## What happened
+## Original plan
 
-The Mac mini is the first host that is not the development Mac, and the first one with **no GUI
-login session** — which is the state a LaunchDaemon and any unattended Mac are actually in. That
-single difference exposed five defects, two of which made the daemon completely non-functional
-there. All five are fixed; the deployment then passed everything asked of it.
+`~/.claude/plans/act-as-senior-swift-giggly-hamming.md`, copied to repo `PLAN.md` (status `ready`, all decisions
+recorded, adversarial plan review folded in). Phases: 0 v0.2.1 patch → 1 hygiene → 2 defects → 3 timeouts →
+4 signing → 5 hardware matrix on the dev Mac → 6 GHCR publish → 7 tag v0.3.0. Execution via the
+fable-orchestrator: tiered subagents, every critical diff adversarially reviewed, run log appended to `PLAN.md`.
 
-Full record, including host layout, sizing rationale and the tested/skipped list:
-`docs/verification.md`, "Mac mini deployment". What shipped: `CHANGELOG.md`.
+## Done so far (and why)
 
-## Results
-
-- **Linux, on blackpen:** `image build` 2/2 (`ubuntu-24-minimal` 2 m 56 s, `ubuntu-24` 1 m 30 s);
-  single job with the guest agent ready 5.5 s after demand; 3-way matrix at capacity; 6-way matrix
-  at 2× capacity (never exceeded 3, drained and refilled in waves); 4-way matrix;
-  `scripts/live-github-e2e.sh` **11/11** including both restart-during-job scenarios and the
-  `kill -9` one. `long-job` (65 min) skipped.
-- **Storage:** after ten jobs — 0 VMs, 0 instance directories, 0 `vmworker` processes, 0 stranded
-  GitHub runner registrations, free disk unchanged. Per-job storage is fully reclaimed; what
-  outlives a job is now bounded explicitly in that host's config (`images.cache.maxSize`,
-  `logging.retention.instanceLogs`, `build.cache.maxBytes`, `diagnostics.failedInstanceRetention`).
-- **macOS:** one guest proven on the **development Mac**, on a freshly re-provisioned hardened
-  image `macos-26` — GitHub run 33159698945, 7 s job, ~23 s cold start, `capabilities.ssh: false`,
-  clean teardown. It does not fit on the Mac mini (below).
-
-## Defects fixed (all in `3d8fae8`)
-
-1. `APFSClone.freeSpace` returned **0** in any session without a login window, because
-   `volumeAvailableCapacityForImportantUsage` is computed by a per-login-session service. Daemon sat
-   in permanent `critical` disk pressure and advertised `capacity=0` — no VM ever scheduled. Would
-   have broken the documented LaunchDaemon variant identically. Falls back to
-   `volumeAvailableCapacity`; `doctor` now delegates to the same function instead of reading the
-   volume keys a second time.
-2. `ImageBuilder.updateConfiguration` was **never called**, so the whole `build:` block was ignored
-   and `host.reserve.disk` stayed at its 50 GiB default — every build refused. Added to the
-   `ImageBuildService` protocol, wired into both config-application paths.
-3. Disabling a profile did **not** close its scale-set message session, so a stale daemon kept
-   answering job messages and took the session back at the other host's next restart — it stole a
-   live job mid-suite. `refresh()` now retires sessions whose profile is no longer enabled.
-4. `scripts/provision-macos-tart.sh` could never verify its payload over password SSH: the `expect`
-   pty's `password:` prompt leaked into the compared output.
-5. `runnerctl status` hardcoded "Scale sets: 0 healthy".
-
-## Dead-ends / decisions worth keeping
-
-- **Do not give `ImageBuildService.updateConfiguration` a default implementation.** A
-  protocol-extension no-op outranks the actor's own method at a concrete call site; the version that
-  had one silently disabled the build harness's configuration and four lifecycle tests started
-  failing (6.7 s green → 80 s with four failures).
-- **In `retire`, cancel the poll task before closing the session.** `ensureSession` re-opens a
-  missing session at the top of every poll, so closing first just hands the loop a fresh one.
-- **Never run two daemons against one scope with the same profile name.** Disabling the profile is
-  the remedy and now actually works (defect 3). Nothing calls `deleteScaleSet`, so removing a
-  profile from one host's config leaves the other host's scale set alone.
-- **Virtualization.framework needed no unlocked login keychain** on macOS 26.5.2 — every VM booted
-  with `doctor` reporting `FAIL Login keychain`. Documented as counter-evidence in
-  `packaging/launchd/README.md` and `docs/qualification.md`, not as a qualification.
-- macOS profile disk must be **`50000000000` bytes exactly**; `47GiB` is rejected by the exact-size
-  rule.
+- **Review findings that reframed the work:** the Mac mini's 70k launchd respawns were a launchd *spawn*
+  failure (the plists' stdio directory `<state>/logs/runnerd` never existed on a from-source install; runnerd
+  never ran once) — fixed in install.sh + plists + doctor + an in-binary supervised backoff. `v0.2.0` had been cut
+  from a red-CI commit; docs said "unreleased". Dev state root `~/runnervm-dev` is gone (macOS image must be
+  re-provisioned — that exercises native managed provisioning, which was never run live).
+- **Phases 0–4 code-complete and verified** (see CURRENT_STATE.md). Highlights and the reasoning:
+  - Reapers: reusable instances that never reached idle were never deleted; now every `failed/interrupted/stopped`
+    row past retention is reaped unless owned by an in-flight delete/respawn or pinned maintenance, with the sweep
+    committing through a compare-and-swap on the state it judged (a plain `delete` could tear down a VM a respawn
+    had just booted). Stuck `deleting` rows are retried once per 5 min off the tick.
+  - `ProcessSpawn`: `Foundation.Process` inherited runnerd's SIG_IGN for SIGTERM (so the "graceful" leg was dead),
+    and a grandchild holding the pipe (`expect` setsid()s its child) hung builds forever. Now posix_spawn with a
+    private process group, SETSIGDEF, group SIGTERM→SIGKILL, deadline-bounded drain, cancel escalation.
+  - Timeouts: `imagePull`/`vmBoot`/`jitGeneration`/`gracefulShutdown` were parsed but never enforced. vmBoot is a
+    background watcher (the `instance.create` RPC still returns at `startingVM`) whose failure CAS carries the
+    validated state AND worker generation (first version could fail a healthy guest — caught in review);
+    jitGeneration needed a cancellable scale-set token exchange; gracefulShutdown had to reach the guest
+    `stopRunner` call deadline or any grace > 30 s became a SIGKILL at 30 s.
+  - Session recovery could terminalize a live registration mid-JIT (row existed, observer not yet) and acted on
+    stale snapshots — fixed with an ownership mark (monotonic clock, re-stamped per stage) + re-read.
+  - Signing: both installers verify the pkg themselves (manifest flags are never evidence), keyed on notarization,
+    with a compiled-in team pin in Swift AND bootstrap.sh; release.yml fails closed without secrets or if either
+    pin is empty/mismatched; stapling rewrites the pkg so checksum/manifest are computed last; the darwin guest
+    agent must be signed too (notary scans every Mach-O). Signed/notarized `pkgutil`/`spctl` fixtures are partly
+    synthetic until the first rc.
+- **Dead-ends / decided:** Set-based restart claims lost the winner's claim under a double respawn (counted map);
+  a GCD watchdog fired 11 s late under parallel test load (cooperative Task instead); `manifest.version`/`package`
+  are validated in both installers because they ride on argv/paths; `waitpid` on an uninterruptible leader cannot
+  be bounded (documented); the v0.2.1 patch is no longer separable from the tree.
 
 ## How to resume
 
-1. Run the `handoff` skill with "resume". Read `CURRENT_STATE.md`, then
-   `docs/verification.md` "Mac mini deployment".
-2. `swift build && scripts/sign-dev.sh && swift test --parallel` (expect 1379 pass, 1 known issue).
-3. Mac mini: `ssh blackpen '/Users/blackpen/.local/bin/runnerctl --socket
-   /Users/blackpen/runnervm/run/runnerd.sock status'`. If `runnerd` is not up (it does not survive a
-   reboot), start it with `/Users/blackpen/rvm-restart.sh`.
-4. Next tasks are in `TODO.md`, "Mac mini deployment (2026-08-28) — follow-ups".
+1. Run the `handoff` skill with "resume". Read `CURRENT_STATE.md`, then `PLAN.md` "Run log" (bottom) and
+   "Decisions"; memory file `runnervm-v030-release-plan.md` has the compressed history.
+2. Verify: `swift test --parallel 2>&1 | grep "Test run with"` (expect 1905 pass, 1 known issue) and
+   `for t in scripts/tests/*.sh; do bash "$t" | tail -1; done`. If the shared `.build` SIGSEGVs after struct
+   changes, `swift package clean` first.
+3. Next actions, in order: (a) user commits (two commits suggested in the last session message: hygiene, then the
+   hardening feature commit); (b) run Phase 1.2 — `swiftformat Sources Tests Package.swift` as ONE commit, then add
+   `brew install swiftformat` + `swiftformat --lint Sources Tests Package.swift` to the `lint` job in
+   `.github/workflows/ci.yml`; (c) resolve the v0.2.1-vs-rc.1 decision and retitle the CHANGELOG sections;
+   (d) Phase 5 checklist (PLAN.md "Phase 5"): free disk, rc.1 signed install via the rc-specific install.sh URL
+   with `sudo RUNNERVM_VERSION=... bash`, Linux live matrix, managed macOS provisioning, H3 (overcommit allowed,
+   recorded)/H4/H5, single reboot check, `docs/verification.md` "v0.3.0 release gate".
+4. Operator-only items still open: `gh run cancel 33504120630`; blackpen `sudo launchctl bootout
+   system/com.runnervm.runnerd` + remove plist/binaries; merge dependabot PR #1; Apple certs/p12/notary key/secrets
+   + both team pins; disk cleanup; GHCR `write:packages` PAT for the manual publish.
 
-## Open — needs the operator
+## Open questions
 
-- **`sudo` on the Mac mini**, for three things: install the LaunchDaemon (plist already rendered and
-  lint-clean at `/Users/blackpen/com.runnervm.runnerd.daemon.plist`), create the dedicated
-  `_runnervm` account/group so the install stops relying on `--group staff` plus a hand-set 0700
-  state directory, and run the reboot qualification loop in `docs/qualification.md`.
-- **macOS on the Mac mini is blocked on disk** — needs ~20 GiB more than exists. A guest reserves
-  the image's full 50 GB virtual disk (no APFS resize), so one guest needs ~80 GiB free; the host
-  has 62 GiB and ~11 GiB reclaimable. The only large reclaimable area is another user's home.
-  Either free space, produce a smaller macOS image, or accept Linux-only there.
-- **`scripts/qualify-macos-image.sh` (H2) cannot pass as written** — its `vm create` instance is
-  surplus with zero GitHub demand, so scale-to-zero removes it before the agent connects. Needs
-  `demand: manual`, a pin, or a mode that suspends scale-to-zero.
-- **`doctor`'s `Login keychain` check is a false negative on macOS 26.5.2** — decide whether it
-  should warn, probe for what it actually cares about, or go.
+- Skip the v0.2.1 tag and go straight to `v0.3.0-rc.1` after the signing setup (recommended), or add an unsigned
+  escape hatch to release.yml for `v0.2.x` tags so v0.2.1 ships now?
+- Independent legal review of the FSL "competing use" clause (PROVENANCE.md flags it) — accepted for v0.3.0
+  unless the operator decides otherwise.
 
 ## Pointers
 
-- Tasks → `TODO.md` ("Mac mini deployment (2026-08-28) — follow-ups", "M8") · Snapshot →
-  `CURRENT_STATE.md` · Evidence → `docs/verification.md` · Install layout → `docs/install.md`
-  ("One host per profile name, per scope") · macOS → `docs/macos-guests.md`
+- Tasks → `TODO.md` · Snapshot → `CURRENT_STATE.md` · Contract + run log → `PLAN.md` · Evidence →
+  `docs/verification.md` · Timeouts reference → `docs/configuration.md` · Signing runbook → `docs/release.md`

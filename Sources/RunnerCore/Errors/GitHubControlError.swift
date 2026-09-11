@@ -35,6 +35,8 @@ public enum GitHubControlError: RunnerError {
   case invalidResponse(reason: String)
   case permanentConfiguration(reason: String)
   case jitGenerationFailed(reason: String)
+  /// The profile's `timeouts.jitGeneration` expired before GitHub answered `generate-jitconfig`.
+  case jitGenerationTimeout(seconds: Double)
   case runnerRemovalFailed(runnerID: Int64, reason: String)
   case scaleSetSessionExpired(scaleSetName: String)
   case publicRepositoryNotAllowed(scope: String)
@@ -48,7 +50,10 @@ public enum GitHubControlError: RunnerError {
     case .conflict: .conflict
     // An expired scale-set session is recoverable by opening a new session, so it is transient.
     case .transientServerError, .scaleSetSessionExpired: .transientServer
-    case .transport: .transport
+    // Cosmetic here -- no orchestration consumer branches on the class of a session failure --
+    // but a deadline that expired is a slow or unreachable GitHub, which is what `.transport`
+    // means everywhere else in this enum.
+    case .transport, .jitGenerationTimeout: .transport
     case .invalidResponse: .invalidResponse
     case .permanentConfiguration, .jitGenerationFailed, .runnerRemovalFailed: .permanentConfiguration
     }
@@ -66,6 +71,7 @@ public enum GitHubControlError: RunnerError {
     case .invalidResponse: "GITHUB_INVALID_RESPONSE"
     case .permanentConfiguration: "GITHUB_PERMANENT_CONFIGURATION"
     case .jitGenerationFailed: "GITHUB_JIT_GENERATION_FAILED"
+    case .jitGenerationTimeout: "GITHUB_JIT_GENERATION_TIMEOUT"
     case .runnerRemovalFailed: "GITHUB_RUNNER_REMOVAL_FAILED"
     case .scaleSetSessionExpired: "GITHUB_SCALE_SET_SESSION_EXPIRED"
     case .publicRepositoryNotAllowed: "GITHUB_PUBLIC_REPOSITORY_NOT_ALLOWED"
@@ -85,6 +91,8 @@ public enum GitHubControlError: RunnerError {
     case .invalidResponse(let reason): "unexpected GitHub response: \(reason)"
     case .permanentConfiguration(let reason): "GitHub configuration is wrong: \(reason)"
     case .jitGenerationFailed(let reason): "JIT runner config generation failed: \(reason)"
+    case .jitGenerationTimeout(let seconds):
+      "JIT runner config generation did not finish within \(seconds)s"
     case .runnerRemovalFailed(let id, let reason): "could not remove runner \(id): \(reason)"
     case .scaleSetSessionExpired(let name): "scale set session expired for \(name)"
     case .publicRepositoryNotAllowed(let scope):

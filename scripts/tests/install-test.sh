@@ -62,6 +62,27 @@ expect_contains "$out" "mkdir -p -m 0750 $WORK/modes/state/logs/instances" \
     "logs/instances is created 0750"
 
 # --------------------------------------------------------------------------
+# 2b. logs/runnerd -- the directory both plists redirect the job's stdio into -- is created, and
+#     created *before* the `launchctl bootstrap` line the script prints. launchd creates the
+#     stdio file but not its directory; without this the job dies with exit 78 on every spawn
+#     and runnerd never runs (blackpen, 2026-08-28: 70547 respawns).
+# --------------------------------------------------------------------------
+out="$(dry_run stdio --launchd daemon)"
+expect_contains "$out" "mkdir -p -m 0750 $WORK/stdio/state/logs/runnerd" \
+    "logs/runnerd is created 0750"
+expect_contains "$out" "chown _runnervm:_runnervm $WORK/stdio/state/logs/runnerd" \
+    "logs/runnerd is owned by the service user"
+mkdir_at="$(printf '%s\n' "$out" \
+    | grep -Fn "mkdir -p -m 0750 $WORK/stdio/state/logs/runnerd" | head -1 | cut -d: -f1)"
+bootstrap_at="$(printf '%s\n' "$out" | grep -Fn 'launchctl bootstrap' | head -1 | cut -d: -f1)"
+if [ -n "$mkdir_at" ] && [ -n "$bootstrap_at" ] && [ "$mkdir_at" -lt "$bootstrap_at" ]; then
+    ok "logs/runnerd is created before the launchctl bootstrap line"
+else
+    no "logs/runnerd is created before the launchctl bootstrap line" \
+        "mkdir at line '${mkdir_at:-none}', bootstrap at line '${bootstrap_at:-none}'"
+fi
+
+# --------------------------------------------------------------------------
 # 3. --group staff without --allow-staff-group is refused
 # --------------------------------------------------------------------------
 if out="$(dry_run staff-refused --group staff)"; then
@@ -219,6 +240,65 @@ expect_contains "$out" "mkdir -p -m 0750 $WORK/principals/state/home" \
     "service account home is created 0750"
 expect_contains "$out" "chown _rvmtest_absent:_rvmtest_absent $WORK/principals/state/home" \
     "service account home is owned by the service user"
+
+# --------------------------------------------------------------------------
+# 9. Re-sign guard: a vmworker that already carries a non-ad-hoc (Developer ID) signature is
+#    verified, never re-signed — `codesign --force --sign -` on it would replace the publisher
+#    evidence the pkg's postinstall and Gatekeeper check for, and this host has no way to put it
+#    back. An ad-hoc or unsigned binary is still signed as before.
+#    `codesign` is mocked on PATH; only `-dvv` (the guard's own probe) is consulted in --dry-run.
+# --------------------------------------------------------------------------
+make_codesign_mock() {
+    local dir="$1" signature_line="$2"
+    mkdir -p "$dir"
+    cat >"$dir/codesign" <<EOF
+#!/bin/sh
+# Test double: reports a fixed signature for -dvv, succeeds silently otherwise.
+for arg in "\$@"; do
+    if [ "\$arg" = "-dvv" ]; then
+        {
+            echo "Identifier=com.runnervm.vmworker"
+            echo "$signature_line"
+        } >&2
+        exit 0
+    fi
+done
+exit 0
+EOF
+    chmod 0755 "$dir/codesign"
+}
+
+signs_built_vmworker() {
+    printf '%s\n' "$1" | grep -q "codesign --force --sign.*$PREBUILT_OK/libexec/vmworker"
+}
+
+make_codesign_mock "$WORK/mock-devid" 'Authority=Developer ID Application: RunnerVM (ABCDE12345)'
+out="$(PATH="$WORK/mock-devid:$PATH" "$SCRIPT" --dry-run \
+    --prefix "$WORK/resign-devid/prefix" --state-dir "$WORK/resign-devid/state" \
+    --prebuilt-dir "$PREBUILT_OK" 2>&1)"
+expect_contains "$out" "already carries a non-ad-hoc signature" \
+    "a Developer ID signed vmworker is reported as already signed"
+if signs_built_vmworker "$out"; then
+    no "a Developer ID signed vmworker is not re-signed" "found a codesign --force line: $out"
+else
+    ok "a Developer ID signed vmworker is not re-signed"
+fi
+
+make_codesign_mock "$WORK/mock-adhoc" 'Signature=adhoc'
+out="$(PATH="$WORK/mock-adhoc:$PATH" "$SCRIPT" --dry-run \
+    --prefix "$WORK/resign-adhoc/prefix" --state-dir "$WORK/resign-adhoc/state" \
+    --prebuilt-dir "$PREBUILT_OK" 2>&1)"
+if signs_built_vmworker "$out"; then
+    ok "an ad-hoc signed vmworker is still signed"
+else
+    no "an ad-hoc signed vmworker is still signed" "no codesign --force line: $out"
+fi
+case "$out" in
+*"already carries a non-ad-hoc signature"*)
+    no "an ad-hoc signed vmworker is not treated as already signed" "found the skip message: $out"
+    ;;
+*) ok "an ad-hoc signed vmworker is not treated as already signed" ;;
+esac
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

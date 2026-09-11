@@ -1,6 +1,9 @@
 import Darwin
 import Foundation
+import Logging
 import RunnerCore
+import RunnerLogging
+import Synchronization
 
 /// How an instance disk was produced. Surfaced as the `instance_clone_method` metric (spec §23).
 public enum CloneMethod: String, Sendable, Codable, CaseIterable {
@@ -59,16 +62,47 @@ public enum APFSClone {
     let keys: Set<URLResourceKey> = [
       .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
     ]
-    guard let values = try? existingAncestor(of: url).resourceValues(forKeys: keys) else {
-      return 0
+    let values = try? existingAncestor(of: url).resourceValues(forKeys: keys)
+    let importantUsage = values?.volumeAvailableCapacityForImportantUsage
+    let available = values?.volumeAvailableCapacity.map(Int64.init)
+    let result = freeSpace(importantUsage: importantUsage, available: available)
+    if result.unreadable {
+      logUnreadableOnce(url: url)
     }
-    if let important = values.volumeAvailableCapacityForImportantUsage, important > 0 {
-      return UInt64(important)
+    return result.bytes
+  }
+
+  /// Pure decision behind `freeSpace(at:)`: `nil` means the corresponding resource key could not
+  /// be read at all; a present-but-non-positive value (notably `0`) is what a per-login-session
+  /// service answers with nobody logged in (see the doc comment above) and must fall through to
+  /// the next source rather than being trusted as "no space" -- seen live on macOS 26.5.2:
+  /// `importantUsage` 0 against 70 GiB of real free space (the regression this guards). Only when
+  /// every source is absent or non-positive is the volume genuinely unreadable.
+  static func freeSpace(importantUsage: Int64?, available: Int64?) -> (bytes: UInt64, unreadable: Bool) {
+    if let importantUsage, importantUsage > 0 {
+      return (UInt64(importantUsage), false)
     }
-    if let available = values.volumeAvailableCapacity, available > 0 {
-      return UInt64(available)
+    if let available, available > 0 {
+      return (UInt64(available), false)
     }
-    return 0
+    return (0, true)
+  }
+
+  private static let unreadableLogged = Mutex(false)
+  private static let logger = Logger(component: .image)
+
+  /// Logged once per process, not once per call: an unreadable volume stays unreadable for the
+  /// life of the daemon, so repeating this on every admission check would just spam the log.
+  private static func logUnreadableOnce(url: URL) {
+    let shouldLog = unreadableLogged.withLock { logged -> Bool in
+      guard !logged else { return false }
+      logged = true
+      return true
+    }
+    guard shouldLog else { return }
+    logger.error(
+      "volume free space unreadable, reporting 0",
+      metadata: ["path": .string(url.path(percentEncoded: false))])
   }
 
   /// Volume queries need a path that exists; the store's directories are created lazily.

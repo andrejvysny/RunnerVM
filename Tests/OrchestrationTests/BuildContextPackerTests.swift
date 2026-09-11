@@ -438,8 +438,11 @@ private actor RecordingRealRunner: ProcessRunner {
   private let inner = SystemProcessRunner()
   private(set) var invocations: [Invocation] = []
 
-  func run(_ executable: String, _ arguments: [String], timeout: Duration) async throws -> ProcessResult {
+  func run(
+    _ executable: String, _ arguments: [String], timeout: Duration,
+    environment: [String: String]?
+  ) async throws -> ProcessResult {
     invocations.append(Invocation(executable: executable, arguments: arguments))
-    return try await inner.run(executable, arguments, timeout: timeout)
+    return try await inner.run(executable, arguments, timeout: timeout, environment: environment)
   }
 }

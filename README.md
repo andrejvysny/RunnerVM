@@ -16,7 +16,7 @@ scale set, so scale-to-zero and autoscaling are GitHub's own mechanism, not a po
 
 ## Setting it up
 
-**From the first tagged release onward**, one command on a fresh Apple Silicon Mac:
+One command on a fresh Apple Silicon Mac:
 
 ```sh
 curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/install.sh | sudo bash
@@ -25,8 +25,9 @@ curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/inst
 Downloads the prebuilt pkg, verifies it, installs it, and hands off to a wizard
 (`runnerctl setup`) that creates the hidden `_runnervm` service account, picks headless
 (LaunchDaemon) or GUI (LaunchAgent) mode, takes your GitHub scope and PAT, pulls a Linux image, and
-finishes with `doctor` plus a smoke test. No release is tagged yet — see [Status](#status) below —
-so today this is [`SETUP.md`](SETUP.md)'s Part 1; Part 2 is the from-source path
+finishes with `doctor` plus a smoke test. The pkg is still unsigned (see [Status](#status) below),
+so the installer prints a warning and waits for confirmation before it installs anything. This is
+[`SETUP.md`](SETUP.md)'s Part 1; Part 2 is the from-source path
 ([`docs/developer-setup.md`](docs/developer-setup.md)) this repository is built and tested with.
 
 Two things worth knowing up front:
@@ -50,11 +51,14 @@ Reference for every install flag, the privilege model and the security notes:
 
 ## Status
 
-**v0.2.0 is unreleased.** Every distribution feature below (pkg, bootstrap install, `runnerctl
+**v0.2.0 released 2026-08-28** (tag, GitHub release, pkg/sha256/manifest assets); **v0.2.1** is a
+follow-up patch (`fad78a0` CI fix plus runnerd startup-failure handling — see
+[`CHANGELOG.md`](CHANGELOG.md)). Every distribution feature (pkg, bootstrap install, `runnerctl
 setup`, automatic image updates, native managed macOS provisioning, the per-VM CI keychain,
-`runnerctl upgrade`) is unit/integration-tested only — no tag is pushed, no GitHub release exists,
-and none of it has run on real hardware yet. See [`docs/status.md`](docs/status.md) for the full
-capability matrix and [`CHANGELOG.md`](CHANGELOG.md) for what landed when.
+`runnerctl upgrade`) is unit/integration-tested; the hardware/live matrix (fresh-Mac install, reboot
+loop, upgrade end to end, managed macOS provisioning, keychain e2e) is still open. The pkg is
+unsigned — Developer ID signing is planned for v0.3.0. See [`docs/status.md`](docs/status.md) for
+the full capability matrix and [`CHANGELOG.md`](CHANGELOG.md) for what landed when.
 
 - Supported guest: **Linux/arm64** — the mode the project is validated against. **macOS guests are
   experimental** (`os: macos`, ephemeral only): the runtime works and has run real GitHub jobs, but
@@ -77,21 +81,23 @@ capability matrix and [`CHANGELOG.md`](CHANGELOG.md) for what landed when.
 
 ## Getting images
 
-Pull a published one — nothing to build, nothing else to install on the host:
-
-```sh
-runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
-```
-
-The catalogue and the disk each guest needs: [`docs/published-images.md`](docs/published-images.md).
-
-Or build your own, from a `Runnerfile`:
+Nothing is published on ghcr.io yet — the pull command below does not work today. Build locally,
+from a `Runnerfile`:
 
 ```sh
 runnerctl image build images/recipes/ubuntu-24-minimal --name ubuntu-24-minimal   # from the Ubuntu cloud image
 runnerctl image build images/recipes/ubuntu-24 --name ubuntu-24                   # FROM ubuntu-24-minimal, adds Docker
 runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22             # your own Runnerfile
 ```
+
+Once a `ubuntu-24-base` image is published, pulling one will be nothing to build, nothing else to
+install on the host:
+
+```sh
+runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable
+```
+
+The catalogue and the disk each guest needs: [`docs/published-images.md`](docs/published-images.md).
 
 ## Documentation
 
@@ -104,12 +110,23 @@ runnerctl image build ./my-recipe --name my-image --arg NODE_MAJOR=22           
 - [`docs/install.md`](docs/install.md), [`docs/images.md`](docs/images.md) (legacy host-script image
   build), [`docs/image-build.md`](docs/image-build.md) (in-daemon `runnerctl image build`),
   [`docs/state_machines.md`](docs/state_machines.md), [`docs/release.md`](docs/release.md).
+- [`docs/configuration.md`](docs/configuration.md) — `profiles[].timeouts` field reference and the
+  `PROFILE_TIMEOUT_*` validation codes.
 - [`docs/examples/`](docs/examples) — a real deployment's configuration, verbatim, with the
   reasoning behind each number; and the raw E2E reports it produced.
 - [`Proto/`](Proto) — the daemon/worker/guest wire protocols.
 
-## Provenance
+## License and provenance
 
-RunnerVM ports selected know-how from `openai/tart` (FSL-1.1-ALv2) and
-`actions/scaleset` (MIT) under the terms in [`PROVENANCE.md`](PROVENANCE.md); see
-also [`NOTICE`](NOTICE). Everything else is original to this project.
+RunnerVM is licensed under the Apache License 2.0 (`LICENSE`), with two exceptions that stay
+under their upstream terms and are listed file by file in [`PROVENANCE.md`](PROVENANCE.md):
+
+- 19 files derived from `openai/tart` (commit `16d186c`, v2.36.0) remain under the Functional
+  Source License 1.1 with the Apache-2.0 future license (FSL-1.1-ALv2) until that release's change
+  date, 2027-05, after which they convert to Apache-2.0. Each carries a `Derived from openai/tart`
+  header; see [`NOTICE`](NOTICE).
+- 7 files under `Sources/GitHubControl/ScaleSet/` are a Swift port of the protocol in
+  `github.com/actions/scaleset` v0.4.0 (MIT); each carries a `Ported from` header.
+
+Third-party dependencies and their licenses are listed in [`NOTICE`](NOTICE). Everything else is
+original to this project.

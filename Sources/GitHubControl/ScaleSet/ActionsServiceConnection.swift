@@ -188,7 +188,18 @@ actor ActionsServiceConnection {
   nonisolated let retry: ActionsRetry
 
   private var admin: Admin?
-  private var refresh: Task<Admin, any Error>?
+  /// Whether a token exchange is in flight. The exchange itself is an unstructured `Task` nobody
+  /// holds: see `adminConnection()`.
+  private var exchanging = false
+  /// Callers parked on the in-flight exchange, by ticket.
+  private var waiters: [Int: CheckedContinuation<Admin, any Error>] = [:]
+  private var nextTicket = 0
+  /// Tickets currently inside `parkOnExchange`. A cancellation that arrives after its waiter has
+  /// already been resumed must not leave anything behind in `cancelledTickets`.
+  private var liveTickets: Set<Int> = []
+  /// Tickets cancelled before their continuation was parked, so the parking step can resume them
+  /// straight away instead of waiting for an exchange they no longer care about.
+  private var cancelledTickets: Set<Int> = []
 
   init(
     scope: GitHubScope, http: GitHubHTTPClient, apiBaseURL: URL, configBaseURL: URL,
@@ -290,22 +301,92 @@ actor ActionsServiceConnection {
 
   // MARK: - Admin token
 
+  /// Concurrent callers share one exchange; the actor can be re-entered across every `await`.
+  ///
+  /// The exchange runs as an unstructured `Task` that **nobody awaits directly**: `Task.value` is
+  /// not a cancellation point, so a caller parked on it ignores its own deadline and hangs until
+  /// GitHub answers (a 200 ms deadline over this used to return after 3.2 s, which is what made
+  /// `timeouts.jitGeneration` unenforceable on the scale-set path). Each caller instead parks on a
+  /// continuation the finished exchange resumes, and cancelling that caller resumes only *its*
+  /// continuation — the shared exchange keeps running for everyone else, and its result is still
+  /// cached, because one impatient session must not take the token away from the rest.
   private func adminConnection() async throws -> Admin {
     if let admin, now() < admin.expiresAt.addingTimeInterval(-seconds(options.tokenRefreshMargin)) {
       return admin
     }
-    // Concurrent callers share one exchange; the actor can be re-entered across every `await`.
-    if let refresh { return try await refresh.value }
-    let task = Task { try await self.exchangeCredentials() }
-    refresh = task
+    return try await parkOnExchange()
+  }
+
+  /// Starting the exchange is deliberately *not* done before parking: a caller that decided one was
+  /// already running and only then parked could be registered after that exchange had finished
+  /// waking everybody, and would then wait for a refresh nobody is doing. Enrolling the waiter and
+  /// starting the exchange happen in the one synchronous step below instead.
+  private func startExchangeIfIdle() {
+    guard !exchanging else { return }
+    exchanging = true
+    Task { await self.runExchange() }
+  }
+
+  private func runExchange() async {
+    let result: Result<Admin, any Error>
     do {
-      let fresh = try await task.value
-      admin = fresh
-      refresh = nil
-      return fresh
+      result = .success(try await exchangeCredentials())
     } catch {
-      refresh = nil
-      throw error
+      result = .failure(error)
+    }
+    finishExchange(result)
+  }
+
+  /// Publishes the exchange's outcome to everyone still waiting. `exchanging` is cleared first, so
+  /// a waiter that a failure wakes can start a fresh exchange rather than parking forever.
+  private func finishExchange(_ result: Result<Admin, any Error>) {
+    exchanging = false
+    if case .success(let fresh) = result { admin = fresh }
+    let parked = waiters
+    waiters.removeAll()
+    if case .failure(let error) = result, parked.isEmpty {
+      // Everyone who asked for this token gave up while it was in flight, so there is nobody left
+      // to throw to. Without this line the outage would be invisible until the next caller repeats
+      // it, and a deadline-driven cancellation makes exactly that shape routine.
+      logger.warning(
+        "Actions service token exchange failed with no caller left to report it to",
+        metadata: [
+          "scope": .string(scope.description), "error": .string(String(describing: error)),
+        ])
+    }
+    for continuation in parked.values { continuation.resume(with: result) }
+  }
+
+  private func parkOnExchange() async throws -> Admin {
+    let ticket = nextTicket
+    nextTicket += 1
+    liveTickets.insert(ticket)
+    defer {
+      liveTickets.remove(ticket)
+      cancelledTickets.remove(ticket)
+    }
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Admin, any Error>) in
+        if cancelledTickets.contains(ticket) {
+          continuation.resume(throwing: CancellationError())
+        } else {
+          waiters[ticket] = continuation
+          startExchangeIfIdle()
+        }
+      }
+    } onCancel: {
+      Task { await self.cancelWaiter(ticket) }
+    }
+  }
+
+  /// Resumes one waiter with `CancellationError`. Deliberately does **not** touch `exchanging` or
+  /// the exchange task: the other waiters, and the cached token, are not this caller's to drop.
+  private func cancelWaiter(_ ticket: Int) {
+    guard liveTickets.contains(ticket) else { return }
+    if let continuation = waiters.removeValue(forKey: ticket) {
+      continuation.resume(throwing: CancellationError())
+    } else {
+      cancelledTickets.insert(ticket)
     }
   }
 

@@ -1,33 +1,98 @@
 #!/bin/bash
-# RunnerVM installer postinstall: verify the shipped vmworker's signature and virtualization
-# entitlement. This is a check only -- it never signs or re-signs anything. Signing happens once,
-# at build time (scripts/build-package.sh), off the target host; see
-# docs/design/distribution.md "Unsigned phase" and "Package layout".
+# RunnerVM installer postinstall: verify the publisher and integrity of every binary the package
+# just installed. This is a check only -- it never signs or re-signs anything. Signing happens
+# once, at build time (scripts/build-package.sh), off the target host; see
+# docs/design/distribution.md "Signing and notarization" and "Package layout".
+#
+# This file is a TEMPLATE: scripts/build-package.sh copies it and substitutes the Apple Team ID
+# the shipped binaries are actually signed by before handing the copy to `pkgbuild --scripts`. The
+# checked-in file is never modified.
 #
 # Runs as root, installed by pkgbuild's --scripts dir (packaging/pkg/scripts). A failure here
-# means the shipped binary is corrupt or was tampered with in transit/at rest -- the installer
-# already copied the files, but this refuses to let the install be considered trustworthy.
+# means the shipped binaries are corrupt, were tampered with in transit/at rest, or were not built
+# by us -- the installer already copied the files, but this refuses to let the install be
+# considered trustworthy.
 set -euo pipefail
 
-VMWORKER="/usr/local/libexec/runnervm/vmworker"
+# The installer passes the destination volume as $3 ("/" for a normal install).
+DSTVOLUME="${3:-/}"
+PREFIX="${DSTVOLUME%/}/usr/local"
 
-if [ ! -f "$VMWORKER" ]; then
-    echo "error: $VMWORKER not found after install" >&2
-    exit 1
-fi
+VMWORKER="$PREFIX/libexec/runnervm/vmworker"
+GUEST_AGENT="$PREFIX/share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent"
+BINARIES=(
+    "$PREFIX/libexec/runnervm/runnerd"
+    "$PREFIX/bin/runnerctl"
+    "$VMWORKER"
+    "$GUEST_AGENT"
+)
 
-if ! codesign --verify --strict "$VMWORKER" 2>/dev/null; then
-    echo "error: $VMWORKER failed codesign --verify --strict." >&2
-    echo "The package is corrupt or was tampered with. Do not start runnerd; re-download the" >&2
-    echo "release from https://github.com/andrejvysny/RunnerVM/releases and reinstall." >&2
+# Substituted at build time. Empty = an ad-hoc/dev build, which keeps the signature-only checks
+# below. A real value is the 10-character Apple Team ID the binaries must be signed by.
+TEAM_ID="@RUNNERVM_TEAM_ID@"
+
+REINSTALL_HINT="re-download the release from https://github.com/andrejvysny/RunnerVM/releases and reinstall."
+
+fail() {
+    echo "error: $1" >&2
+    shift
+    while [ $# -gt 0 ]; do
+        echo "$1" >&2
+        shift
+    done
     exit 1
-fi
+}
+
+# An unsubstituted placeholder, or anything else that is not a well-formed team id, means this
+# script did not go through build-package.sh's templating. Fail the install rather than silently
+# downgrading to the weaker signature-only check: a missing publisher check is exactly what an
+# attacker who repackaged the payload would want.
+case "$TEAM_ID" in
+'') ;;
+*[!A-Z0-9]*)
+    fail "postinstall was not templated with a valid team id." \
+        "The package was built incorrectly (scripts/build-package.sh renders this script). Do not" \
+        "start runnerd; $REINSTALL_HINT"
+    ;;
+*)
+    if [ "${#TEAM_ID}" -ne 10 ]; then
+        fail "postinstall was templated with a malformed team id." \
+            "The package was built incorrectly. Do not start runnerd; $REINSTALL_HINT"
+    fi
+    ;;
+esac
+
+for bin in "${BINARIES[@]}"; do
+    if [ ! -f "$bin" ]; then
+        fail "$bin not found after install"
+    fi
+
+    if ! codesign --verify --strict "$bin" 2>/dev/null; then
+        fail "$bin failed codesign --verify --strict." \
+            "The package is corrupt or was tampered with. Do not start runnerd; $REINSTALL_HINT"
+    fi
+
+    # Signed release: the signature must chain to Apple and its leaf must carry OUR team, and the
+    # binary must run under the hardened runtime (which is also what notarization required). An
+    # ad-hoc build satisfies neither and is only reached with an empty team id.
+    if [ -n "$TEAM_ID" ]; then
+        if ! codesign --verify --strict \
+            -R "=anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            "$bin" 2>/dev/null; then
+            fail "$bin is not signed by Apple Developer ID team $TEAM_ID." \
+                "This package was not built by the RunnerVM publisher, or was modified after it" \
+                "was signed. Do not start runnerd; $REINSTALL_HINT"
+        fi
+        if ! codesign -d --verbose=2 "$bin" 2>&1 | grep -q 'flags=.*runtime'; then
+            fail "$bin is not signed with the hardened runtime." \
+                "The package was built incorrectly. Do not start runnerd; $REINSTALL_HINT"
+        fi
+    fi
+done
 
 if ! codesign -d --entitlements :- "$VMWORKER" 2>&1 | grep -q com.apple.security.virtualization; then
-    echo "error: $VMWORKER is missing the com.apple.security.virtualization entitlement." >&2
-    echo "The package was built incorrectly. Do not start runnerd; re-download the release from" >&2
-    echo "https://github.com/andrejvysny/RunnerVM/releases and reinstall." >&2
-    exit 1
+    fail "$VMWORKER is missing the com.apple.security.virtualization entitlement." \
+        "The package was built incorrectly. Do not start runnerd; $REINSTALL_HINT"
 fi
 
 exit 0

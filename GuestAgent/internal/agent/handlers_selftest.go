@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 
-	"github.com/runnervm/guest-agent/internal/keychain"
-	"github.com/runnervm/guest-agent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
 )
 
 // handleSelfTest proves that a certificate injected into a

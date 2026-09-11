@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/runnervm/guest-agent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
 )
 
 // Guest-protocol error codes beyond the common set in Proto/envelope.md.

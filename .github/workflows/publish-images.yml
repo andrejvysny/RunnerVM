@@ -37,11 +37,11 @@ on:
         description: "Optional extra tag to publish alongside <date>/r<runner-version>/stable/v1"
         required: false
         default: ""
-  schedule:
-    # Monthly. docs/published-images.md "These images are perishable": a build goes tooOld 30 days
-    # after the first actions/runner release it misses, so a monthly rebuild+republish keeps
-    # `:stable` inside that window even across a month with zero runner releases.
-    - cron: "17 6 1 * *"
+  # No `schedule:` trigger on purpose (2026-09-02): the job needs a self-hosted runner labelled
+  # `runnervm-publisher`, and none exists yet, so a cron run would queue forever. Dispatch it by
+  # hand, or publish from a host with scripts/publish-images.sh (docs/published-images.md).
+  # Re-add a monthly cron once a publisher host is registered: images go tooOld 30 days after the
+  # first actions/runner release they miss ("These images are perishable").
 
 permissions:
   contents: read

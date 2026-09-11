@@ -69,9 +69,14 @@ extension InstanceManager {
   /// recycled, because reusing a disk whose VM died under a job is exactly what §72 forbids.
   func restartInterrupted(_ previous: InstanceRecord) async {
     guard previous.lifecycle == .reusable, !previous.tainted,
-          Self.reusableRestartStates.contains(previous.state),
-          let record = try? await require(previous.id), record.state == .interrupted
+          Self.reusableRestartStates.contains(previous.state)
     else { return }
+    // Claimed before the row is even re-read, because everything from here to `respawn`'s CAS is a
+    // suspension point the retention sweep can land in — and it would find exactly the
+    // `interrupted` row this restart has already been decided for.
+    beginRestart(previous.id)
+    defer { endRestart(previous.id) }
+    guard let record = try? await require(previous.id), record.state == .interrupted else { return }
     let layout = await instanceStore.layout(for: record.id)
     guard Self.exists(layout.disk), Self.exists(layout.spec) else {
       await recycle(
@@ -100,7 +105,12 @@ extension InstanceManager {
     return config.effectiveReuse?.maxRestarts ?? ReusePolicy.default.maxRestarts
   }
 
+  /// The caller (`restartInterrupted`) holds the restart claim for the whole of this.
   private func respawn(_ record: InstanceRecord, specPath: URL) async {
+    // A restart gets the same boot budget a create does, measured from the moment it takes the
+    // row: a worker that will not spawn and a guest that will not boot are the same failure to
+    // whoever is waiting for this VM.
+    let deadline = ContinuousClock.now + (await vmBootTimeout(for: record))
     // Claiming `startingWorker` is what claims the restart. A worker death arrives twice — once
     // as a lost connection, once from the reconciler — and the caller that loses this CAS must
     // leave the row alone rather than tear down the boot the winner has just started.
@@ -113,7 +123,9 @@ extension InstanceManager {
     await supervisor.forget(id: record.id)
     await guests.drop(record.id)
     do {
-      let session = try await supervisor.start(instance: starting, specPath: specPath)
+      let session = try await supervisor.start(
+        instance: starting, specPath: specPath,
+        gracefulShutdownMs: await gracefulShutdownMs(for: starting))
       let booting = try await transition(starting, to: .startingVM) { row in
         row.workerPid = session.pid
         row.workerSocket = session.socketPath.path(percentEncoded: false)
@@ -121,6 +133,7 @@ extension InstanceManager {
       }
       logger.notice("reusable instance restarted", metadata: .context(instance: record.id))
       await boot(booting)
+      watchBoot(booting, deadline: deadline)
     } catch {
       logger.warning(
         "reusable restart failed",

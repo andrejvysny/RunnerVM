@@ -14,13 +14,14 @@ import Testing
 
   private func withAgent(
     script: FakeGuestAgent.Script = FakeGuestAgent.Script(),
+    callDeadline: Duration = .seconds(30),
     _ body: (GuestAgentClient, FakeGuestAgent) async throws -> Void
   ) async throws {
     let tree = try SocketTree()
     defer { tree.remove() }
     let agent = FakeGuestAgent(socketPath: tree.socket(), script: script)
     try await agent.start()
-    let client = GuestAgentClient(socketPath: tree.socket())
+    let client = GuestAgentClient(socketPath: tree.socket(), callDeadline: callDeadline)
     do {
       try await body(client, agent)
     } catch {
@@ -108,6 +109,27 @@ import Testing
 
       #expect(try await client.stopRunner(StopRunnerRequest(sessionId: "s-1", graceMs: 100)).stopped)
       #expect(try await client.runnerStatus(sessionId: "s-1").state == .exited)
+    }
+  }
+
+  /// The guest blocks for the whole SIGTERM-to-SIGKILL grace before it answers `agent.stopRunner`,
+  /// so that call carries its own deadline (`graceMs` + 15 s) instead of the client-wide one: under
+  /// the shared deadline any grace longer than it would be cancelled and read as a guest timeout,
+  /// turning the profile's window into a kill at 30 s.
+  @Test func stopRunnerOutlivesTheClientWideCallDeadline() async throws {
+    var script = FakeGuestAgent.Script()
+    script.delays = [.stopRunner: .milliseconds(300), .cleanup: .milliseconds(300)]
+    try await withAgent(script: script, callDeadline: .milliseconds(30)) { client, agent in
+      // The client-wide deadline is real: an equally slow method without an override gives up.
+      let error = await #expect(throws: GuestAgentError.self) {
+        _ = try await client.cleanup(epoch: 1)
+      }
+      #expect(error?.code == "AGENT_REQUEST_TIMEOUT")
+
+      let stopped = try await client.stopRunner(
+        StopRunnerRequest(sessionId: "s-1", graceMs: 5_000))
+      #expect(stopped.stopped)
+      #expect(await agent.stopRunnerCalls().map(\.graceMs) == [5_000])
     }
   }
 

@@ -97,10 +97,17 @@ public actor GuestAgentClient {
       method: .runnerStatus)
   }
 
+  /// The agent answers only after it has waited out `graceMs` between SIGTERM and SIGKILL, so
+  /// this call carries its own deadline instead of the shared `callDeadline`: a fixed 30 s would
+  /// cancel that wait -- and turn any longer grace into a kill at 30 s -- for every profile whose
+  /// `timeouts.gracefulShutdown` is larger.
   public func stopRunner(_ request: StopRunnerRequest) async throws -> StopRunnerResponse {
     let payload = try GuestCoding.payload(request)
     return try decode(
-      StopRunnerResponse.self, from: try await call(.stopRunner, payload: payload),
+      StopRunnerResponse.self,
+      from: try await call(
+        .stopRunner, payload: payload,
+        deadline: .milliseconds(max(0, request.graceMs)) + .seconds(15)),
       method: .stopRunner)
   }
 
@@ -250,13 +257,16 @@ public actor GuestAgentClient {
     await previous?.close()
   }
 
+  /// `deadline` overrides the client-wide `callDeadline` for a method whose answer is bounded by
+  /// something only the caller knows (`agent.stopRunner` and its grace window).
   private func call(
-    _ method: GuestMethod, payload: JSONValue? = nil, allowReconnect: Bool = true
+    _ method: GuestMethod, payload: JSONValue? = nil, allowReconnect: Bool = true,
+    deadline: Duration? = nil
   ) async throws -> JSONValue {
     let connection = try await connection()
     do {
       return try await connection.call(
-        method: method.rawValue, payload: payload, deadline: callDeadline)
+        method: method.rawValue, payload: payload, deadline: deadline ?? callDeadline)
     } catch let error as RPCCallError {
       if case .cancelled = error { throw CancellationError() }
       // The bridge closes the connection when the guest has no agent yet, so one silent redial
@@ -264,7 +274,8 @@ public actor GuestAgentClient {
       if case .disconnected = error {
         await drop()
         if allowReconnect {
-          return try await call(method, payload: payload, allowReconnect: false)
+          return try await call(
+            method, payload: payload, allowReconnect: false, deadline: deadline)
         }
       }
       throw Self.translate(error, method: method)

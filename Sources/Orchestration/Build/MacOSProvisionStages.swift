@@ -172,7 +172,7 @@ extension ImageBuilder {
   private func driveProvisioning(
     _ run: BuildRun, macos: MacOSProvisionInput, address: String
   ) async throws {
-    let work = paths.buildDir(run.id).appending(path: ".provision", directoryHint: .isDirectory)
+    let work = provisionWork(run.id)
     try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
     try? FileManager.default.setAttributes(
       [.posixPermissions: 0o700], ofItemAtPath: work.path(percentEncoded: false))
@@ -182,9 +182,19 @@ extension ImageBuilder {
       "--result", resultPath.path(percentEncoded: false),
       "--agent-binary", macos.agentBinary.path(percentEncoded: false),
       "--work", work.path(percentEncoded: false),
+      // Named explicitly because the script defaults `OUT` to `$HOME/Library/Caches/…` under
+      // `set -u`: the service account runnerd runs as may have no writable home at all, and a
+      // cache the daemon cannot clean up is a leak whatever the outcome.
+      "--out", paths.buildDir(run.id).path(percentEncoded: false),
     ]
     if macos.debugSSH { argv.append("--debug-ssh") }
     await run.log?.line("--- \(macos.script.lastPathComponent) \(argv.joined(separator: " "))")
+
+    // `posix_spawn` inherits no environment at all, so the allowlist is passed explicitly -- the
+    // same one `vmworker` gets, which is what keeps runnerd's GitHub and registry credentials out
+    // of a script that opens an SSH session into a guest.
+    var environment = WorkerEnvironment.build(from: ProcessInfo.processInfo.environment)
+    environment["RVM_PROVISION_TIMEOUT"] = String(Self.scriptTimeoutSeconds(run.input.timeout))
 
     // The script's output goes through a stream rather than a `Task` per line: the writes land on
     // an actor, and one unstructured task per line would let a 40-minute transcript interleave
@@ -196,14 +206,30 @@ extension ImageBuilder {
     do {
       outcome = try await tuning.processRunner.run(
         macos.script.path(percentEncoded: false), argv, timeout: run.input.timeout,
+        environment: environment,
+        onSpawn: { ProvisionProcessGroup.record($0, in: work) },
         onOutput: { publish.yield($0) })
     } catch {
       publish.finish()
       await pump.value
+      ProvisionProcessGroup.clear(in: work)
       throw error
     }
     publish.finish()
     await pump.value
+    ProvisionProcessGroup.clear(in: work)
+    // Both checked before `result.json` is read: a script whose process group was killed wrote
+    // whatever it had got to, and its exit code names the signal that ended it. Neither says why
+    // the run ended. Cancellation comes first -- `ImageBuilderStages` maps a `CancellationError`
+    // to `BUILD_CANCELLED`, and a `build cancel` recorded as `BUILD_TOOL_TIMEOUT` would blame the
+    // host for an operator's decision.
+    try Task.checkCancellation()
+    guard !outcome.cancelled else { throw CancellationError() }
+    guard !outcome.timedOut else {
+      throw ImageBuildError.toolTimedOut(
+        tool: macos.script.lastPathComponent,
+        seconds: Int(run.input.timeout.components.seconds))
+    }
     // The script guarantees the result file exists whatever its exit code, so it -- not the exit
     // code -- is what says why a run failed. A missing file is itself reported as a failure.
     let result = try MacOSProvisionResult.read(resultPath)
@@ -214,6 +240,22 @@ extension ImageBuilder {
     }
     try result.requireSealable(debugSSH: macos.debugSSH)
     try await waitForGuestStop(run)
+  }
+
+  /// Where the provisioning script's scratch, its `result.json` and its process-group marker live.
+  /// Inside the build directory, so recovery can find it from a row alone.
+  func provisionWork(_ id: ImageBuildID) -> URL {
+    paths.buildDir(id).appending(path: ".provision", directoryHint: .isDirectory)
+  }
+
+  /// The script's own ceiling, five minutes inside the build's.
+  ///
+  /// `RVM_PROVISION_TIMEOUT` defaults to 3600 s, which is exactly `build.timeout`, so today both
+  /// expire at the same instant and the host kills the script in the same breath the script would
+  /// have used to write a `--result` explaining itself. Five minutes of headroom means the
+  /// script's own `trap cleanup EXIT` always gets to run first.
+  static func scriptTimeoutSeconds(_ timeout: Duration) -> Int64 {
+    max(60, timeout.components.seconds - 300)
   }
 
   /// The guest halts itself once the lockdown is done, so the VM reaching `stopped` on its own is

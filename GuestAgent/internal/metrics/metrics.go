@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/system"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/system"
 )
 
 // DefaultWindow is the sampling window for CPU utilisation. It is short

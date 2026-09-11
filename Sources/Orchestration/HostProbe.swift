@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import ProcessSpawn
 import RunnerCore
 import RunnerLogging
 
@@ -14,6 +15,10 @@ public struct HostProbeResult: Sendable, Hashable {
   public var macOSGuestLimit: Int
   public var probeSucceeded: Bool
   public var failureReason: String?
+  /// The probe was spawned and had to be killed, as opposed to being missing or unsigned. The
+  /// maintenance loop re-runs a timed-out probe rather than leaving the daemon reporting
+  /// `virtualizationSupported: false` for the rest of its life.
+  public var probeTimedOut: Bool = false
 }
 
 /// Mirror of `VirtualizationCore.HostCapabilities`, redeclared here because runnerd must never
@@ -38,6 +43,17 @@ public enum HostProbe {
   /// Overrides the sibling-of-runnerd lookup; the end-to-end tests point this at a stub script.
   public static let executableOverrideVariable = "RUNNERVM_VMWORKER"
 
+  /// Wall-clock ceiling on one `vmworker probe`. `run` is awaited before runnerd binds its socket
+  /// and opens its database, so an unbounded probe is an unbounded — and silent — startup hang.
+  public static let defaultDeadline: Duration = .seconds(60)
+
+  /// Grace between the deadline's `SIGTERM` and the `SIGKILL` that follows it.
+  private static let killGrace: TimeInterval = 5
+
+  /// How long the probe's pipes are still read after its leader exits. A probe writes one small
+  /// JSON document, so this only ever covers a helper that forked something before dying.
+  private static let drainGrace: Duration = .seconds(2)
+
   public static func defaultExecutable() -> URL? {
     let environment = ProcessInfo.processInfo.environment
     if let override = environment[executableOverrideVariable], !override.isEmpty {
@@ -56,14 +72,23 @@ public enum HostProbe {
 
   /// Never throws: a missing or unsigned helper degrades to `ProcessInfo` facts so a developer
   /// can run `runnerd --foreground` without a code-signing step.
-  public static func run(executable: URL?, logger: Logger) async -> HostProbeResult {
+  public static func run(
+    executable: URL?, logger: Logger, deadline: Duration = defaultDeadline
+  ) async -> HostProbeResult {
     guard let executable else {
       return fallback(reason: "no vmworker executable found", logger: logger)
     }
-    let outcome = await Task.detached { Self.invoke(executable) }.value
-    switch outcome {
+    switch await invoke(executable, deadline: deadline) {
     case .success(let capabilities):
       return result(from: capabilities)
+    case .timedOut:
+      // Deliberately its own log line: a wedged helper is a different host problem from a missing
+      // or unsigned one, and the two used to be indistinguishable in the daemon's startup log.
+      let limit = seconds(deadline)
+      logger.warning(
+        "vmworker probe timed out; using fallback host facts",
+        metadata: ["timeout_seconds": .stringConvertible(limit)])
+      return fallbackResult(reason: "vmworker probe timed out after \(limit)s", timedOut: true)
     case .failure(let reason):
       return fallback(reason: reason, logger: logger)
     }
@@ -74,37 +99,43 @@ public enum HostProbe {
   private enum Outcome: Sendable {
     case success(ProbedHostCapabilities)
     case failure(String)
+    case timedOut
   }
 
-  private static func invoke(_ executable: URL) -> Outcome {
-    guard FileManager.default.isExecutableFile(atPath: executable.path(percentEncoded: false)) else {
-      return .failure("\(executable.path(percentEncoded: false)) is not executable")
-    }
-    let process = Process()
-    process.executableURL = executable
-    process.arguments = ["probe", "--json"]
-    let output = Pipe()
-    let errors = Pipe()
-    process.standardOutput = output
-    process.standardError = errors
+  /// One `vmworker probe`, through the shared `posix_spawn` runner: an explicit environment, both
+  /// pipes drained concurrently against a deadline (a probe that fills the 64 KiB stderr buffer
+  /// first would deadlock a stdout-to-EOF reader), `SIGTERM` at the deadline and `SIGKILL`
+  /// `killGrace` later against the probe's whole process group, and a decoded exit code.
+  private static func invoke(_ executable: URL, deadline: Duration) async -> Outcome {
+    let path = executable.path(percentEncoded: false)
+    let result: SpawnResult
     do {
-      try process.run()
+      result = try await ProcessSpawn.run(
+        SpawnRequest(
+          executable: path, arguments: ["probe", "--json"], timeout: deadline,
+          killGrace: .seconds(killGrace), drainGrace: drainGrace))
+    } catch let error as SpawnError {
+      if case .executableMissing = error { return .failure("\(path) is not executable") }
+      return .failure("cannot spawn vmworker probe: \(error)")
     } catch {
       return .failure("cannot spawn vmworker probe: \(error)")
     }
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    let errorText = String(
-      decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      let detail = errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-      return .failure("vmworker probe exited \(process.terminationStatus): \(detail)")
+    guard !result.timedOut else { return .timedOut }
+    guard result.exitCode == 0 else {
+      let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+      return .failure("vmworker probe exited \(result.exitCode): \(detail)")
     }
     do {
-      return .success(try JSONDecoder().decode(ProbedHostCapabilities.self, from: data))
+      return .success(
+        try JSONDecoder().decode(ProbedHostCapabilities.self, from: Data(result.stdout.utf8)))
     } catch {
       return .failure("vmworker probe emitted unreadable JSON: \(error)")
     }
+  }
+
+  private static func seconds(_ duration: Duration) -> TimeInterval {
+    let components = duration.components
+    return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
   }
 
   // MARK: - Mapping
@@ -130,6 +161,11 @@ public enum HostProbe {
     logger.warning(
       "host probe unavailable; falling back to ProcessInfo facts",
       metadata: ["reason": .string(reason)])
+    return fallbackResult(reason: reason)
+  }
+
+  /// The fallback facts without the log line: the timeout path above logs its own.
+  private static func fallbackResult(reason: String, timedOut: Bool = false) -> HostProbeResult {
     let info = ProcessInfo.processInfo
     let os = info.operatingSystemVersion
     return HostProbeResult(
@@ -146,7 +182,8 @@ public enum HostProbe {
       nestedVirtualizationSupported: false,
       macOSGuestLimit: HostConstants.macOSGuestLimit,
       probeSucceeded: false,
-      failureReason: reason)
+      failureReason: reason,
+      probeTimedOut: timedOut)
   }
 
   private static func machineArchitecture() -> String {

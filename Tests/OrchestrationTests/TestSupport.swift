@@ -28,8 +28,58 @@ struct TempTree {
 
   /// Stand-in for the signed `vmworker probe` binary: prints canned `HostCapabilities` JSON.
   func vmworkerStub() throws -> URL {
-    let url = root.appending(path: "vmworker-stub")
-    try Data(Self.stubScript.utf8).write(to: url)
+    try executableScript("vmworker-stub", Self.stubScript)
+  }
+
+  /// A `vmworker` that never answers, for the probe deadline: `exec` so the process the watchdog
+  /// signals is the one holding the pipes.
+  func hangingVMWorkerStub() throws -> URL {
+    try executableScript(
+      "vmworker-hang",
+      """
+      #!/bin/sh
+      exec sleep 30
+      """)
+  }
+
+  /// Writes far more than a 64 KiB pipe buffer to stderr *before* its JSON reaches stdout. A
+  /// reader that drained stdout to EOF first would block here forever, and so would this stub.
+  func noisyVMWorkerStub() throws -> URL {
+    try executableScript(
+      "vmworker-noisy",
+      """
+      #!/bin/sh
+      i=0
+      while [ $i -lt 512 ]; do
+        printf '%0256d\\n' "$i" >&2
+        i=$((i + 1))
+      done
+      \(Self.capabilitiesJSON)
+      """)
+  }
+
+  /// Appends a line to `<root>/vmworker-calls` on every invocation, so a test can prove the probe
+  /// was -- or was not -- run again.
+  func countingVMWorkerStub() throws -> URL {
+    try executableScript(
+      "vmworker-counting",
+      """
+      #!/bin/sh
+      echo x >> "$(dirname "$0")/vmworker-calls"
+      \(Self.capabilitiesJSON)
+      """)
+  }
+
+  /// How many times `countingVMWorkerStub` has been run.
+  var vmworkerCallCount: Int {
+    guard let text = try? String(contentsOf: root.appending(path: "vmworker-calls"), encoding: .utf8)
+    else { return 0 }
+    return text.split(separator: "\n").count
+  }
+
+  private func executableScript(_ name: String, _ body: String) throws -> URL {
+    let url = root.appending(path: name)
+    try Data(body.utf8).write(to: url)
     try FileManager.default.setAttributes(
       [.posixPermissions: 0o755], ofItemAtPath: url.path(percentEncoded: false))
     return url
@@ -68,6 +118,11 @@ struct TempTree {
 
   private static let stubScript = """
     #!/bin/sh
+    \(capabilitiesJSON)
+    """
+
+  /// The heredoc every stub ends with, so a stub that exercises the drain still decodes.
+  private static let capabilitiesJSON = """
     cat <<'JSON'
     {
       "virtualizationSupported": true,

@@ -40,6 +40,10 @@ public final class FakeGitHubServer: Sendable {
     public var headers: [String: String]
     public var body: Data
     public var failure: URLError?
+    /// How long the fake sits on this answer before delivering it — a GitHub that is reachable but
+    /// slow, which is the only shape a caller-side deadline can actually be tested against. The
+    /// wait is a timer, not a sleep in the test: cancelling the `URLSession` task drops it.
+    public var delay: Duration?
 
     public init(status: Int = 200, headers: [String: String] = [:], body: Data = Data()) {
       self.status = status
@@ -49,10 +53,11 @@ public final class FakeGitHubServer: Sendable {
     }
 
     public static func json(
-      _ raw: String, status: Int = 200, headers: [String: String] = [:]
+      _ raw: String, status: Int = 200, headers: [String: String] = [:], delay: Duration? = nil
     ) -> Reply {
       var reply = Reply(status: status, headers: headers, body: Data(raw.utf8))
       reply.headers["Content-Type"] = "application/json"
+      reply.delay = delay
       return reply
     }
 
@@ -193,6 +198,14 @@ final class FakeGitHubRegistry: Sendable {
 }
 
 final class FakeGitHubURLProtocol: URLProtocol {
+  /// A `Reply.delay` in flight. `URLProtocol` is not `Sendable`, but this is only ever touched by
+  /// the URL loading system's own serial calls into `startLoading`/`stopLoading` for one instance.
+  private nonisolated(unsafe) var pending: DispatchWorkItem?
+  /// Set by `stopLoading`, read on the timer queue before every client callback. Cancelling the
+  /// work item is not enough on its own: one that had already begun running keeps going, and a
+  /// delivery into a cancelled task's client is exactly what a deadline test must not produce.
+  private let stopped = Mutex(false)
+
   override class func canInit(with request: URLRequest) -> Bool {
     FakeGitHubRegistry.shared.server(for: request.url) != nil
   }
@@ -206,9 +219,24 @@ final class FakeGitHubURLProtocol: URLProtocol {
       client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
       return
     }
+    // Recorded on arrival, answered on the timer: a test waiting for the request to be in flight
+    // must not have to wait out the delay too.
     let reply = server.respond(to: Self.record(request, url: url))
+    guard let delay = reply.delay, delay > .zero else {
+      deliver(reply, url: url)
+      return
+    }
+    nonisolated(unsafe) let owner = self
+    let work = DispatchWorkItem { owner.deliver(reply, url: url) }
+    pending = work
+    let parts = delay.components
+    let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
+  }
+
+  private func deliver(_ reply: FakeGitHubServer.Reply, url: URL) {
     if let failure = reply.failure {
-      client?.urlProtocol(self, didFailWithError: failure)
+      ifRunning { $0.urlProtocol(self, didFailWithError: failure) }
       return
     }
     guard
@@ -216,15 +244,28 @@ final class FakeGitHubURLProtocol: URLProtocol {
         url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers
       )
     else {
-      client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+      ifRunning { $0.urlProtocol(self, didFailWithError: URLError(.badServerResponse)) }
       return
     }
-    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-    if !reply.body.isEmpty { client?.urlProtocol(self, didLoad: reply.body) }
-    client?.urlProtocolDidFinishLoading(self)
+    ifRunning { $0.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed) }
+    if !reply.body.isEmpty { ifRunning { $0.urlProtocol(self, didLoad: reply.body) } }
+    ifRunning { $0.urlProtocolDidFinishLoading(self) }
   }
 
-  override func stopLoading() {}
+  /// Every client callback goes through here: `stopLoading` can land between any two of them, so
+  /// the flag is re-read immediately before each one rather than once per delivery.
+  private func ifRunning(_ body: (any URLProtocolClient) -> Void) {
+    guard let client, !stopped.withLock({ $0 }) else { return }
+    body(client)
+  }
+
+  /// A cancelled task must not be answered later: the pending delivery is cancelled *and* flagged,
+  /// because cancelling a `DispatchWorkItem` that is already running does nothing.
+  override func stopLoading() {
+    stopped.withLock { $0 = true }
+    pending?.cancel()
+    pending = nil
+  }
 
   private static func record(_ request: URLRequest, url: URL) -> FakeGitHubServer.Recorded {
     let components = URLComponents(url: url, resolvingAgainstBaseURL: false)

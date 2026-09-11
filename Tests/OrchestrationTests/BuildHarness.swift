@@ -292,7 +292,8 @@ final class RecordingProcessRunner: ProcessRunner, @unchecked Sendable {
   }
 
   func run(
-    _ executable: String, _ arguments: [String], timeout: Duration
+    _ executable: String, _ arguments: [String], timeout: Duration,
+    environment: [String: String]?
   ) async throws -> ProcessResult {
     var payload: [String: String] = [:]
     if executable.hasSuffix("hdiutil"), let source = arguments.last {

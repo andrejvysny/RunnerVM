@@ -82,3 +82,9 @@ Statuses: `new` (RunnerVM original), `derived` (adapted from Tart, header requir
   **Open before public binary distribution:** an attribution `NOTICE` entry per third-party SwiftPM
   and Go dependency (GRDB, swift-nio, swift-argument-parser, swift-log, Yams, lima-vm tooling),
   and a legal review of the FSL "competing use" clause for RunnerVM's use case. Not legal advice.
+- **2026-09-02** — re-verified before the first public release: 19/19 `Derived from openai/tart@16d186c`
+  headers and 7/7 `actions/scaleset@v0.4.0` port headers present. `NOTICE` now lists the MIT port and
+  every third-party dependency with its license; `README.md` states the mixed licensing and the
+  2027-05 FSL conversion date. Still open and accepted for v0.3.0 unless the operator decides
+  otherwise: an independent legal review of the FSL "competing use" clause for RunnerVM's use case.
+

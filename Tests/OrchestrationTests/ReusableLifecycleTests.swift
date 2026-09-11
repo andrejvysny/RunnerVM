@@ -22,14 +22,38 @@ import Testing
   static func reusable(
     maxJobs: Int = 10, maxAge: DurationValue = .hours(4), recycleOnFailure: Bool = true,
     maxRestarts: Int = 1, runnerOnline: DurationValue = .minutes(2),
-    allowPublicRepositories: Bool = false
+    allowPublicRepositories: Bool = false,
+    gracefulShutdown: DurationValue = .milliseconds(200),
+    vmBoot: DurationValue = .minutes(3)
   ) -> RunnerConfiguration {
     M2Harness.configuration(
-      runnerOnline: runnerOnline, lifecycle: .reusable,
+      vmBoot: vmBoot, runnerOnline: runnerOnline, lifecycle: .reusable,
       allowPublicRepositories: allowPublicRepositories,
       reuse: ReusePolicy(
         maxJobs: maxJobs, maxAge: maxAge, recycleOnFailure: recycleOnFailure,
-        maxRestarts: maxRestarts, acknowledgeSharedHost: true))
+        maxRestarts: maxRestarts, acknowledgeSharedHost: true),
+      gracefulShutdown: gracefulShutdown)
+  }
+
+  /// Spec §46: the cleanup's `agent.stopRunner` carries the profile's `timeouts.gracefulShutdown`,
+  /// which is what the guest waits out between SIGTERM and SIGKILL of the runner's process group.
+  @Test func cleanupStopsTheRunnerWithTheProfilesGrace() async throws {
+    let config = Self.reusable(gracefulShutdown: .seconds(45))
+    try await withHarness(configuration: config) { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance(
+        script: Self.script([.online, .busy, .exited]))
+
+      let session = try await harness.runners.startSession(instanceId: instance.id)
+      #expect(try await harness.awaitTerminal(session.id).state == .completed)
+      try await waitUntil("the VM to be cleaned back to idle") {
+        try await harness.record(instance.id).state == .idle
+      }
+
+      #expect(await agent.stopRunnerCalls().map(\.graceMs) == [45_000])
+      await agent.stop()
+    }
   }
 
   // MARK: - Happy path
@@ -275,6 +299,7 @@ import Testing
 
       await orchestrator.tick()
       await orchestrator.drainStarts()
+      await orchestrator.drainCancels()
 
       #expect(try await harness.runners.list().isEmpty)
       #expect(harness.github.requests(.post, M2Harness.jitPath).isEmpty)
@@ -308,6 +333,7 @@ import Testing
       let orchestrator = await harness.orchestrator(demand: manual, configuration: next)
       await orchestrator.tick()
       await orchestrator.drainStarts()
+      await orchestrator.drainCancels()
       #expect(try await harness.record(instance.id).state == .deleted)
       await agent.stop()
     }
@@ -379,6 +405,32 @@ import Testing
       await harness.instances.markWorkerDead(id: instance.id)
       try await waitUntil("the VM to be recycled after exceeding maxRestarts") {
         try await harness.record(instance.id).state == .deleted
+      }
+      await agent.stop()
+    }
+  }
+
+  /// A restart is a boot like any other, so it gets the profile's `timeouts.vmBoot` too: without
+  /// the watcher, a replacement worker that acknowledges `vm.start` and never reports the guest
+  /// running would park the row in `startingVM` forever, holding its capacity and its image pin.
+  @Test func aRestartedVMThatNeverReportsRunningFailsWithVMBootTimeout() async throws {
+    // Well above the respawn ladder, so a slow spawn cannot turn this into a `startingWorker`
+    // overrun (see the create-side test for the same margin).
+    try await withHarness(configuration: Self.reusable(vmBoot: .seconds(3))) { harness in
+      let (instance, agent) = try await harness.idleInstance()
+      // Only the *replacement* worker is broken; the first one booted this VM to idle.
+      var behaviour = FakeWorkerLauncher.Behaviour()
+      behaviour.statesAfterStart = []
+      await harness.launcher.set(behaviour)
+
+      await harness.launcher.killWorker(instance.id)
+      await harness.instances.markWorkerDead(id: instance.id)
+
+      let failed = try await harness.awaitInstance(instance.id, state: .failed)
+      #expect(failed.failureCode == "VM_BOOT_TIMEOUT")
+      #expect(failed.workerGeneration == 2)
+      try await waitUntil("the failure record to name the phase that overran") {
+        try await harness.instanceStore.failureRecord(instanceId: instance.id)?.phase == "startingVM"
       }
       await agent.stop()
     }

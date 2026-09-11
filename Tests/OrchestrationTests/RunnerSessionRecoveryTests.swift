@@ -470,4 +470,185 @@ import Testing
       await freshAgent.stop()
     }
   }
+
+  // MARK: - D10: a live registration owns its row
+
+  /// The sweep runs on every reconcile tick, and a `register` parked in `generate-jitconfig` has
+  /// exactly the shape it terminalizes: a persisted non-terminal row with no observer. Closing the
+  /// session there drops a registration GitHub is in the middle of handing back and tears the VM
+  /// down under the live call.
+  @Test func aSweepDuringAnInFlightRegistrationLeavesTheSessionAlone() async throws {
+    try await withHarness { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance(
+        script: Self.script([.online, .busy, .exited]))
+      let runners = harness.runners
+      harness.scaleSetPlane.stallJITConfig(for: 777)
+
+      async let started = runners.startSession(instanceId: instance.id, origin: .scaleSet(id: 777))
+      do {
+        try await waitUntil("the JIT request to be in flight") {
+          harness.scaleSetPlane.jitCalls().count == 1
+        }
+        let report = await runners.recoverSessions()
+
+        #expect(report.deferred == 1)
+        #expect(report.terminalized == 0)
+        #expect(report.reattached == 0)
+        // The row is still the one the live call is registering, and so is its VM.
+        let row = try #require(try await harness.runners.list().first)
+        #expect(row.state == .jitRequested)
+        #expect(try await harness.record(instance.id).state == .configuringRunner)
+      } catch {
+        // Never leave `register` parked: the scope exit awaits it, and nothing cancels it here, so
+        // the suite would hang instead of failing.
+        await harness.scaleSetPlane.releaseJITConfig()
+        _ = try? await started
+        throw error
+      }
+      await harness.scaleSetPlane.releaseJITConfig()
+
+      let session = try await started
+      let terminal = try await harness.awaitTerminal(session.id)
+      #expect(terminal.state == .completed)
+      #expect(terminal.result == "job")
+      // No orphan registration either: the sweep dropped no runner the JIT call had just issued.
+      #expect(harness.scaleSetPlane.removedRunners().isEmpty)
+      await agent.stop()
+    }
+  }
+
+  /// The mark is a claim with a clock on it. A `register` that never comes back -- a caller parked
+  /// past its own JIT deadline -- must not strand its VM forever, so the claim expires.
+  @Test func aStaleRegistrationMarkStopsProtectingItsRow() async throws {
+    try await withHarness { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      let orphan = try await harness.seedOrphanSession(
+        instance: instance.id, profile: "linux", state: .jitRequested)
+      let recovered = await harness.restartedRunners()
+      let profileRow = try #require(
+        try await GRDBProfileRepository(db: harness.database).get(name: "linux"))
+      let grace = RunnerSessionManager.registrationGrace(try profileRow.decodedConfig())
+
+      // A `register` still inside its JIT call: the row is left to it.
+      await recovered.markRegistering(orphan)
+      let deferred = await recovered.recoverSessions()
+      #expect(deferred.deferred == 1)
+      #expect(deferred.terminalized == 0)
+      #expect(try await harness.session(orphan).state == .jitRequested)
+
+      // The same mark, one second older than `jitGeneration` plus its slack.
+      await recovered.markRegistering(orphan, age: grace.duration + .seconds(1))
+      #expect(await recovered.recoverSessions().terminalized == 1)
+      // And reaped on the way past, so an abandoned `register` leaves nothing behind.
+      #expect(await recovered.isRegistering(orphan, within: .days(1)) == false)
+
+      let session = try await harness.session(orphan)
+      #expect(session.state == .jitFailed)
+      #expect(session.failureCode == "DAEMON_RESTART")
+      try await harness.awaitInstance(instance.id, state: .deleted)
+      await agent.stop()
+    }
+  }
+
+  /// The sweep decides on a snapshot: `rows` is listed once, and `contextForRecovery` awaits four
+  /// more times before `recover` gets to act. `settle` deliberately re-targets its terminal CAS
+  /// from whatever the row actually says, so deciding on the stale snapshot would close a session
+  /// that came alive in between -- and drop its registration on the way out.
+  @Test func aRowThatMovedUnderTheSnapshotIsLeftToWhoeverMovedIt() async throws {
+    try await withHarness { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      // A registration the stray lookup would find: without the re-read this sweep DELETEs it.
+      harness.stubRunnerNamed(instance.name)
+      let orphan = try await harness.seedOrphanSession(
+        instance: instance.id, profile: "linux", state: .jitRequested)
+      let gate = SessionGate()
+      let recovered = await harness.restartedRunners(
+        profiles: GatedProfileRepository(
+          wrapping: GRDBProfileRepository(db: harness.database), gate: gate))
+
+      async let sweep = recovered.recoverSessions()
+      do {
+        // Parked inside `contextForRecovery`, holding a `jitRequested` snapshot.
+        try await waitUntil("the sweep to reach the profile read") { await gate.arrivals == 1 }
+        try await harness.forceSessionState(orphan, to: .runnerOnline)
+      } catch {
+        await gate.open()
+        _ = await sweep
+        throw error
+      }
+      await gate.open()
+      let report = await sweep
+
+      #expect(report.deferred == 1)
+      #expect(report.terminalized == 0)
+      #expect(report.reattached == 0)
+      // Untouched: no terminal CAS, no DELETE against the registration, no VM handed back.
+      #expect(try await harness.session(orphan).state == .runnerOnline)
+      #expect(harness.github.requests(.delete, M2Harness.runnerPath).isEmpty)
+      #expect(try await harness.record(instance.id).state == .idle)
+      #expect(await recovered.observedSessions().isEmpty)
+      await agent.stop()
+    }
+  }
+
+  /// The other half of the same re-read: ownership can appear without the state moving at all.
+  /// Two sweeps overlap on one reconcile tick, the second re-adopts a `runnerOnline` row -- which
+  /// `reattach` does without transitioning it -- and the first must not then install a second
+  /// observer over the first. Two observers on one session is two pollers racing to close it.
+  @Test func aRowSomebodyElseAdoptedUnderTheSnapshotKeepsItsObserver() async throws {
+    try await withHarness { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      var script = FakeGuestAgent.Script()
+      // Sticky `online`: the re-adopted session stays exactly where it is, so the only thing that
+      // can change under the parked sweep is who owns it.
+      script.runnerStatus = RunnerStatus(state: .online, pid: 4_242)
+      let (instance, agent) = try await harness.idleInstance(script: script)
+      let session = try await harness.runners.startSession(instanceId: instance.id)
+      try await harness.awaitSession(session.id, state: .runnerOnline)
+
+      await harness.simulateRestart()
+      _ = try await harness.instanceReconciler().run(firstTick: true)
+      let gate = SessionGate()
+      let recovered = await harness.restartedRunners(
+        profiles: GatedProfileRepository(
+          wrapping: GRDBProfileRepository(db: harness.database), gate: gate))
+
+      async let parked = recovered.recoverSessions()
+      let installed: Task<Void, Never>?
+      do {
+        // The first sweep is inside `contextForRecovery` with a `runnerOnline` snapshot and no
+        // observer in the map. The second runs to completion on the same reentrant actor.
+        try await waitUntil("the first sweep to reach the profile read") { await gate.arrivals == 1 }
+        let winner = await recovered.recoverSessions()
+        #expect(winner.reattached == 1)
+        installed = await recovered.observerTask(session.id)
+        #expect(installed != nil)
+      } catch {
+        await gate.open()
+        _ = await parked
+        throw error
+      }
+      await gate.open()
+      let report = await parked
+
+      #expect(report.deferred == 1)
+      #expect(report.reattached == 0)
+      #expect(report.terminalized == 0)
+      // The row never moved, so only the observer check can have stopped the parked sweep -- and
+      // the observer it stopped for is still the one the second sweep installed.
+      #expect(try await harness.session(session.id).state == .runnerOnline)
+      #expect(await recovered.observerTask(session.id) == installed)
+      #expect(await recovered.observedSessions() == [session.id])
+
+      await recovered.detachObservers()
+      await agent.stop()
+    }
+  }
 }

@@ -3,6 +3,7 @@ import Foundation
 import ImageStore
 import Logging
 import Persistence
+import ProcessSpawn
 import RPC
 import RunnerCore
 import RunnerLogging
@@ -143,7 +144,13 @@ public actor WorkerSupervisor {
   /// Bumps the fencing generation, spawns a detached worker and completes the handshake. The
   /// generation is incremented only after the lock is proven unheld, so a live worker for this
   /// instance can never be fenced out from under itself.
-  public func start(instance: InstanceRecord, specPath: URL) async throws -> WorkerSession {
+  ///
+  /// `gracefulShutdownMs` is the instance profile's `timeouts.gracefulShutdown`: it is what the
+  /// worker gives the guest on the shutdowns it starts by itself (hard deadline, orphan idle,
+  /// SIGTERM), where there is no runnerd to pass a window in the request.
+  public func start(
+    instance: InstanceRecord, specPath: URL, gracefulShutdownMs: Int64
+  ) async throws -> WorkerSession {
     let id = instance.id
     guard connections[id] == nil else { throw WorkerSupervisorError.alreadySupervised(instance: id) }
     if let holder = await lockHolder(id) {
@@ -161,7 +168,8 @@ public actor WorkerSupervisor {
     let handle = try await launcher.launch(
       WorkerLaunchRequest(
         instanceId: id, specPath: specPath, socketDir: paths.socketDir, generation: generation,
-        nonce: nonce, logPath: paths.instanceDir(id).appending(path: VMInstanceLayout.workerLogName)))
+        nonce: nonce, logPath: paths.instanceDir(id).appending(path: VMInstanceLayout.workerLogName),
+        gracefulShutdownMs: gracefulShutdownMs))
     spawnedPids[id] = handle.pid
     logger.info(
       "worker spawned",
@@ -356,8 +364,12 @@ public actor WorkerSupervisor {
 
   /// `drain` lets a busy runner finish; `stop` takes the VM down now. Either way the worker
   /// answers first and exits on its own — runnerd never signals it.
+  ///
+  /// No default for `gracefulTimeoutMs`: the window belongs to the instance's profile
+  /// (`timeouts.gracefulShutdown`), and a default here would silently hand back the old fixed 30 s
+  /// to any caller that forgot to look it up.
   public func shutdown(
-    id: InstanceID, reason: ShutdownRequest.Reason, gracefulTimeoutMs: Int64 = 30_000
+    id: InstanceID, reason: ShutdownRequest.Reason, gracefulTimeoutMs: Int64
   ) async throws {
     let request = ShutdownRequest(reason: reason, gracefulTimeoutMs: gracefulTimeoutMs)
     _ = try await call(id: id, method: .shutdown, payload: try WorkerCoding.payload(request))
@@ -436,10 +448,14 @@ public actor WorkerSupervisor {
       let result = waitpid(pid, &status, WNOHANG)
       if result == pid {
         spawnedPids.removeValue(forKey: id)
+        // Decoded, never the raw `waitpid` status: "exited 1" is `256` there and "killed by
+        // SIGKILL" is `9`, indistinguishable from "exited 9".
         logger.info(
           "worker process reaped",
           metadata: .context(instance: id, workerPID: pid)
-            .merging(["exit_status": .stringConvertible(status)]) { $1 })
+            .merging([
+              "exit_code": .stringConvertible(ProcessSpawn.exitCode(fromWaitStatus: status)),
+            ]) { $1 })
       } else if result < 0, errno == ECHILD {
         spawnedPids.removeValue(forKey: id)
       }

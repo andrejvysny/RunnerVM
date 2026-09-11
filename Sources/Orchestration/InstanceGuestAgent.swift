@@ -45,8 +45,9 @@ extension InstanceManager {
     return await guests.client(for: id)
   }
 
-  /// Reconnect after a daemon restart: an instance still waiting simply resumes waiting, while
-  /// every instance that claims to hold a boot we handed out has to prove it. A reboot underneath
+  /// Reconnect after a daemon restart: an instance still booting has its `timeouts.vmBoot` deadline
+  /// rebuilt, one still waiting simply resumes waiting, and every instance that claims to hold a
+  /// boot we handed out has to prove it. A reboot underneath
   /// us voids every session-scoped assumption, so the instance is tainted and interrupted rather
   /// than reused.
   ///
@@ -57,11 +58,15 @@ extension InstanceManager {
     guard let records = try? await instances.list(
       profile: nil,
       states: [
-        .waitingForAgent, .idle, .cleaning, .configuringRunner, .runnerStarting, .runnerOnline,
-        .busy,
+        .startingVM, .waitingForAgent, .idle, .cleaning, .configuringRunner, .runnerStarting,
+        .runnerOnline, .busy,
       ]) else { return }
     for record in records where !teardown.contains(record.id) {
       switch record.state {
+      case .startingVM:
+        // The boot deadline is the one piece of a create that lives only in memory, so a restart
+        // has to rebuild it from `started_at` or the row is left booting forever.
+        await rearmBootWatch(record)
       case .waitingForAgent:
         startReadiness(record.id)
       case .cleaning:
@@ -151,11 +156,16 @@ extension InstanceManager {
   public func detachGuests() async {
     for task in readiness.values { task.cancel() }
     readiness.removeAll()
+    // The boot watches go with them: the daemon is stopping, and a watcher that outlived it would
+    // fail a VM for a boot deadline nobody is waiting on any more.
+    for task in bootWatchers.values { task.cancel() }
+    bootWatchers.removeAll()
     await guests.dropAll()
   }
 
   func releaseGuest(_ id: InstanceID) async {
     readiness.removeValue(forKey: id)?.cancel()
+    cancelBootWatch(id)
     await guests.drop(id)
   }
 }

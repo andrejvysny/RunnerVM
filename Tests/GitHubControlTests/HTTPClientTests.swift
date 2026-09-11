@@ -1,6 +1,7 @@
 import Foundation
 @testable import GitHubControl
 import RunnerCore
+import Synchronization
 import Testing
 
 struct GitHubHTTPClientTests {
@@ -168,6 +169,81 @@ struct GitHubHTTPClientTests {
       #expect((error as? GitHubControlError)?.retryAfter == .seconds(3600))
       #expect(harness.server.requests(.get, "/user").count == 1)
       #expect(harness.sleeps.durations.isEmpty)
+    }
+  }
+
+  // MARK: - Credential refresh on 401 (D6)
+
+  @Test func refreshesTheCredentialAndRetriesOnceAfterA401() async throws {
+    let credentials = RecordingCredentialProvider(tokens: ["revoked", "fresh"])
+    try await withHarness(credentials: credentials) { harness in
+      harness.server.stub(
+        .get, "/user", .error(401, message: "Bad credentials"), .json("{\"login\":\"octocat\"}")
+      )
+      try #expect(try await harness.api.whoAmI() == "octocat")
+
+      let recorded = harness.server.requests(.get, "/user")
+      #expect(recorded.count == 2)
+      #expect(recorded.first?.header("Authorization") == "Bearer revoked")
+      #expect(recorded.last?.header("Authorization") == "Bearer fresh")
+      #expect(await credentials.invalidateCount == 1)
+      // The refresh is not a retry: it must not consume the backoff schedule.
+      #expect(harness.sleeps.durations.isEmpty)
+    }
+  }
+
+  @Test func surfacesA401ThatSurvivesTheRefresh() async throws {
+    let credentials = RecordingCredentialProvider(tokens: ["revoked", "also-revoked"])
+    try await withHarness(credentials: credentials) { harness in
+      harness.server.stub(.get, "/user", .error(401, message: "Bad credentials"))
+      let error = try #require(await captureError { _ = try await harness.api.whoAmI() })
+      #expect(errorClass(of: error) == .authentication)
+      #expect(harness.server.requests(.get, "/user").count == 2)
+      #expect(await credentials.invalidateCount == 1)
+    }
+  }
+
+  /// A `generate-jitconfig` that reached GitHub already created a runner; repeating it would leak
+  /// one, so a 401 there is surfaced untouched.
+  @Test func doesNotRefreshOrRetryANonIdempotentPostOn401() async throws {
+    let credentials = RecordingCredentialProvider(tokens: ["revoked", "fresh"])
+    try await withHarness(credentials: credentials) { harness in
+      let path = Fixture.repositoryScope.jitConfigPath
+      harness.server.stub(.post, path, .error(401, message: "Bad credentials"))
+      let error = await captureError {
+        _ = try await harness.api.generateJITConfig(
+          scope: Fixture.repositoryScope,
+          request: JITRunnerRequest(name: "runnervm-1", labels: ["self-hosted"])
+        )
+      }
+      try #expect(try errorClass(of: #require(error)) == .authentication)
+      #expect(harness.server.requests(.post, path).count == 1)
+      #expect(await credentials.invalidateCount == 0)
+    }
+  }
+
+  @Test func refreshesTheCredentialAtMostOncePerInterval() async throws {
+    let credentials = RecordingCredentialProvider(tokens: ["revoked", "fresh", "fresher"])
+    let clock = Mutex(Fixture.now)
+    try await withHarness(
+      credentials: credentials, authRefreshInterval: .seconds(60),
+      now: { clock.withLock { $0 } }
+    ) { harness in
+      harness.server.stub(.get, "/user", .error(401, message: "Bad credentials"))
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+      #expect(await credentials.invalidateCount == 1)
+
+      // 10 s later, inside the window: a dead credential must not mint once per request.
+      clock.withLock { $0 = Fixture.now.addingTimeInterval(10) }
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+      #expect(await credentials.invalidateCount == 1)
+      #expect(harness.server.requests(.get, "/user").count == 3)
+
+      // Past the window the credential heals again: this is a rate limit, not a one-shot latch.
+      clock.withLock { $0 = Fixture.now.addingTimeInterval(120) }
+      _ = await captureError { _ = try await harness.api.whoAmI() }
+      #expect(await credentials.invalidateCount == 2)
+      #expect(harness.server.requests(.get, "/user").count == 5)
     }
   }
 

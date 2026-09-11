@@ -205,24 +205,37 @@ final class FakeProvisionScript: ProcessRunner, @unchecked Sendable {
   private var launcher: FakeWorkerLauncher?
   /// Leaves the VM running, so the "the guest never powered itself down" path can be exercised.
   private let stopsGuest: Bool
+  /// Answers as a run whose wall-clock ceiling fired and whose process group was killed.
+  private let timesOut: Bool
+  private var recordedEnvironment: [String: String]?
+  private var markerDuringRun = false
 
   init(
     result: MacOSProvisionResult = MacOSProvisionResult(
       ok: true, runnerVersion: "2.330.0", guestAgentVersion: "0.1.0-test", hardenProof: true,
       gracefulShutdown: true, ssh: false),
     exitCode: Int32 = 0, writeResult: Bool = true, stopsGuest: Bool = true,
-    launcher: FakeWorkerLauncher? = nil
+    timesOut: Bool = false, launcher: FakeWorkerLauncher? = nil
   ) {
     self.result = result
     self.exitCode = exitCode
     self.writeResult = writeResult
     self.stopsGuest = stopsGuest
+    self.timesOut = timesOut
     self.launcher = launcher
   }
 
   func attach(_ launcher: FakeWorkerLauncher) { lock.withLock { self.launcher = launcher } }
 
   var invocations: [[String]] { lock.withLock { recorded } }
+
+  /// What the last call was told to hand the child. `posix_spawn` inherits nothing, so a missing
+  /// entry here is a variable the script would not see.
+  var environment: [String: String]? { lock.withLock { recordedEnvironment } }
+
+  /// Whether `<work>/provision.pgid` existed while the script was "running" -- i.e. whether the
+  /// stage's `onSpawn` hook actually recorded the process group a crashed daemon would need.
+  var markerExistedDuringRun: Bool { lock.withLock { markerDuringRun } }
 
   func argument(_ flag: String) -> String? {
     guard let argv = invocations.last, let index = argv.firstIndex(of: flag),
@@ -231,10 +244,40 @@ final class FakeProvisionScript: ProcessRunner, @unchecked Sendable {
     return argv[index + 1]
   }
 
+  /// The streaming requirement, not the buffered default: only this one is handed `onSpawn`, and
+  /// the marker it writes is the whole point of the hook.
   func run(
-    _ executable: String, _ arguments: [String], timeout: Duration
+    _ executable: String, _ arguments: [String], timeout: Duration,
+    environment: [String: String]?, onSpawn: (@Sendable (pid_t) -> Void)?,
+    onOutput: @escaping @Sendable (String) -> Void
   ) async throws -> ProcessResult {
-    lock.withLock { recorded.append([executable] + arguments) }
+    // `ProvisionProcessGroup.record` only writes for a *live* pid, so the fake has to name one;
+    // our own is the only one to hand. It is never signalled: `terminate` refuses this process's
+    // own group outright, and the stage clears the marker before anything else could read it.
+    onSpawn?(getpid())
+    if let work = value(of: "--work", in: arguments) {
+      let marker = URL(fileURLWithPath: work).appending(path: ProvisionProcessGroup.fileName)
+      let exists = FileManager.default.fileExists(atPath: marker.path(percentEncoded: false))
+      lock.withLock { markerDuringRun = exists }
+    }
+    let result = try await run(executable, arguments, timeout: timeout, environment: environment)
+    for line in (result.stdout + result.stderr).split(separator: "\n", omittingEmptySubsequences: true) {
+      onOutput(String(line))
+    }
+    return result
+  }
+
+  func run(
+    _ executable: String, _ arguments: [String], timeout: Duration,
+    environment: [String: String]?
+  ) async throws -> ProcessResult {
+    lock.withLock {
+      recorded.append([executable] + arguments)
+      recordedEnvironment = environment
+    }
+    if timesOut {
+      return ProcessResult(exitCode: 128 + SIGKILL, stdout: "", timedOut: true)
+    }
     if writeResult, let index = arguments.firstIndex(of: "--result"), index + 1 < arguments.count {
       let url = URL(fileURLWithPath: arguments[index + 1])
       let encoder = JSONEncoder()

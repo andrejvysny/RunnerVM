@@ -57,7 +57,11 @@ public actor GitHubAppCredentialProvider: GitHubCredentialProvider {
 
   /// Drops the cached token so the next call mints a fresh one. Used after a 401, which is the
   /// only reliable signal that GitHub revoked an installation early.
-  public func invalidate() {
+  ///
+  /// Spelled `async` to match `GitHubCredentialProvider.invalidate()` exactly: a synchronous
+  /// actor method witnesses the requirement, but at a call site it competes as a *second* overload
+  /// with the protocol's no-op default, and the `async` one wins — silently doing nothing.
+  public func invalidate() async {
     cached = nil
   }
 

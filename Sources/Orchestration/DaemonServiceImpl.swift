@@ -39,7 +39,15 @@ actor DaemonServiceImpl: DaemonService {
   let applier: ConfigApplier
   let reconciler: Reconciler
   let parseConfig: ConfigParser
-  let probe: HostProbeResult
+  /// Not a `let`: a probe that timed out is a fact about one run of `vmworker probe`, not about
+  /// the host, and `runMaintenance` re-runs it while the daemon is degraded (D11).
+  var probe: HostProbeResult
+  /// The helper `probe` came from, so the maintenance loop can re-run it. `nil` in the unit-test
+  /// wiring, where the probe is a fixture.
+  let vmworkerExecutable: URL?
+  /// How many re-probes were killed at their deadline, counted apart from "no executable found":
+  /// a wedged helper and a missing one are different host problems with different fixes.
+  var hostProbeTimeouts = 0
   let startedAt: Date
   let actorName: String
   let diskPressure: DiskPressureMonitor
@@ -75,7 +83,7 @@ actor DaemonServiceImpl: DaemonService {
     paths: RunnerPaths, hostId: HostID, database: RunnerDatabase, images: ImageManager,
     instances: InstanceManager, supervisor: WorkerSupervisor, applier: ConfigApplier,
     reconciler: Reconciler, parseConfig: @escaping ConfigParser, probe: HostProbeResult,
-    startedAt: Date, actorName: String,
+    vmworkerExecutable: URL? = nil, startedAt: Date, actorName: String,
     diskPressure: DiskPressureMonitor = DiskPressureMonitor(freeSpace: { UInt64.max }),
     gateway: GitHubGateway, scopeHealth: ScopeHealthMonitor,
     runnerVersions: RunnerVersionMonitor, runners: RunnerSessionManager,
@@ -111,6 +119,7 @@ actor DaemonServiceImpl: DaemonService {
     self.reconciler = reconciler
     self.parseConfig = parseConfig
     self.probe = probe
+    self.vmworkerExecutable = vmworkerExecutable
     self.startedAt = startedAt
     self.actorName = actorName
     self.diskPressure = diskPressure

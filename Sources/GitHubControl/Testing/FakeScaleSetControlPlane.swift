@@ -72,10 +72,25 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
     var pollFailures: [Int64: [FakeScaleSetError]] = [:]
     var ensureFailure: FakeScaleSetError?
     var jitFailure: FakeScaleSetError?
+    /// Scale sets whose `generateJITConfig` parks, and what it does when the caller gives up.
+    var jitStalls: [Int64: JITStall] = [:]
     var closed = false
   }
 
+  /// What a stalled `generateJITConfig` does about cancellation. Both halves of the same live race:
+  /// a caller with a deadline either gets nothing back, or gets the registration GitHub had already
+  /// created by the time it stopped waiting.
+  public enum JITStall: Sendable {
+    /// Parks until `releaseJITConfig()`; cancelling the caller throws `CancellationError` and
+    /// leaves no registration behind.
+    case untilReleased
+    /// Parks until the caller is cancelled, then answers *successfully* anyway — the config that
+    /// arrives after the deadline has already been lost.
+    case pastCancellation
+  }
+
   private let state = Mutex(State())
+  private let gate = JITGate()
   private let options: Options
 
   public init(options: Options = Options()) {
@@ -125,6 +140,24 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
 
   public func failJITConfig(_ message: String?) {
     state.withLock { $0.jitFailure = message.map(FakeScaleSetError.init) }
+  }
+
+  /// Holds `generateJITConfig` for `scaleSetID` open, so a test can stand inside the JIT call —
+  /// row inserted, nothing registered yet, no observer — instead of racing it.
+  ///
+  /// The call is recorded in `jitCalls()` *before* it parks, so `jitCalls().count` is what a test
+  /// waits on to know the daemon is there. The park is a real suspension outside the state lock:
+  /// an `await` under `state.withLock` would deadlock the whole fake.
+  public func stallJITConfig(for scaleSetID: Int64, _ stall: JITStall = .untilReleased) {
+    state.withLock { $0.jitStalls[scaleSetID] = stall }
+  }
+
+  /// Lets every stalled `generateJITConfig` through, and every later one straight past. One-shot:
+  /// a plane that has been released stays released. Call it on the failing path too — a parked
+  /// caller is only cancellable under `.untilReleased`.
+  public func releaseJITConfig() async {
+    state.withLock { $0.jitStalls.removeAll() }
+    await gate.open()
   }
 
   /// Request ids `acquireJobs` must report as *not* acquired (another host won them).
@@ -213,10 +246,20 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
   public func generateJITConfig(
     scope: GitHubScope, scaleSetID: Int64, runnerName: String, workFolder: String
   ) async throws -> JITRunnerConfig {
-    try state.withLock { state in
+    // The call is recorded, and any scripted failure raised, before the stall: a test waits on
+    // `jitCalls()` to know the caller is parked here.
+    let stall = try state.withLock { state -> JITStall? in
       state.jitCalls.append(
         JITCall(scaleSetID: scaleSetID, runnerName: runnerName, workFolder: workFolder))
       if let failure = state.jitFailure { throw failure }
+      return state.jitStalls[scaleSetID]
+    }
+    if let stall {
+      // Outside the lock, always: an `await` under `state.withLock` deadlocks every other caller.
+      let released = await gate.wait()
+      if !released, case .untilReleased = stall { throw CancellationError() }
+    }
+    return state.withLock { state in
       let id = state.nextRunnerID
       state.nextRunnerID += 1
       state.runnersByName[runnerName] = id
@@ -319,6 +362,64 @@ public final class FakeScaleSetControlPlane: ScaleSetControlPlane, Sendable {
     guard let data = try? encoder.encode(jobs), let text = String(data: data, encoding: .utf8)
     else { return "[]" }
     return text
+  }
+}
+
+/// Where a stalled `generateJITConfig` parks.
+///
+/// An actor, never a `Mutex`: the caller *suspends* here, and a continuation parked under a lock
+/// deadlocks. Cancellation is honoured on purpose — `withDeadline` cancels the loser of its race
+/// and then waits for it at scope exit, so a park that ignored cancellation would hang the task
+/// group rather than fail a test.
+private actor JITGate {
+  private var waiters: [Int: CheckedContinuation<Bool, Never>] = [:]
+  /// Tickets cancelled before their continuation was parked.
+  private var cancelled: Set<Int> = []
+  /// Tickets currently inside `wait`. A cancellation that lands after its waiter was already
+  /// resumed must not leave a permanent entry in `cancelled`.
+  private var live: Set<Int> = []
+  private var nextTicket = 0
+  private var opened = false
+
+  /// `true` when the gate opened, `false` when this caller was cancelled while parked.
+  func wait() async -> Bool {
+    guard !opened else { return true }
+    let ticket = nextTicket
+    nextTicket += 1
+    live.insert(ticket)
+    defer {
+      live.remove(ticket)
+      cancelled.remove(ticket)
+    }
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        if opened {
+          continuation.resume(returning: true)
+        } else if cancelled.contains(ticket) {
+          continuation.resume(returning: false)
+        } else {
+          waiters[ticket] = continuation
+        }
+      }
+    } onCancel: {
+      Task { await self.cancelWaiter(ticket) }
+    }
+  }
+
+  func open() {
+    opened = true
+    let parked = waiters
+    waiters.removeAll()
+    for continuation in parked.values { continuation.resume(returning: true) }
+  }
+
+  private func cancelWaiter(_ ticket: Int) {
+    guard live.contains(ticket) else { return }
+    if let continuation = waiters.removeValue(forKey: ticket) {
+      continuation.resume(returning: false)
+    } else {
+      cancelled.insert(ticket)
+    }
   }
 }
 

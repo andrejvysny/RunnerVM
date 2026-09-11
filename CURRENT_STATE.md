@@ -1,50 +1,48 @@
 # Current State
 
-Last verified: 2026-08-28 15:35 (local)
+Last verified: 2026-09-02 19:54 (local)
 
-- **Branch:** `master`, with **uncommitted work**: publishing prebuilt images to ghcr.io plus the
-  first two pull-only improvements. New files `scripts/publish-images.sh`,
-  `scripts/tests/publish-images-test.sh`, `docs/published-images.md`; modified `ci.yml`, `README.md`,
-  `SETUP.md`, `CHANGELOG.md`, `Proto/daemon_api.md`, `docs/{images,status}.md`, and the Swift for
-  `image.inspectRemote` + `images.prefetch` (DaemonAPI, ConfigLoader, Orchestration, RunnerCore,
-  runnerctl, three test targets).
-- **Nothing has been published to ghcr.io yet.** The push needs a `write:packages` PAT; the tooling
-  and the gate ladder are done and dry-run against the real local images.
-- **Build/test:** `swift build && swift test --parallel` → **1393 tests / 174 suites pass** (1 known
-  issue: `mknod` needs root). `shellcheck scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh` clean;
-  all seven shell test scripts pass (316 assertions); `actionlint` clean. `swiftformat --lint`
-  unchanged from `HEAD` on every touched file (the pre-existing violations in
-  `DaemonServiceImpl.swift` and `DoctorChecks.swift` are untouched).
-- **Deployed:** RunnerVM runs on the Mac mini `blackpen` (`ssh blackpen`) — Apple M4, 32 GiB,
-  macOS 26.5.2, headless. Serves `andrejvysny/RunnerVM` on profile `ubuntu-24`,
-  3 concurrent VMs, images `ubuntu-24-minimal` + `ubuntu-24` built on the host. Install is
-  user-scoped and root-free: prefix `/Users/blackpen/.local`, state `/Users/blackpen/runnervm`,
-  runtime `/Users/blackpen/runnervm/run`, PAT at `<state-dir>/state/github-token` (0600).
-  `runnerd` is a **detached foreground process** — it does not survive a reboot.
-- **Proven live on that host (2026-08-28):** `runnerctl image build` 2/2; single job (guest agent
-  ready 5.5 s after demand); 3-way matrix at capacity; 6-way matrix at 2× capacity (never exceeded
-  3, drained in waves); 4-way matrix; `scripts/live-github-e2e.sh` **11/11** (`long-job` skipped).
-  Per-job storage fully reclaimed: 0 VMs, 0 instance directories, 0 stranded GitHub runners, free
-  disk unchanged across ten jobs.
-- **Proven live on the dev Mac (2026-08-28):** one macOS guest on a freshly re-provisioned hardened
-  image `macos-26` (`capabilities.ssh: false`) — GitHub run 33159698945, 7 s job, ~23 s cold start,
-  clean teardown. macOS does **not** fit on the Mac mini (needs ~20 GiB more).
-- **Five defects found by the headless host, all fixed:** free space read 0 without a login session
-  (daemon advertised `capacity=0`); the image builder never received the applied configuration
-  (whole `build:` block ignored, every build refused); disabling a profile did not close its
-  scale-set session (a stale daemon stole a live job); `provision-macos-tart.sh` could never verify
-  its payload over password SSH; `runnerctl status` hardcoded "Scale sets: 0 healthy". Detail:
-  `CHANGELOG.md` and `docs/verification.md` "Mac mini deployment".
-- **Key decisions:** macOS images are **not published** to ghcr.io — a RunnerVM macOS image is a
-  provisioned copy of Apple's macOS and the SLA does not grant redistribution; each host builds its
-  own from `ghcr.io/cirruslabs/macos-tahoe-base:latest` via `scripts/provision-macos-tart.sh`. Only
-  `ubuntu-24-base` is published, public. Note the alias trap in `~/runnervm-dev`: the local name
-  `macos-26-base` is the **debug** image (`ssh: true`); the hardened one is `macos-26`. · `--group staff` on the Mac mini only because the dedicated `_runnervm` group
-  needs root — state dir hand-tightened to 0700 · `github.auth.source: file`, not keychain, because
-  the host is headless · profile names must be unique per scope across hosts (a scale set has one
-  message session) · the dev Mac's `ubuntu-24` profile stays removed from `~/runnervm-dev/config.yaml`
-  while blackpen serves that repo · macOS profile disk must be `50000000000` bytes exactly.
-- **Blockers:** nothing for code. `sudo` on the Mac mini blocks the LaunchDaemon (plist rendered and
-  lint-clean at `/Users/blackpen/com.runnervm.runnerd.daemon.plist`), the `_runnervm` account, and
-  the reboot qualification loop. `scripts/qualify-macos-image.sh` (H2) cannot pass as written.
-  macOS on the Mac mini is blocked on disk.
+- **Branch:** `master` at `fad78a0`, 0 commits ahead of `origin/master`, **dirty**: 137 tracked files
+  modified (+8207/−797) plus 19 untracked files/dirs — the whole v0.3.0 hardening run (PLAN.md
+  Phases 0–4) is uncommitted. Nothing has been committed, pushed or tagged this session.
+- **Changed files (by area):**
+  - Startup/launchd (Phase 0): `Sources/Orchestration/StartupFailure.swift` (new), `Sources/runnerd/RunnerD.swift`,
+    `Sources/RunnerCore/Doctor/DoctorLaunchd.swift` (new), `Sources/runnerctl/Doctor*.swift`, `scripts/install.sh`,
+    `packaging/launchd/*.plist`, `Sources/RunnerCore/Version.swift` (= `0.2.1`).
+  - Hygiene (Phase 1): `GuestAgent/**` (module path `github.com/andrejvysny/RunnerVM/GuestAgent`), `NOTICE`,
+    `PROVENANCE.md`, `README.md` "License and provenance". `.claude/worktrees` deleted (10 GB).
+  - Defects (Phase 2): `Sources/ProcessSpawn/` (new leaf target) + `Package.swift`, `Sources/Orchestration/{InstanceReconciler,
+    InstanceManager,InstanceTaint,ImagePulling,Orchestrator*,Reconciler,Build/RunProcess,Build/ProvisionProcessGroup(new),
+    Build/MacOSProvisionStages,Build/ImageBuilderRecovery,HostProbe,DaemonServiceMaintenance,RunnerSessionManager,
+    RunnerSessionRecovery}.swift`, `Sources/GitHubControl/{Credentials,HTTP}/*`, `Sources/vmworker/*`,
+    `Sources/WorkerProtocol/WorkerMessages.swift`, `Sources/VirtualizationCore/VsockBridge.swift`, `Sources/HostSetup/
+    {CommandRunner,SmokeTest,Upgrader,UpgraderRollback}.swift`, `Sources/ImageStore/APFSClone.swift`, `Sources/Metrics/RunnerVMMetrics.swift`,
+    `scripts/bootstrap.sh`, `Proto/worker_protocol.md`.
+  - Timeouts (Phase 3): `Sources/Orchestration/Deadline.swift` (new), `InstanceCreation.swift`, `InstanceGuestAgent.swift`,
+    `ImageManager.swift`, `GuestControl/GuestAgentClient.swift`, `WorkerLauncher.swift`, `WorkerSupervisor.swift`,
+    `ActionsServiceConnection.swift`, `RunnerCore/Models/RunnerProfileConfig.swift` (defaults: imagePull 60m, jitGeneration 2m),
+    `RunnerCore/Configuration/ProfileValidation.swift`, `docs/configuration.md` (new), `docs/state_machines.md`.
+  - Signing (Phase 4): `scripts/build-package.sh`, `packaging/pkg/scripts/postinstall`, `scripts/bootstrap.sh`,
+    `.github/workflows/release.yml`, `Sources/RunnerCore/Signing.swift` (new, `expectedTeamID = nil`),
+    `Sources/HostSetup/{PackageSignature(new),ReleaseManifest,Upgrader,UpgraderRollback,UpgradeReport}.swift`,
+    `Sources/runnerctl/UpgradeCommand.swift`, `docs/design/distribution.md`, `docs/release.md`.
+  - Docs/process: `CHANGELOG.md` ("Unreleased — v0.3.0" + "v0.2.1 patch" sections), `docs/status.md`, `SETUP.md`,
+    `docs/install.md`, `.github/workflows/publish-images.yml` (cron removed), `PLAN.md` (run contract + run log), `TODO.md`.
+- **Build/test:** `swift test --parallel` → 1905 tests / 217 suites pass (1 known issue: mknod EPERM), green on the
+  last 5 consecutive runs; `swift build -c release` runnerd/runnerctl/vmworker → pass; bash suites →
+  bootstrap 119, build-package 110, build-ubuntu-image 52, install 49, live-macos-e2e 34, provision-macos-tart 90,
+  publish-images 51, qualify-host 53, qualify-macos-image 29, all 0 failed; `shellcheck scripts/*.sh scripts/lib/*.sh
+  scripts/tests/*.sh packaging/pkg/scripts/postinstall`, `actionlint` → clean; `make -C GuestAgent all` → green.
+  `swiftformat --lint` NOT run (bulk format deliberately deferred to its own commit).
+- **Key decisions:** v0.3.0 = first public release (Developer ID signed + notarized in CI); Linux AND macOS
+  supported (H3–H5 on the dev Mac; 10-reboot loop DEFERRED, documented as unqualified); reusable kept + reaper
+  fixed; blackpen decommissioned; GHCR publish manual; FSL-derived files kept and documented; timeouts all
+  enforced (jitGeneration default 2 min by intent does not cover the full retry ladder; hold-down governs);
+  pgid of provisioning scripts persisted as a file in the build dir, not a schema column; vmworker exit codes
+  79/80; runnerd sysexits 69/72/75/78 with supervised backoff. Full list: PLAN.md "Decisions" + run log.
+- **Blockers:** (1) the user must commit (their rule; no commit was made) — the v0.2.1 patch is no longer
+  separable by file, decision pending: skip v0.2.1 and go to `v0.3.0-rc.1` after the signing setup (recommended)
+  or add an unsigned escape hatch to release.yml for `v0.2.x`; (2) Apple Developer ID certs, p12 exports, notary
+  key, 7 secrets + `APPLE_TEAM_ID` variable, then set `RunnerVMSigning.expectedTeamID` (Swift) and
+  `RUNNERVM_EXPECTED_TEAM_ID` (bootstrap.sh) — release.yml refuses to run until all agree; (3) hardware matrix
+  (Phase 5) needs ~120 GiB free on the dev Mac (99 GiB now) or `host.overcommit.disk`.

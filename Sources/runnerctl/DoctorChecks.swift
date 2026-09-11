@@ -44,7 +44,10 @@ enum DoctorChecks {
 
     checks.append(hostSleepDisabled())
     checks.append(serviceMode(mode))
-    checks.append(launchdJobLoaded())
+    let launchdPlist = mode.plistPath.flatMap { launchdPlistFacts(at: $0) }
+    checks.append(launchdJobLoaded(stdioLogPath: launchdPlist?.standardOutPath))
+    checks.append(launchdStdioDirectory(mode: mode, facts: launchdPlist))
+    checks.append(launchdThrottle(mode: mode, facts: launchdPlist))
     checks.append(rebootPersistence(mode))
     checks.append(fileVault())
     checks.append(loginKeychainUnlocked(mode: mode.mode))
@@ -206,20 +209,25 @@ enum DoctorChecks {
 
   // MARK: launchd
 
-  static func launchdJobLoaded() -> DoctorCheck {
+  /// Loaded is only half of it: the counters in `launchctl print` are what say whether the job
+  /// stays up (`DoctorLaunchd.jobCheck`). `stdioLogPath` comes from the installed plist so the
+  /// warning can name the file to read.
+  static func launchdJobLoaded(stdioLogPath: String? = nil) -> DoctorCheck {
     let uid = getuid()
     let gui = runProcess("/bin/launchctl", ["print", "gui/\(uid)/com.runnervm.runnerd"])
     if gui.exitCode == 0 {
-      return DoctorCheck(
-        id: "launchd_job", title: "launchd job", status: .ok,
-        detail: "LaunchAgent com.runnervm.runnerd loaded in gui/\(uid)"
+      return DoctorLaunchd.jobCheck(
+        loaded: "LaunchAgent com.runnervm.runnerd loaded in gui/\(uid)",
+        facts: DoctorLaunchd.jobFacts(fromLaunchctlPrint: gui.stdout),
+        stdioLogPath: stdioLogPath
       )
     }
     let system = runProcess("/bin/launchctl", ["print", "system/com.runnervm.runnerd"])
     if system.exitCode == 0 {
-      return DoctorCheck(
-        id: "launchd_job", title: "launchd job", status: .ok,
-        detail: "LaunchDaemon com.runnervm.runnerd loaded in system"
+      return DoctorLaunchd.jobCheck(
+        loaded: "LaunchDaemon com.runnervm.runnerd loaded in system",
+        facts: DoctorLaunchd.jobFacts(fromLaunchctlPrint: system.stdout),
+        stdioLogPath: stdioLogPath
       )
     }
     return DoctorCheck(

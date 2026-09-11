@@ -77,6 +77,10 @@ public actor ImageManager {
   /// Tag → digest, so a profile that names a moving tag does not hit the registry on every
   /// `vm create`. Registry-qualified reference string → (digest, resolved at).
   var tagResolutions: [String: (digest: ImageDigest, at: Date)] = [:]
+  /// How often a caller waiting out someone else's transfer re-checks whether it is still running
+  /// (`awaitInFlightPull`). A poll rather than an await because the transfer is an unstructured
+  /// `Task` no deadline may block on; 200 ms is invisible next to a multi-gigabyte download.
+  var pullWaitPollInterval: Duration = .milliseconds(200)
 
   /// `images.prefetch`, plus the configured profiles' `image:` values it applies to. Held rather
   /// than re-read from a stored configuration so `prefetchProfileImages` needs nothing passed in
@@ -129,6 +133,12 @@ public actor ImageManager {
     // at a 16-50 GiB image must not hold that call open for the length of a download.
     guard prefetchEnabled else { return }
     Task { await self.prefetchProfileImages() }
+  }
+
+  /// Test seam: compresses the spacing of `awaitInFlightPull`'s reads so a millisecond
+  /// `timeouts.imagePull` is observed without waiting. Nothing in the daemon calls this.
+  func setPullWaitPollInterval(_ interval: Duration) {
+    pullWaitPollInterval = interval
   }
 
   /// Pulls every configured profile's registry image that is not already in the store
@@ -247,11 +257,16 @@ public actor ImageManager {
   /// A registry-qualified `reference` is resolved -- and pulled, if this host has never seen the
   /// digest -- before the pin is taken, which is what makes the first `vm create` after a profile
   /// change slow (docs/images.md). Existing instances keep the digest they were created with.
+  ///
+  /// `pullTimeout` is the profile's `timeouts.imagePull` and bounds only *this* caller's wait: the
+  /// transfer it shares with everyone else on the same digest keeps running, and expiry is
+  /// `IMAGE_PULL_TIMEOUT` with no pin taken. `.zero` waits as long as the pull takes.
   public func reserve(
-    reference: String, for instanceId: InstanceID, profile: String? = nil
+    reference: String, for instanceId: InstanceID, profile: String? = nil,
+    pullTimeout: DurationValue = .zero
   ) async throws -> (ImageDigest, ImageInfo) {
     let digest = try await resolveRecord(
-      reference: reference, profile: profile, purpose: .instance).digest
+      reference: reference, profile: profile, purpose: .instance, timeout: pullTimeout).digest
     let info = try await store.inspect(digest: digest)
     // Before the pin, not after: an image that can never run a job must not leave a `planning`
     // pin behind for the caller to clean up, and a locally cached agentless image (spec §58)

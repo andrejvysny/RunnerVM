@@ -96,6 +96,113 @@ import Testing
     #expect(!result.probeSucceeded)
     #expect(result.facts.physicalMemoryBytes > 0)
   }
+
+  /// A wedged probe used to hang runnerd's startup forever, before the socket was ever bound.
+  @Test func aProbeThatNeverExitsFallsBackAtTheDeadline() async throws {
+    let tree = try TempTree()
+    defer { tree.remove() }
+    let stub = try tree.hangingVMWorkerStub()
+    let started = ContinuousClock.now
+    let result = try await withHangGuard("the probe deadline to fire") {
+      await HostProbe.run(
+        executable: stub, logger: Logger(label: "test"), deadline: .milliseconds(300))
+    }
+    #expect(!result.probeSucceeded)
+    #expect(result.failureReason?.contains("timed out") == true)
+    // The child sleeps 30 s; anything near that means the deadline did not end the call.
+    #expect(ContinuousClock.now - started < .seconds(10))
+  }
+
+  /// Draining stdout to EOF before touching stderr deadlocks against a probe whose diagnostics
+  /// fill the 64 KiB stderr buffer first.
+  @Test func aProbeThatFloodsStderrFirstStillDecodes() async throws {
+    let tree = try TempTree()
+    defer { tree.remove() }
+    let stub = try tree.noisyVMWorkerStub()
+    let result = try await withHangGuard("the noisy probe to be drained") {
+      await HostProbe.run(
+        executable: stub, logger: Logger(label: "test"), deadline: .seconds(10))
+    }
+    #expect(result.probeSucceeded)
+    #expect(result.facts.logicalCPUCount == 12)
+  }
+}
+
+/// D11. A probe that could not answer says something about that one run of `vmworker probe`, not
+/// about the host, yet its verdict used to pin `virtualizationSupported: false` into
+/// `system.status` for the daemon's whole life.
+@Suite struct HostProbeMaintenanceTests {
+  /// What a timed-out startup probe leaves behind.
+  private static var degraded: HostProbeResult {
+    var result = M2Harness.probe()
+    result.virtualizationSupported = false
+    result.probeSucceeded = false
+    result.probeTimedOut = true
+    result.failureReason = "vmworker probe timed out after 60.0s"
+    return result
+  }
+
+  @Test func aDegradedProbeIsRerunOnTheMaintenanceTickAndCanRecover() async throws {
+    try await withHarness { harness in
+      let stub = try harness.tree.countingVMWorkerStub()
+      let service = harness.service(probe: Self.degraded, vmworkerExecutable: stub)
+      #expect(await service.probe.probeSucceeded == false)
+
+      await service.runMaintenance()
+
+      #expect(await service.probe.probeSucceeded)
+      #expect(await service.probe.virtualizationSupported)
+      #expect(await service.probe.failureReason == nil)
+      #expect(harness.tree.vmworkerCallCount == 1)
+
+      // And then left alone: the probe answers a capability question, not a liveness one.
+      await service.runMaintenance()
+      #expect(harness.tree.vmworkerCallCount == 1)
+    }
+  }
+
+  @Test func aHealthyProbeIsNeverRerun() async throws {
+    try await withHarness { harness in
+      let stub = try harness.tree.countingVMWorkerStub()
+      let service = harness.service(vmworkerExecutable: stub)
+
+      await service.runMaintenance()
+
+      #expect(harness.tree.vmworkerCallCount == 0)
+    }
+  }
+
+  /// Only a *timed-out* probe is worth re-running. An unsigned or undecodable helper answers the
+  /// same way every time, so re-probing it would be five minutes of identical warnings.
+  @Test func aProbeDegradedForAnyOtherReasonIsNotRetried() async throws {
+    try await withHarness { harness in
+      let stub = try harness.tree.countingVMWorkerStub()
+      var unsigned = Self.degraded
+      unsigned.probeTimedOut = false
+      unsigned.failureReason = "vmworker probe exited 1: code signature invalid"
+      let service = harness.service(probe: unsigned, vmworkerExecutable: stub)
+
+      await service.runMaintenance()
+
+      #expect(harness.tree.vmworkerCallCount == 0)
+      #expect(await service.probe.failureReason == unsigned.failureReason)
+    }
+  }
+
+  /// A `vmworker` that is not on this host is a static fact; re-running the lookup every five
+  /// minutes would be five minutes of identical warnings and nothing else.
+  @Test func aMissingExecutableIsNotRetried() async throws {
+    try await withHarness { harness in
+      let service = harness.service(
+        probe: Self.degraded,
+        vmworkerExecutable: URL(fileURLWithPath: "/tmp/rvm-no-vmworker-\(UUID().uuidString)"))
+
+      await service.runMaintenance()
+
+      #expect(await service.probe.failureReason == Self.degraded.failureReason)
+      #expect(await service.probe.probeTimedOut)
+    }
+  }
 }
 
 @Suite struct ReconcilerTests {

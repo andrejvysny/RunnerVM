@@ -45,12 +45,26 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
 
   static func manifestJSON(
     version: String = "0.3.0", sha: String = digest, signed: Bool = false,
+    teamId: String = "", notarized: Bool = false,
     architecture: String = "arm64", package: String = UpgraderTests.package
   ) -> String {
     """
     {"version":"\(version)","architecture":"\(architecture)","minimumMacOS":"15.0",
-     "package":"\(package)","sha256":"\(sha)","signed":\(signed),"license":"Apache-2.0"}
+     "package":"\(package)","sha256":"\(sha)","signed":\(signed),"teamId":"\(teamId)",
+     "notarized":\(notarized),"license":"Apache-2.0"}
     """
+  }
+
+  /// Options whose publisher pin matches the captured Developer ID fixtures, so the gate's
+  /// accepting and refusing branches are both reachable from a test. Production takes
+  /// `RunnerVMSigning.expectedTeamID`.
+  static func pinned(
+    assumeYes: Bool = false, allowUnsigned: Bool = false,
+    expectedTeamID: String? = SignatureFixtures.capturedTeam
+  ) -> Upgrader.Options {
+    Upgrader.Options(
+      stateDir: stateDir, runtimeDir: "/run", assumeYes: assumeYes, allowUnsigned: allowUnsigned,
+      expectedTeamID: expectedTeamID, hostArchitecture: "arm64", hostMacOSMajor: 26)
   }
 
   /// The stub set a happy upgrade needs. `["&&"]` is what distinguishes the `(cd … && shasum -c)`
@@ -59,6 +73,9 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
   static func stubs(
     manifest: String = UpgraderTests.manifestJSON(),
     hashed: String = UpgraderTests.digest,
+    pkgutil: String = SignatureFixtures.unsignedPkgutil,
+    spctlStatus: String = "assessments enabled",
+    spctlAssess: String = SignatureFixtures.unsignedSpctl,
     schemaBefore: String = "4",
     schemaAfter: String? = nil
   ) -> [RecordingCommandRunner.Stub] {
@@ -66,6 +83,11 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
       .stdout(["curl", "release-manifest.json"], manifest),
       .stdout(["&&"], ""),
       .stdout(["shasum", "256"], "\(hashed)  \(package)"),
+      // The publisher gate's two tools. Unsigned by default, so every test that predates signing
+      // keeps exercising the path a dev build takes.
+      .stdout(["pkgutil", "--check-signature"], pkgutil),
+      .stdout(["spctl", "--status"], spctlStatus),
+      .stdout(["spctl", "--assess"], spctlAssess),
       // `%Su`, not `stat`: every path here starts with "/state", which contains "stat".
       .stdout(["%Su"], "_runnervm:_runnervm"),
     ]
@@ -78,6 +100,18 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
       stubs.append(.stdout(["SELECT MAX"], schemaBefore))
     }
     return stubs
+  }
+
+  /// The same set for a release signed by the pinned publisher and notarized -- the shape every
+  /// published release has from v0.3.0 on.
+  static func notarizedStubs(
+    manifest: String = UpgraderTests.manifestJSON(
+      signed: true, teamId: SignatureFixtures.capturedTeam, notarized: true),
+    spctlStatus: String = "assessments enabled"
+  ) -> [RecordingCommandRunner.Stub] {
+    stubs(
+      manifest: manifest, pkgutil: SignatureFixtures.notarizedPkgutil,
+      spctlStatus: spctlStatus, spctlAssess: SignatureFixtures.notarizedSpctl)
   }
 
   static func upgrader(
@@ -135,6 +169,9 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
       // The `(cd … && shasum -c)` form is a shell invocation; name it for what it verifies.
       case "sh": return "shasum -c"
       case "shasum": return "shasum"
+      case "pkgutil": return "pkgutil"
+      // `--status` and `--assess` are two different questions and their order is the contract.
+      case "spctl": return "spctl \(argv.dropFirst().first ?? "")"
       case "stat": return "stat"
       case "sqlite3":
         return argv.last?.hasPrefix("SELECT") == true ? "sqlite3 schema" : "sqlite3 backup"
@@ -200,15 +237,18 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
     #expect(report.ok, "\(report.failed)")
     #expect(report.steps.map(\.name) == [
       UpgradeReport.Name.manifest, UpgradeReport.Name.download, UpgradeReport.Name.checksum,
-      UpgradeReport.Name.rollbackMaterial, UpgradeReport.Name.confirmation,
+      UpgradeReport.Name.signature, UpgradeReport.Name.rollbackMaterial,
+      UpgradeReport.Name.confirmation,
       UpgradeReport.Name.backup, UpgradeReport.Name.drain, UpgradeReport.Name.stop,
       UpgradeReport.Name.installPackage, UpgradeReport.Name.start, UpgradeReport.Name.socket,
       UpgradeReport.Name.schema,
     ])
-    // Nothing that changes the host runs before both checksums have agreed, the drain sits
-    // between the backup and the swap, and the schema is read on both sides of it.
+    // Nothing that changes the host runs before both checksums have agreed and the signature has
+    // been read, the drain sits between the backup and the swap, and the schema is read on both
+    // sides of it.
     #expect(await Self.sequence(runner.commands) == [
       "curl", "curl", "curl", "shasum -c", "shasum",
+      "pkgutil", "spctl --status", "spctl --assess",
       "stat", "cp", "sqlite3 backup", "sqlite3 schema",
       "launchctl bootout", "installer", "launchctl bootstrap", "sqlite3 schema",
     ])
@@ -403,27 +443,157 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
     #expect(io.output.contains("RUNNERVM_ALLOW_UNSIGNED=1"))
   }
 
-  @Test func aSignedPackageNeverPrintsTheWarning() async {
-    let runner = RecordingCommandRunner(stubs: Self.stubs(manifest: Self.manifestJSON(signed: true)))
+  @Test func aNotarizedPackageNeverPrintsTheWarning() async {
+    let runner = RecordingCommandRunner(stubs: Self.notarizedStubs())
     let io = ScriptedSetupIO(answers: [])
-    _ = await Self.upgrader(runner: runner, io: io).run()
+    _ = await Self.upgrader(runner: runner, io: io, options: Self.pinned(assumeYes: true)).run()
 
     #expect(!io.output.contains("UNSIGNED"))
+    #expect(!io.output.contains("NOT NOTARIZED"))
   }
 
   @Test func decliningThePreDrainConfirmationChangesNothing() async {
-    let runner = RecordingCommandRunner(stubs: Self.stubs(manifest: Self.manifestJSON(signed: true)))
+    let runner = RecordingCommandRunner(stubs: Self.notarizedStubs())
     let io = ScriptedSetupIO(answers: ["n"])
     let daemon = FakeUpgradeDaemon()
     let report = await Self.upgrader(
-      runner: runner, io: io, daemon: daemon,
-      options: Upgrader.Options(
-        stateDir: Self.stateDir, runtimeDir: "/run", hostArchitecture: "arm64",
-        hostMacOSMajor: 26)).run()
+      runner: runner, io: io, daemon: daemon, options: Self.pinned()).run()
 
     #expect(report.step(named: UpgradeReport.Name.confirmation)?.ok == false)
     #expect(await daemon.calls.isEmpty)
     #expect(!report.installed)
+  }
+
+
+  // MARK: - The publisher gate
+
+  /// The shape every published release has: signed by the pinned team and notarized. It asks
+  /// nothing beyond the one question every upgrade asks.
+  @Test func aNotarizedPackageFromThePinnedTeamNeedsNoExtraConfirmation() async {
+    let runner = RecordingCommandRunner(stubs: Self.notarizedStubs())
+    let io = ScriptedSetupIO(answers: ["y"])
+    let report = await Self.upgrader(runner: runner, io: io, options: Self.pinned()).run()
+
+    #expect(report.ok, "\(report.failed)")
+    #expect(io.prompts == ["Drain this host and install 0.3.0?"])
+    #expect(!io.output.contains("WARNING"))
+    #expect(report.step(named: UpgradeReport.Name.signature)?.detail
+      == "Developer ID Installer (\(SignatureFixtures.capturedTeam)), notarized")
+    #expect(report.installed)
+  }
+
+  /// The one refusal with no override. `--yes` and `RUNNERVM_ALLOW_UNSIGNED` are both set here and
+  /// neither gets past it: they cover a missing signature, not somebody else's.
+  @Test func aPackageSignedByAnotherPublisherIsRefusedAndNeverReachesInstaller() async {
+    let runner = RecordingCommandRunner(stubs: Self.stubs(
+      manifest: Self.manifestJSON(
+        signed: true, teamId: SignatureFixtures.foreignTeam, notarized: true),
+      pkgutil: SignatureFixtures.foreignPkgutil, spctlAssess: SignatureFixtures.foreignSpctl))
+    let io = ScriptedSetupIO(answers: ["y", "y", "y"])
+    let daemon = FakeUpgradeDaemon()
+    let report = await Self.upgrader(
+      runner: runner, io: io, daemon: daemon,
+      options: Self.pinned(assumeYes: true, allowUnsigned: true)).run()
+
+    #expect(!report.ok)
+    #expect(report.step(named: UpgradeReport.Name.confirmation)?.detail
+      .contains("UPGRADE_SIGNATURE_REJECTED") == true)
+    #expect(io.output.contains("was signed by another publisher"))
+    #expect(io.output.contains(SignatureFixtures.foreignTeam))
+    #expect(!report.installed)
+    // Not drained, not booted out, not installed: the host is exactly as it was.
+    #expect(await daemon.calls.isEmpty)
+    let sequence = await Self.sequence(runner.commands)
+    #expect(!sequence.contains("installer"))
+    #expect(!sequence.contains("launchctl bootout"))
+    #expect(!sequence.contains("sqlite3 backup"))
+  }
+
+  /// Our own signature without a notary ticket is the confirmable case, not the refusal: it warns
+  /// every time and asks, and declining leaves the host untouched.
+  @Test func ourOwnTeamWithoutNotarizationWarnsAndAsks() async {
+    let runner = RecordingCommandRunner(stubs: Self.stubs(
+      manifest: Self.manifestJSON(signed: true, teamId: SignatureFixtures.capturedTeam),
+      pkgutil: SignatureFixtures.signedPkgutil, spctlAssess: SignatureFixtures.signedSpctl))
+    let io = ScriptedSetupIO(answers: ["n"])
+    let report = await Self.upgrader(runner: runner, io: io, options: Self.pinned()).run()
+
+    #expect(!report.ok)
+    #expect(io.output.contains("is NOT NOTARIZED"))
+    #expect(io.output.contains(SignatureFixtures.capturedTeam))
+    #expect(report.step(named: UpgradeReport.Name.signature)?.detail.contains("NOT notarized")
+      == true)
+    #expect(report.step(named: UpgradeReport.Name.confirmation)?.detail
+      == "declined: package not notarized")
+    #expect(!report.installed)
+  }
+
+  @Test func allowUnsignedCoversAMissingNotarizationToo() async {
+    let runner = RecordingCommandRunner(stubs: Self.stubs(
+      manifest: Self.manifestJSON(signed: true, teamId: SignatureFixtures.capturedTeam),
+      pkgutil: SignatureFixtures.signedPkgutil, spctlAssess: SignatureFixtures.signedSpctl))
+    let io = ScriptedSetupIO(answers: [])
+    let report = await Self.upgrader(
+      runner: runner, io: io,
+      options: Self.pinned(assumeYes: true, allowUnsigned: true)).run()
+
+    #expect(report.ok, "\(report.failed)")
+    #expect(io.output.contains("is NOT NOTARIZED"))
+    #expect(io.output.contains("RUNNERVM_ALLOW_UNSIGNED=1"))
+    #expect(report.installed)
+  }
+
+  /// A build with no publisher pinned has nobody to compare against: it says so, and decides on
+  /// the notarization alone.
+  @Test func anUnpinnedBuildSaysSoAndInstallsOnTheNotarizationAlone() async {
+    let runner = RecordingCommandRunner(stubs: Self.notarizedStubs())
+    let io = ScriptedSetupIO(answers: [])
+    let report = await Self.upgrader(
+      runner: runner, io: io,
+      options: Self.pinned(assumeYes: true, expectedTeamID: nil)).run()
+
+    #expect(report.ok, "\(report.failed)")
+    #expect(io.output.contains("does not pin a publisher team"))
+    #expect(report.step(named: UpgradeReport.Name.confirmation)?.detail
+      .contains("publisher team not pinned in this build") == true)
+  }
+
+  /// Gatekeeper switched off: spctl is not asked (it would answer for a policy that is not
+  /// running), the stapled ticket pkgutil reports is used instead, and the host is told loudly.
+  @Test func aHostWithAssessmentsDisabledFallsBackToTheStapledTicketAndSaysSo() async {
+    let runner = RecordingCommandRunner(
+      stubs: Self.notarizedStubs(spctlStatus: "assessments disabled"))
+    let io = ScriptedSetupIO(answers: [])
+    let report = await Self.upgrader(
+      runner: runner, io: io, options: Self.pinned(assumeYes: true)).run()
+
+    #expect(report.ok, "\(report.failed)")
+    #expect(io.output.contains("NOTARIZATION UNVERIFIED ON THIS HOST"))
+    #expect(report.step(named: UpgradeReport.Name.signature)?.detail
+      == "Developer ID Installer (\(SignatureFixtures.capturedTeam)), notarized; "
+        + "notarization unverified on this host")
+    let sequence = await Self.sequence(runner.commands)
+    #expect(sequence.contains("spctl --status"))
+    #expect(!sequence.contains("spctl --assess"))
+    #expect(report.installed)
+  }
+
+  /// A manifest that claims more than this host could verify is a mislabelled release, not an
+  /// authorisation: the line is printed and the unsigned path still runs.
+  @Test func aManifestThatOverstatesItsSigningIsReportedNotBelieved() async {
+    let runner = RecordingCommandRunner(stubs: Self.stubs(
+      manifest: Self.manifestJSON(
+        signed: true, teamId: SignatureFixtures.capturedTeam, notarized: true)))
+    let io = ScriptedSetupIO(answers: [])
+    let report = await Self.upgrader(
+      runner: runner, io: io, options: Self.pinned(assumeYes: true, allowUnsigned: true)).run()
+
+    #expect(io.output.contains(
+      "release-manifest.json claims this package is signed and notarized"))
+    #expect(io.output.contains("is UNSIGNED"))
+    #expect(report.step(named: UpgradeReport.Name.signature)?.detail == "unsigned")
+    // Reported, never a lockout: with the unsigned warning accepted the upgrade still runs.
+    #expect(report.ok, "\(report.failed)")
   }
 
   // MARK: - Drain
@@ -530,6 +700,15 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
     #expect(rolled)
     #expect(report.step(named: UpgradeReport.Name.rollback)?.ok == true)
     #expect(await runner.lines == [
+      // The cached pkg is re-verified before it is reinstalled: its own checksum first, then the
+      // publisher gate, and only then `installer`.
+      "/bin/sh -c cd '/state/upgrades/\(RunnerVMVersion.current)' && /usr/bin/shasum -a 256 -c "
+        + "'\(Self.package).sha256'",
+      "/usr/sbin/pkgutil --check-signature "
+        + "/state/upgrades/\(RunnerVMVersion.current)/\(Self.package)",
+      "/usr/sbin/spctl --status",
+      "/usr/sbin/spctl --assess -t install -vv "
+        + "/state/upgrades/\(RunnerVMVersion.current)/\(Self.package)",
       "/bin/launchctl bootout system/com.runnervm.runnerd",
       "/usr/sbin/installer -pkg /state/upgrades/\(RunnerVMVersion.current)/\(Self.package) "
         + "-target /",
@@ -566,6 +745,60 @@ actor FakeUpgradeDaemon: UpgradeDaemon {
 
     #expect(!(await upgrader.rollback(&report)))
     #expect(report.step(named: UpgradeReport.Name.rollback)?.detail.contains("nothing to undo") == true)
+  }
+
+  /// The cached pkg gets the same publisher gate the new one got. It has been sitting in the
+  /// state directory since the last install, and a rollback runs `installer` on it as root and
+  /// unattended -- so a swapped one is refused rather than reinstalled, and the operator is handed
+  /// the manual steps instead.
+  @Test func aRollbackRefusesACachedPackageSignedByAnotherPublisher() async {
+    var stubs = Self.notarizedStubs()
+    stubs.insert(
+      .stdout(["pkgutil", RunnerVMVersion.current], SignatureFixtures.foreignPkgutil), at: 0)
+    stubs.insert(
+      .stdout(["--assess", RunnerVMVersion.current], SignatureFixtures.foreignSpctl), at: 0)
+    let runner = RecordingCommandRunner(stubs: stubs)
+    let io = ScriptedSetupIO(answers: [])
+    let upgrader = Self.upgrader(
+      runner: runner, io: io, options: Self.pinned(assumeYes: true))
+    var report = await upgrader.run()
+    #expect(report.rollbackAvailable)
+
+    await runner.reset()
+    let rolled = await upgrader.rollback(&report)
+
+    #expect(!rolled)
+    #expect(report.step(named: UpgradeReport.Name.rollback)?.detail
+      .contains("UPGRADE_SIGNATURE_REJECTED") == true)
+    #expect(!(await Self.sequence(runner.commands)).contains("installer"))
+    #expect(io.output.contains("Manual restoration"))
+  }
+
+  /// A cached pkg that no longer matches the `.sha256` cached beside it is not reinstalled either.
+  /// A missing checksum file fails the same way on purpose: whatever can replace the pkg can
+  /// delete the file that would have caught it.
+  @Test func aRollbackRefusesACachedPackageThatFailsItsChecksum() async {
+    var stubs = Self.notarizedStubs()
+    stubs.insert(
+      .failure(["&&", RunnerVMVersion.current], 1,
+        "shasum: \(Self.package).sha256: No such file or directory"), at: 0)
+    let runner = RecordingCommandRunner(stubs: stubs)
+    let io = ScriptedSetupIO(answers: [])
+    let upgrader = Self.upgrader(
+      runner: runner, io: io, options: Self.pinned(assumeYes: true))
+    var report = await upgrader.run()
+
+    await runner.reset()
+    let rolled = await upgrader.rollback(&report)
+
+    #expect(!rolled)
+    #expect(report.step(named: UpgradeReport.Name.rollback)?.detail
+      .contains("failed its cached checksum") == true)
+    let sequence = await Self.sequence(runner.commands)
+    #expect(!sequence.contains("installer"))
+    // Refused before the daemon was booted out: a refused rollback changes nothing either.
+    #expect(!sequence.contains("launchctl bootout"))
+    #expect(io.output.contains("Manual restoration"))
   }
 
   @Test func manualRestorationNamesTheBackupAndThePackage() async {

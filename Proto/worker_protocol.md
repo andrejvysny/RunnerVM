@@ -1,9 +1,14 @@
 # worker protocol v1 — runnerd ⇄ vmworker over `vm-<shortid>.sock`
 
-Startup: `vmworker run --instance <uuid> --spec <path/spec.json> --socket-dir <dir> --generation <n> --nonce <hex>`.
+Startup: `vmworker run --instance <uuid> --spec <path/spec.json> --socket-dir <dir> --generation <n> --nonce <hex>
+[--lease-ttl-ms <n>] [--orphan-idle-ms <n>] [--graceful-ms <n>]`. `--graceful-ms` (default 30000) is the
+SIGTERM-to-SIGKILL window for the shutdowns the worker starts on its own — hard deadline, orphan idle, SIGTERM —
+where no `worker.shutdown` request carries one; runnerd passes the instance profile's `timeouts.gracefulShutdown`.
 Worker: acquire fcntl `F_WRLCK` on `<instanceDir>/worker.lock` (fail ⇒ exit 75) → build VZ config → bind
 `<socket-dir>/vm-<shortid>.sock` (mode 0600) → publish (rename from `.tmp`) → serve. Exit codes: 0 clean, 64 usage,
-65 spec invalid, 75 lock held, 76 VZ config invalid, 77 VZ start failed.
+65 spec invalid, 75 lock held, 76 VZ config invalid, 77 VZ start failed, 79 VZ stop failed (the guest survived
+`forceStop`), 80 macOS guest limit reached (this host already runs its two macOS guests). Any exit path unlinks
+both sockets first. 78 is unused (it is runnerd's `EX_CONFIG`).
 
 Instance directory (`<instanceDir>`, the parent of `spec.json`): `disk.img`, `nvram.bin` (EFI variable
 store on Linux, auxiliary storage on macOS), `spec.json`, `worker.lock`, `serial.log`, `worker.log`,
@@ -21,7 +26,7 @@ fresh `VZVirtioSocketConnection` to guest port 4050; both halves close together.
 
 | method | class | payload → result |
 |---|---|---|
-| `worker.hello` | readOnly | `{}` → `{instanceId, generation, incarnationNonce, specDigest, pid, protocolVersion:1, vmState, agentBootId?}` |
+| `worker.hello` | readOnly | `{}` → `{instanceId, generation, incarnationNonce, specDigest, pid, protocolVersion:1, vmState}` |
 | `worker.status` | readOnly | `{}` → `{vmState, uptimeMs, leaseExpiresAt?, bridgeConnections, lastError?}` |
 | `worker.lease` | idempotentMutation | `{ttlMs}` → `{leaseExpiresAt}` — daemon renews every ttl/3; expiry starts orphan timers |
 | `vm.start` | idempotentMutation | `{}` → `{vmState}`; no-op if already running |
@@ -29,7 +34,7 @@ fresh `VZVirtioSocketConnection` to guest port 4050; both halves close together.
 | `vm.forceStop` | idempotentMutation | `{}` → `{vmState}` |
 | `vm.state` | readOnly | `{}` → `{vmState}` |
 | `agent.bridgeStatus` | readOnly | `{}` → `{socketPath, activeConnections}` |
-| `worker.shutdown` | singleShot | `{reason: "drain"\|"stop", gracefulTimeoutMs}` → `{}`; drain = requestStop, wait, forceStop, exit 0 |
+| `worker.shutdown` | singleShot | `{reason: "stop"\|"drain", gracefulTimeoutMs}` → `{}`; both reasons behave identically: requestStop, wait, forceStop, exit 0 (79 if forceStop threw). runnerd sends `stop`; `drain` is accepted for wire compatibility |
 | `host.capabilities` | readOnly | probe mode only |
 
 Events (`kind: event`, unsolicited, on every connection): `vm.stateChanged {vmState, at}`, `vm.error {code, message}`.

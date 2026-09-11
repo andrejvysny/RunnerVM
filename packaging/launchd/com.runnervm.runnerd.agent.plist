@@ -28,8 +28,13 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Respawn floor, and only half of the story: launchd throttles a crash-looping job to one
+         start per 30 s, while `runnerd` itself sleeps (RUNNERVM_STARTUP_BACKOFF, below) before
+         exiting on a configuration-class startup failure. Both halves are needed — an upgraded
+         host keeps whatever plist it was installed with, so the in-process backoff is what
+         actually bounds a bad config there. -->
     <key>ThrottleInterval</key>
-    <integer>5</integer>
+    <integer>30</integer>
 
     <!-- Only runs while a GUI session is active for the user that loaded it — exactly the
          constraint that makes the auto-login dedicated user necessary. -->
@@ -38,19 +43,33 @@
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
 
+    <!-- Host shutdown integration (spec §130): launchd sends SIGTERM on logout/unload; runnerd
+         handles it, but must not be allowed to block session teardown indefinitely. -->
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
+
     <!-- runnerd reads this as the fallback when --log-level is absent; kept in sync with
          --log-level, which does take effect. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>RUNNERVM_LOG_LEVEL</key>
         <string>__LOG_LEVEL__</string>
+        <!-- Tells runnerd it is running under a supervisor that will restart it, so a startup
+             failure backs off before exiting instead of feeding launchd's respawn loop. -->
+        <key>RUNNERVM_SUPERVISED</key>
+        <string>1</string>
+        <!-- Seconds runnerd sleeps before exiting on a configuration-class startup failure. -->
+        <key>RUNNERVM_STARTUP_BACKOFF</key>
+        <string>60</string>
     </dict>
 
     <!-- Crash and launch output only. runnerd writes its own JSON log, with in-process
          rotation, to <state-dir>/logs/runnerd/runnerd.log (spec §42); what lands here is what
          escapes the logging system — a dyld failure, a Swift runtime trap, an early panic.
-         The directory is created by runnerd at startup, so create it once before the first
-         `launchctl bootstrap`:  mkdir -p "__STATE_DIR__/logs/runnerd". -->
+         launchd creates the stdio *file* but never its directory: with the directory missing
+         every spawn fails with exit 78 before runnerd runs at all. `scripts/install.sh` and
+         `runnerctl setup` create "__STATE_DIR__/logs/runnerd" (0750, service owner) before the
+         job is loaded; a hand-rolled install must do the same. -->
     <key>StandardOutPath</key>
     <string>__STATE_DIR__/logs/runnerd/stdio.log</string>
     <key>StandardErrorPath</key>

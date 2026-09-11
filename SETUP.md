@@ -10,9 +10,6 @@ registered against either an **organization** or a single **repository**.
 - What has actually been proven, and what has not: [`docs/verification.md`](docs/verification.md),
   [`docs/status.md`](docs/status.md)
 
-> **v0.2.0 is unreleased.** Part 1 below — the curl one-liner and the wizard — is what a tagged
-> release ships. Until then, use [`docs/developer-setup.md`](docs/developer-setup.md) (Part 2).
-
 ---
 
 ## 0. What you are building
@@ -72,7 +69,7 @@ near as fast: 3 × 2 vCPU and 3 × 4 GiB against 10 CPUs and 32 GiB.
 
 ---
 
-## Part 1 — One-command install (from the first tagged release)
+## Part 1 — One-command install
 
 ### 1. Get a GitHub credential first
 

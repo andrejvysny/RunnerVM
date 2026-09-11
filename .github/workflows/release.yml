@@ -1,9 +1,19 @@
 name: release
-# Tag-triggered release: builds the RunnerVM macOS pkg, proves it actually installs and runs on a
-# clean macos-15 runner, then publishes it as a GitHub release. See docs/design/distribution.md
-# ("Release artifacts and manifest", "Unsigned phase") for the contract this implements, and
+# Tag-triggered release: builds the RunnerVM macOS pkg with a Developer ID Application + Installer
+# signature, notarizes and staples it, proves it actually installs and runs on a clean macos-15
+# runner, then publishes it as a GitHub release. See docs/design/distribution.md ("Release
+# artifacts and manifest", "Signing and notarization") for the contract this implements, and
 # docs/release.md for the operator-facing version-bump procedure that produces the tag this
 # workflow reacts to.
+#
+# Fail-closed: the first step after checkout aborts the run when any signing secret/variable is
+# missing, so an unsigned or wrong-team pkg can never be published as a release.
+#
+# Scope note: the installed-binary checks below (including `vmworker probe --json`) prove the
+# hardened runtime did not break process startup, entitlement retention or the signature chain.
+# They do NOT prove the hardened runtime is safe across the full VM lifecycle (boot, guest agent
+# handshake, JIT registration, teardown) -- that evidence comes from the Phase 5 hardware
+# validation on real hardware, not from this job.
 on:
   push:
     tags: ["v*"]
@@ -11,16 +21,100 @@ on:
 permissions:
   contents: write
 
+# One run per tag ref: a re-push of the same tag queues behind the run in flight instead of
+# cancelling it -- a half-published release is worse than a slow one. Different tags run on
+# separate ephemeral runners with their own keychains, so they do not need to serialize.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Build, install-smoke-test and publish RunnerVM pkg
+    name: Build, sign, notarize, install-smoke-test and publish RunnerVM pkg
     runs-on: macos-15
-    timeout-minutes: 60
+    # Notarization is a network round-trip to Apple: build-package.sh waits up to 30m for the
+    # notary, so the job budget is well above the unsigned-era 60m.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # MUST stay the first step after checkout: every later step assumes signing material
+      # exists, and a release published without it would be an unsigned pkg carrying a signed
+      # release's name.
+      - name: Assert signing material is configured
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in \
+            APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 \
+            APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD \
+            APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 \
+            APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD \
+            APPLE_NOTARY_KEY_P8_BASE64 \
+            APPLE_NOTARY_KEY_ID \
+            APPLE_NOTARY_ISSUER_ID \
+            APPLE_TEAM_ID
+          do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "error: release aborted -- empty signing secret/variable:$missing" >&2
+            echo "       APPLE_TEAM_ID is a repository VARIABLE, the rest are repository SECRETS;" >&2
+            echo "       see docs/release.md for the one-time signing setup." >&2
+            echo "       An unsigned pkg must never be published as a release." >&2
+            exit 1
+          fi
+
+          # The install-side gate compares the pkg's leaf team against a COMPILED-IN constant,
+          # never against the manifest (PLAN.md 4.3). If that constant and the signing identity
+          # disagree, every install of this release would refuse the pkg -- catch it here.
+          signing_swift="Sources/RunnerCore/Signing.swift"
+          if [ ! -f "$signing_swift" ]; then
+            echo "error: $signing_swift is missing -- the install-side team-id gate has no constant" >&2
+            exit 1
+          fi
+          compiled="$(grep -E 'let expectedTeamID' "$signing_swift" \
+            | head -1 \
+            | sed -nE 's/.*"([^"]*)".*/\1/p')"
+          if [ -z "$compiled" ]; then
+            echo "error: RunnerVMSigning.expectedTeamID in $signing_swift is nil/empty" >&2
+            echo "       set it to '$APPLE_TEAM_ID' before tagging a signed release" >&2
+            exit 1
+          fi
+          if [ "$compiled" != "$APPLE_TEAM_ID" ]; then
+            echo "error: RunnerVMSigning.expectedTeamID ('$compiled') != APPLE_TEAM_ID ('$APPLE_TEAM_ID')" >&2
+            echo "       every install of this release would reject the pkg" >&2
+            exit 1
+          fi
+          # The curl installer carries its own copy of the pin: bootstrap.sh is published verbatim as
+          # the install.sh asset, and an empty RUNNERVM_EXPECTED_TEAM_ID accepts any Developer ID.
+          bootstrap_pin="$(sed -nE 's/^RUNNERVM_EXPECTED_TEAM_ID="([^"]*)".*/\1/p' scripts/bootstrap.sh | head -1)"
+          if [ -z "$bootstrap_pin" ]; then
+            echo "error: RUNNERVM_EXPECTED_TEAM_ID in scripts/bootstrap.sh is empty -- the published install.sh would accept any Developer ID team" >&2
+            echo "       set it to '$APPLE_TEAM_ID' before tagging a signed release" >&2
+            exit 1
+          fi
+          if [ "$bootstrap_pin" != "$APPLE_TEAM_ID" ]; then
+            echo "error: RUNNERVM_EXPECTED_TEAM_ID in scripts/bootstrap.sh ('$bootstrap_pin') != APPLE_TEAM_ID ('$APPLE_TEAM_ID')" >&2
+            exit 1
+          fi
+          echo "signing material present; both compiled-in team pins match APPLE_TEAM_ID"
+
       - name: Select Xcode
         run: |
+          set -euo pipefail
           sudo xcode-select -s /Applications/Xcode_16.4.app
           xcodebuild -version
           swift --version
@@ -30,6 +124,7 @@ jobs:
       # something to silently reconcile.
       - name: Assert tag matches Sources/RunnerCore/Version.swift
         run: |
+          set -euo pipefail
           version="$(grep -E 'public static let current' Sources/RunnerCore/Version.swift \
             | sed -E 's/.*"([^"]*)".*/\1/')"
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
@@ -43,8 +138,147 @@ jobs:
         with:
           go-version-file: GuestAgent/go.mod
 
-      - name: Build package
-        run: bash scripts/build-package.sh --version "${GITHUB_REF_NAME#v}" --out dist
+      # A throwaway keychain in $RUNNER_TEMP, never the runner's login keychain: it is deleted by
+      # the `if: always()` cleanup step, and its password never leaves this step.
+      - name: Import signing identities into a temporary keychain
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          keychain="$RUNNER_TEMP/runnervm-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          # No -l/-t: the keychain must never re-lock mid-build (codesign/productbuild would then
+          # block on a UI prompt that does not exist on a runner).
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+
+          # Prepend, never replace: dropping the runner's own keychains from the search list
+          # breaks unrelated tooling later in the job.
+          existing=()
+          while IFS= read -r line; do
+            line="$(printf '%s' "$line" | tr -d ' "')"
+            if [ -n "$line" ]; then
+              existing+=("$line")
+            fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" ${existing[@]+"${existing[@]}"}
+
+          app_p12="$RUNNER_TEMP/developer-id-application.p12"
+          installer_p12="$RUNNER_TEMP/developer-id-installer.p12"
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode >"$app_p12"
+          printf '%s' "$APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64" | base64 --decode >"$installer_p12"
+
+          security import "$app_p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          # productbuild/productsign, not codesign: the Installer certificate carries the
+          # installer EKU and is used by the pkg tools only.
+          security import "$installer_p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD" \
+            -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/security
+          rm -f "$app_p12" "$installer_p12"
+
+          # Output redirected: set-key-partition-list dumps the whole keychain on success.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$keychain_password" "$keychain" >/dev/null
+
+          # Application identity: codesigning policy. Installer identity: NO -p codesigning --
+          # a Developer ID Installer certificate has the installer EKU and is filtered out by it.
+          app_identity="$(security find-identity -v -p codesigning "$keychain" \
+            | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          installer_identity="$(security find-identity -v "$keychain" \
+            | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+
+          for pair in "Application:$app_identity" "Installer:$installer_identity"; do
+            kind="${pair%%:*}"
+            identity="${pair#*:}"
+            if [ -z "$identity" ]; then
+              echo "error: no 'Developer ID $kind' identity found in the temporary keychain" >&2
+              exit 1
+            fi
+            case "$identity" in
+              *"($APPLE_TEAM_ID)"*) ;;
+              *)
+                echo "error: Developer ID $kind identity '$identity' is not team $APPLE_TEAM_ID" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "Developer ID Application: $app_identity"
+          echo "Developer ID Installer:   $installer_identity"
+          {
+            echo "SIGNING_KEYCHAIN=$keychain"
+            echo "APP_SIGN_IDENTITY=$app_identity"
+            echo "INSTALLER_SIGN_IDENTITY=$installer_identity"
+          } >>"$GITHUB_ENV"
+
+      - name: Stage App Store Connect notary key
+        env:
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$APPLE_NOTARY_KEY_P8_BASE64" | base64 --decode >"$RUNNER_TEMP/notary.p8"
+          chmod 600 "$RUNNER_TEMP/notary.p8"
+
+      # build-package.sh owns the whole signed pipeline: hardened-runtime codesign of all four
+      # Mach-O files, productbuild --sign, notarytool submit --wait, stapler staple/validate,
+      # then checksum + manifest (stapling rewrites the pkg, so those must come last).
+      - name: Build, sign and notarize package
+        env:
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          bash scripts/build-package.sh \
+            --version "${GITHUB_REF_NAME#v}" \
+            --out dist \
+            --keychain "$SIGNING_KEYCHAIN" \
+            --sign-identity "$APP_SIGN_IDENTITY" \
+            --installer-identity "$INSTALLER_SIGN_IDENTITY" \
+            --notarize-key "$RUNNER_TEMP/notary.p8" \
+            --notarize-key-id "$APPLE_NOTARY_KEY_ID" \
+            --notarize-issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --notarize-timeout 30m
+
+      # Independent re-verification of the artifact that is about to be published, using the same
+      # tools the install-side gate uses on target hosts (pkgutil/spctl) plus stapler.
+      - name: Verify pkg signature, notarization and manifest
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          pkg="dist/RunnerVM-macos-arm64.pkg"
+
+          signature="$(pkgutil --check-signature "$pkg")"
+          echo "$signature"
+          echo "$signature" | grep -Eq "Developer ID Installer:.*\($APPLE_TEAM_ID\)"
+          echo "$signature" | grep -Eq "Notarization:.*trusted"
+
+          xcrun stapler validate "$pkg"
+
+          assessment="$(spctl --assess --type install -vv "$pkg" 2>&1)"
+          echo "$assessment"
+          echo "$assessment" | grep -q "source=Notarized Developer ID"
+
+          jq -e --arg team "$APPLE_TEAM_ID" \
+            '.signed == true and .notarized == true and .teamId == $team' \
+            dist/release-manifest.json >/dev/null
+
+      - name: Verify package checksum
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c ./*.sha256
 
       - name: Install package
         run: sudo installer -pkg dist/RunnerVM-macos-arm64.pkg -target /
@@ -52,23 +286,55 @@ jobs:
       - name: Verify installed runnerctl
         run: /usr/local/bin/runnerctl --version | grep -q "${GITHUB_REF_NAME#v}"
 
-      - name: Verify installed vmworker signature
-        run: codesign --verify --strict /usr/local/libexec/runnervm/vmworker
+      # Every Mach-O the pkg ships must be Developer ID signed by our team, hardened, timestamped
+      # and free of get-task-allow -- the notary scans all four, and so does the install-side gate.
+      - name: Verify installed binary signatures
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          binaries=(
+            /usr/local/bin/runnerctl
+            /usr/local/libexec/runnervm/runnerd
+            /usr/local/libexec/runnervm/vmworker
+            /usr/local/share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent
+          )
+          for binary in "${binaries[@]}"; do
+            echo "== $binary"
+            # --deep is a no-op on a bare executable; --strict + an explicit requirement is not.
+            codesign --verify --strict --verbose=2 "$binary"
+            codesign --verify \
+              -R "=anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_TEAM_ID\"" \
+              "$binary"
+
+            info="$(codesign -dv --verbose=4 "$binary" 2>&1)"
+            echo "$info"
+            echo "$info" | grep -E '^CodeDirectory ' | grep -q 'flags=[^ ]*runtime'
+            echo "$info" | grep -q '^Timestamp='
+            echo "$info" | grep -q "^TeamIdentifier=$APPLE_TEAM_ID"
+            # `codesign -dv` does not print entitlements; read them explicitly.
+            if codesign -d --entitlements :- "$binary" 2>/dev/null | grep -q 'get-task-allow'; then
+              echo "error: $binary carries get-task-allow" >&2
+              exit 1
+            fi
+          done
 
       - name: Verify installed vmworker entitlement
         run: |
+          set -euo pipefail
           codesign -d --entitlements :- /usr/local/libexec/runnervm/vmworker 2>&1 \
             | grep -q com.apple.security.virtualization
 
+      # Proves the hardened runtime did not break vmworker startup. It does NOT prove the full VM
+      # lifecycle works under hardened runtime -- Phase 5 hardware validation is that evidence.
       - name: Installed vmworker probe
         run: /usr/local/libexec/runnervm/vmworker probe --json
 
+      - name: Installed darwin guest agent runs
+        run: /usr/local/share/runnervm/guest-agent/darwin-arm64/runnervm-guest-agent -version
+
       - name: Verify installed VERSION file
         run: test -f "/usr/local/share/runnervm/VERSION"
-
-      - name: Verify package checksum
-        working-directory: dist
-        run: shasum -a 256 -c ./*.sha256
 
       # scripts/bootstrap.sh is published byte-for-byte as the "install.sh" release asset (see its
       # own header and docs/design/distribution.md "Goal") -- this is the only place that copy is
@@ -77,21 +343,45 @@ jobs:
         run: cp scripts/bootstrap.sh dist/install.sh
 
       # Runs the real bootstrap.sh end-to-end against the pkg just built, pointed at the local
-      # dist/ directory instead of a GitHub release. A second `installer -pkg` over the first
-      # install a few steps up is fine: installer is idempotent.
+      # dist/ directory instead of a GitHub release. RUNNERVM_ALLOW_UNSIGNED is deliberately NOT
+      # set: this exercises the real signature/notarization gate against a real notarized pkg.
+      # A second `installer -pkg` over the first install a few steps up is fine: installer is
+      # idempotent.
       - name: Bootstrap script smoke test
         run: |
-          RUNNERVM_PKG_URL="file://$PWD/dist" RUNNERVM_ALLOW_UNSIGNED=1 RUNNERVM_NO_SETUP=1 \
+          set -euo pipefail
+          RUNNERVM_PKG_URL="file://$PWD/dist" RUNNERVM_NO_SETUP=1 \
             sudo -E bash scripts/bootstrap.sh
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/RunnerVM-macos-arm64.pkg \
-            dist/RunnerVM-macos-arm64.pkg.sha256 \
-            dist/release-manifest.json \
-            dist/install.sh \
-            --title "RunnerVM $GITHUB_REF_NAME" \
+          set -euo pipefail
+          args=(
+            "$GITHUB_REF_NAME"
+            dist/RunnerVM-macos-arm64.pkg
+            dist/RunnerVM-macos-arm64.pkg.sha256
+            dist/release-manifest.json
+            dist/install.sh
+            --title "RunnerVM $GITHUB_REF_NAME"
             --generate-notes
+          )
+          # v0.3.0-rc.1 and friends: any tag carrying a pre-release suffix publishes as a
+          # prerelease, so `releases/latest` keeps pointing at the last stable version.
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "${args[@]}"
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
+          rm -f \
+            "$RUNNER_TEMP/notary.p8" \
+            "$RUNNER_TEMP/developer-id-application.p12" \
+            "$RUNNER_TEMP/developer-id-installer.p12"

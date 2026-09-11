@@ -10,6 +10,10 @@ public struct ReconcileCounts: Sendable, Hashable {
   public var interrupted = 0
   public var orphans = 0
   public var swept = 0
+  /// Deletes this sweep re-issued because the row was still stuck in `deleting` after the grace
+  /// window. The retry itself runs off the reconcile loop, so this counts what was started, not
+  /// what has already finished.
+  public var deletingRetried = 0
   /// Persisted runner sessions a daemon restart orphaned and this sweep closed out.
   public var sessionsTerminalized = 0
 

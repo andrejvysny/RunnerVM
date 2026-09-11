@@ -212,6 +212,25 @@ import Testing
     #expect(!rendered.contains("__"), "unsubstituted placeholder in \(mode.plistFileName)")
   }
 
+  /// The crash-loop guard, in the files that actually ship: launchd throttles a restart loop to
+  /// one start per 30 s, `runnerd` is told it is supervised and how long to back off before
+  /// exiting, and neither variant may block shutdown for more than a minute.
+  @Test(arguments: ServiceDeploymentMode.allCases)
+  func theShippedTemplatesCarryTheStartupBackoffContract(_ mode: ServiceDeploymentMode) throws {
+    let path = "\(Self.repoRoot)/packaging/launchd/\(mode.plistFileName)"
+    guard FileManager.default.fileExists(atPath: path) else { return }  // not a checkout
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let plist = try #require(
+      PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        as? [String: Any])
+
+    #expect(plist["ThrottleInterval"] as? Int == 30, "\(mode.plistFileName)")
+    #expect(plist["ExitTimeOut"] as? Int == 60, "\(mode.plistFileName)")
+    let environment = try #require(plist["EnvironmentVariables"] as? [String: String])
+    #expect(environment["RUNNERVM_SUPERVISED"] == "1", "\(mode.plistFileName)")
+    #expect(environment["RUNNERVM_STARTUP_BACKOFF"] == "60", "\(mode.plistFileName)")
+  }
+
   /// `Tests/HostSetupTests/LaunchdManagerTests.swift` -> repo root.
   static let repoRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

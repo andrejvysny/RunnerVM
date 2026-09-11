@@ -49,9 +49,16 @@ public actor Orchestrator {
   var lastAdvertised: [RunnerProfileID: Int] = [:]
   var demandState: [RunnerProfileID: ProfileDemandState] = [:]
   var startTasks: [Int: Task<Void, Never>] = [:]
+  /// In-flight cancellations, one per instance. `cancel` runs detached because a delete waits out
+  /// the profile's grace window; see `OrchestratorTick.cancel`.
+  var cancelTasks: [InstanceID: Task<Void, Never>] = [:]
   /// Previous `proc_pidinfo` reading per worker; CPU percent is a delta, not an absolute
   /// (spec §40).
   var workerCPU: [InstanceID: (cpuSeconds: Double, at: Date)] = [:]
+  /// Consecutive `cancel` failures per instance. A row the scheduler cannot delete keeps its whole
+  /// reservation, so every attempt is counted; the count is what decides how loudly it is logged
+  /// and is cleared the moment a cancel lands. Pruned in `refreshMetrics`, like `workerCPU`.
+  var cancelFailures: [InstanceID: Int] = [:]
   var nextStartToken = 0
   var events: [OrchestratorEventRecord] = []
   /// Capacity held by in-flight image builds, so a scheduling pass plans against the same host
@@ -118,6 +125,12 @@ public actor Orchestrator {
     eventTask = nil
     await demand.stop()
     await drainStarts()
+    // Shutdown cancels in-flight deletes rather than waiting them out: a wedged worker can hold a
+    // delete for the capped 120 s exit window, longer than launchd's `ExitTimeOut` (60 s), and a
+    // cancelled `delete` is safe to abandon -- `waitForWorkerExit` is cancellation-cooperative,
+    // the row stays `deleting`, and the reconciler's stuck-delete retry finishes it after restart.
+    for task in cancelTasks.values { task.cancel() }
+    await drainCancels()
   }
 
   /// The demand provider is wired once at startup from whatever `github.demand` said then (spec
@@ -141,6 +154,15 @@ public actor Orchestrator {
     while let entry = startTasks.first {
       await entry.value.value
       startTasks[entry.key] = nil
+    }
+  }
+
+  /// The `drainStarts` counterpart for cancellations. Used by teardown and by tests that need a
+  /// detached delete to have finished before they assert on the row.
+  public func drainCancels() async {
+    while let entry = cancelTasks.first {
+      await entry.value.value
+      cancelTasks[entry.key] = nil
     }
   }
 
@@ -259,6 +281,25 @@ public actor Orchestrator {
   }
 }
 
+/// How loudly a repeated cancel failure is reported.
+///
+/// Deliberately not a retry backoff: the tick keeps trying every pass, which is what makes the
+/// delete land as soon as whatever held the row lets go. Only the log volume is throttled, because
+/// the same line every ten seconds forever is how an operator stops reading the log. Every failure
+/// is still counted into `runnervm_instance_cancel_failures_total`, which is the alertable signal.
+enum CancelBackoff {
+  /// Five minutes at the ten-second reconcile tick (spec §105).
+  static let escalateEvery = 30
+
+  static func level(failures: Int) -> Logger.Level? {
+    switch failures {
+    case ..<1: nil
+    case 1: .warning
+    default: failures.isMultiple(of: escalateEvery) ? .error : nil
+    }
+  }
+}
+
 /// Drives `Orchestrator.tick()` from the daemon's 10-second reconcile loop (spec §105). The
 /// orchestrator reports no `ReconcileCounts` of its own: what it did is in its event ring.
 public struct OrchestratorReconcileStep: ReconcileStep {
@@ -295,6 +336,7 @@ public struct CompositeReconcileStep: ReconcileStep {
         counts.interrupted += result.interrupted
         counts.orphans += result.orphans
         counts.swept += result.swept
+        counts.deletingRetried += result.deletingRetried
         counts.sessionsTerminalized += result.sessionsTerminalized
       } catch {
         failure = failure ?? error

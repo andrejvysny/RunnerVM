@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/keychain"
-	"github.com/runnervm/guest-agent/internal/system"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/system"
 )
 
 // Runner session states reported by agent.runnerStatus.

@@ -201,14 +201,46 @@ privileged() {
     log "$desc — needs root, queued (see 'manual steps' below)"
 }
 
+# True when the binary already carries a real, non-ad-hoc signature — a Developer ID signed
+# vmworker straight out of a release pkg or a Homebrew keg built from one. Re-signing such a binary
+# ad-hoc would destroy the publisher evidence the pkg's postinstall, `runnerctl upgrade` and
+# Gatekeeper check for, and cannot be undone on this host: it never has the private key. An
+# unsigned file (codesign exits non-zero) is not "already signed" and is signed below as usual.
+has_non_adhoc_signature() {
+    local bin="$1" info
+    [ -f "$bin" ] || return 1
+    info="$(codesign -dvv "$bin" 2>&1)" || return 1
+    if printf '%s\n' "$info" | grep -q 'Signature=adhoc'; then
+        return 1
+    fi
+    return 0
+}
+
+# --dry-run rendering of the signing step, guard included, so the printed plan is the plan the real
+# run follows rather than an unconditional codesign.
+plan_sign_vmworker() {
+    local bin="$1"
+    if has_non_adhoc_signature "$bin"; then
+        printf '+ # %s already carries a non-ad-hoc signature — verifying, not re-signing\n' "$bin"
+    else
+        printf '+ codesign --force --sign "%s" --entitlements %s %s\n' \
+            "$CODESIGN_IDENTITY" "$ENTITLEMENTS_PATH" "$bin"
+    fi
+}
+
 # Sign one vmworker binary with the production entitlement and prove it took: strict signature
 # verification, the entitlement present, and a `probe` run (which exercises Virtualization.framework
 # without creating a VM). Every failure is fatal — there is no useful vmworker without this.
+# A binary that arrives already Developer ID signed is verified but never re-signed.
 sign_and_verify_vmworker() {
     local bin="$1"
-    codesign --force --sign "$CODESIGN_IDENTITY" \
-        --entitlements "$ENTITLEMENTS_PATH" "$bin" \
-        || { echo "error: codesign failed for $bin" >&2; exit 1; }
+    if has_non_adhoc_signature "$bin"; then
+        log "$bin already carries a non-ad-hoc signature — verifying, not re-signing"
+    else
+        codesign --force --sign "$CODESIGN_IDENTITY" \
+            --entitlements "$ENTITLEMENTS_PATH" "$bin" \
+            || { echo "error: codesign failed for $bin" >&2; exit 1; }
+    fi
     codesign --verify --strict "$bin" \
         || { echo "error: signature verification failed for $bin" >&2; exit 1; }
     if ! codesign -d --entitlements :- "$bin" 2>&1 | grep -q com.apple.security.virtualization; then
@@ -435,8 +467,7 @@ fi
 # 4. Sign vmworker with the virtualization entitlement (spec §7.2)
 # --------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
-    printf '+ codesign --force --sign "%s" --entitlements %s %s\n' \
-        "$CODESIGN_IDENTITY" "$ENTITLEMENTS_PATH" "$VMWORKER_BUILT"
+    plan_sign_vmworker "$VMWORKER_BUILT"
     printf '+ codesign -d --entitlements :- %s | grep -q com.apple.security.virtualization\n' \
         "$VMWORKER_BUILT"
 else
@@ -457,17 +488,24 @@ privileged "install runnerctl -> $RUNNERCTL_DEST" install -m 0755 "$RUNNERCTL_BU
 # so re-assert it on the installed copy and verify. vmworker cannot create a single VM without
 # its entitlement, so this fails closed: a signing or verification failure aborts the install.
 # When the copy itself was deferred to a manual sudo step, the same commands are queued after it.
+# A binary that already carries a non-ad-hoc signature is verified, never re-signed — here and in
+# the queued steps alike (see has_non_adhoc_signature).
 if [ "$DRY_RUN" -eq 1 ]; then
-    printf '+ codesign --force --sign "%s" --entitlements %s %s\n' \
-        "$CODESIGN_IDENTITY" "$ENTITLEMENTS_PATH" "$VMWORKER_DEST"
+    plan_sign_vmworker "$VMWORKER_DEST"
     printf '+ codesign --verify --strict %s && %s probe --json\n' "$VMWORKER_DEST" "$VMWORKER_DEST"
 elif [ -f "$VMWORKER_DEST" ] && [ -w "$VMWORKER_DEST" ]; then
     sign_and_verify_vmworker "$VMWORKER_DEST"
     log "installed vmworker verified: signature, entitlement and probe OK"
 else
+    # The destination copy does not exist yet (that is why these steps are queued), so the guard
+    # asks the source binary that is about to be copied there.
+    if ! has_non_adhoc_signature "$VMWORKER_BUILT"; then
+        MANUAL_STEPS+=(
+            "$(quote_cmd codesign --force --sign "$CODESIGN_IDENTITY" \
+                --entitlements "$ENTITLEMENTS_PATH" "$VMWORKER_DEST")"
+        )
+    fi
     MANUAL_STEPS+=(
-        "$(quote_cmd codesign --force --sign "$CODESIGN_IDENTITY" \
-            --entitlements "$ENTITLEMENTS_PATH" "$VMWORKER_DEST")"
         "$(quote_cmd codesign --verify --strict "$VMWORKER_DEST")"
         "$(quote_cmd "$VMWORKER_DEST" probe --json)"
     )
@@ -501,6 +539,13 @@ privileged "create $STATE_DIR/logs/instances (0750, $SERVICE_USER:$SERVICE_GROUP
     mkdir -p -m 0750 "$STATE_DIR/logs/instances"
 privileged "chown $STATE_DIR/logs/instances to $SERVICE_USER:$SERVICE_GROUP" \
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/logs/instances"
+# logs/runnerd holds runnerd's own JSON log and the launchd stdio redirect. launchd creates the
+# stdio *file* but never its directory, so a missing logs/runnerd makes every spawn of the job fail
+# with exit 78 before runnerd runs at all -- it must exist before section 7's `launchctl bootstrap`.
+privileged "create $STATE_DIR/logs/runnerd (0750, $SERVICE_USER:$SERVICE_GROUP)" \
+    mkdir -p -m 0750 "$STATE_DIR/logs/runnerd"
+privileged "chown $STATE_DIR/logs/runnerd to $SERVICE_USER:$SERVICE_GROUP" \
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/logs/runnerd"
 # Image builder directories (spec P6): RunnerPaths.buildsDir / .baseImageCacheDir / .buildLogsDir
 # (Sources/RunnerCore/Configuration/Paths.swift) -- runnerd creates these lazily too, but a fresh
 # install lays them out up front with the same ownership as everything else under $STATE_DIR.

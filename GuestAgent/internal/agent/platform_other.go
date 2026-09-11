@@ -2,7 +2,7 @@
 
 package agent
 
-import "github.com/runnervm/guest-agent/internal/keychain"
+import "github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
 
 // platformCapabilities advertises agent.selfTest, which is callable
 // everywhere (it just has nothing to report off macOS). "ciKeychain" is

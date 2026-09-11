@@ -198,6 +198,108 @@ import Testing
     }
   }
 
+  // MARK: - timeouts.imagePull (spec §73)
+
+  /// The deadline belongs to the caller, not to the transfer: a `vm create` that runs out of
+  /// budget must leave no instance row and no planning pin behind, and must not take the download
+  /// away from everyone else who is still inside their own window (spec §137).
+  @Test func aPullThatOutlivesImagePullFailsTheCreateButLeavesTheTransferRunning() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      let config = M2Harness.configuration(
+        imagePull: .milliseconds(10), linuxImage: published.reference.description)
+      _ = try await GRDBConfigStore(db: harness.database).apply(config, actor: "test")
+      // The transfer is already under way (an operator's `image pull`, or an earlier create) when
+      // the create below joins it. Starting it here rather than leaving the create to start it is
+      // what keeps the test honest under load: the budget covers resolution *and* the wait, so on
+      // a busy machine the create can run out of it before it would have started anything, and the
+      // property under test — the deadline never touches the transfer — is the same either way.
+      _ = try await harness.images.startPull(reference: published.reference.description)
+      try await waitUntil("the shared transfer is running", interval: .milliseconds(1)) {
+        await !harness.images.inFlightPulls.isEmpty
+      }
+
+      let error = await #expect(throws: ImageError.self) {
+        try await harness.instances.create(profileName: "linux")
+      }
+
+      #expect(error?.code == "IMAGE_PULL_TIMEOUT")
+      #expect(try await harness.instanceRows.list(profile: nil, states: nil).isEmpty)
+      #expect(try await harness.imageRows.pins(ownerType: .planning).isEmpty)
+      // Nobody cancelled the transfer: it finishes on its own and the image is there for the next
+      // create (or for the `image pull` that started it) to use.
+      try await waitUntil("the transfer the create gave up on still lands the image", attempts: 1_200) {
+        try await harness.imageRows.list(state: .ready).count == 1
+      }
+      #expect(published.chunkFetches(harness.registry) == published.chunkDigests.count)
+    }
+  }
+
+  /// Two callers, two deadlines, one download: the one that gives up neither cancels nor slows the
+  /// one that has budget left, and no second transfer is started for the same digest.
+  @Test func aSecondCallerWithARoomierDeadlineStillGetsTheSharedTransfer() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"))
+      var config = M2Harness.configuration(
+        imagePull: .milliseconds(10), linuxImage: published.reference.description)
+      var patientProfile = config.profiles[0]
+      patientProfile.name = "linux-patient"
+      patientProfile.timeouts?.imagePull = .minutes(30)
+      config.profiles.append(patientProfile)
+      _ = try await GRDBConfigStore(db: harness.database).apply(config, actor: "test")
+      harness.registry.resetRecording()
+
+      let patient = Task { try await harness.instances.create(profileName: "linux-patient") }
+      // Starting the impatient caller only once the transfer exists is what makes it a *waiter*
+      // rather than the caller that starts one.
+      try await waitUntil("the shared transfer is running", interval: .milliseconds(1)) {
+        await !harness.images.inFlightPulls.isEmpty
+      }
+      let error = await #expect(throws: ImageError.self) {
+        try await harness.instances.create(profileName: "linux")
+      }
+      let record = try await patient.value
+
+      #expect(error?.code == "IMAGE_PULL_TIMEOUT")
+      #expect(record.imageDigest == (try await harness.imageRows.list(state: .ready).first?.digest))
+      #expect(published.chunkFetches(harness.registry) == published.chunkDigests.count)
+      #expect(try await harness.instanceRows.list(profile: nil, states: nil).count == 1)
+    }
+  }
+
+  /// A waiter never sees the transfer's `Task` — awaiting it is exactly what the deadline design
+  /// forbids — so the outcome is read back from the `pull-image` operation row. What the operator
+  /// needs is the class of failure, not the fact that *a* pull failed.
+  @Test func aFailedSharedTransferReportsItsRealErrorToTheWaiter() async throws {
+    try await withHarness { harness in
+      let published = try await PublishedImage.publish(
+        into: harness.registry, at: harness.tree.root.appending(path: "origin"), withNVRAM: true)
+      let config = M2Harness.configuration(linuxImage: published.reference.description)
+      _ = try await GRDBConfigStore(db: harness.database).apply(config, actor: "test")
+      // The NVRAM layer is fetched only after every disk chunk has verified, so the transfer is
+      // still joinable while it is on its way to failing.
+      harness.registry.failBlobGet(
+        digest: try #require(published.nvramDigest), status: 401, times: 8)
+      let starter = Task { try await harness.images.pull(reference: published.reference.description) }
+      try await waitUntil("the shared transfer is running", interval: .milliseconds(1)) {
+        await !harness.images.inFlightPulls.isEmpty
+      }
+
+      let error = await #expect(throws: (any Error).self) {
+        try await harness.instances.create(profileName: "linux")
+      }
+
+      #expect((error as? any RunnerError)?.code == "REGISTRY_AUTH")
+      // The caller that started it still gets its own wrapped failure, unchanged.
+      let starterError = await #expect(throws: ImageError.self) { try await starter.value }
+      #expect(starterError?.code == "IMAGE_PULL_FAILED")
+      #expect(try await harness.instanceRows.list(profile: nil, states: nil).isEmpty)
+      #expect(try await harness.imageRows.pins(ownerType: .planning).isEmpty)
+    }
+  }
+
   // MARK: - inspectRemote
 
   /// The whole point of `image.inspectRemote`: learn the virtual size a profile has to declare

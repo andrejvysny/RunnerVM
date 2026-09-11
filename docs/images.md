@@ -372,6 +372,7 @@ profiles:
     ssh:
       enabled: true
     timeouts:
+      imagePull: 60m    # this caller's budget for resolve + transfer (default 60m)
       agentReady: 3m
 ```
 
@@ -446,9 +447,14 @@ The tag is resolved to an immutable digest before any VM starts and the digest
 incident stays reproducible after `:stable` moves. Consequences worth knowing:
 
 * **The first `vm create` after the tag moves is as slow as the image is large.**
-  Resolution and the pull happen inside `instance.create`. Pre-pull with
-  `runnerctl image pull <ref>` to keep that cost off the first job — or set
-  `images.prefetch: true` and let the daemon do it (see below).
+  Resolution and the pull happen inside `instance.create`, bounded by that
+  profile's `timeouts.imagePull` (default 60m). The budget is the *caller's*: a
+  create that runs out of it fails with `IMAGE_PULL_TIMEOUT` and releases its
+  reservation, while the transfer keeps running for the other callers sharing it
+  — and the create retried after it lands is the one that succeeds. On a slow
+  link, pre-pull with `runnerctl image pull <ref>` to keep that cost off the
+  first job — or set `images.prefetch: true` and let the daemon do it (see
+  below) — rather than shortening the budget.
 * A tag → digest resolution is cached for five minutes per reference, so
   steady-state creates do not touch the registry at all.
 * Concurrent pulls that resolve to the same manifest digest share **one**

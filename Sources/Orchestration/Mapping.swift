@@ -198,6 +198,10 @@ enum Mapping {
   }
 
   /// `.systemFreeSize` on the volume backing the RunnerVM root; 0 when the path is unreadable.
+  /// Deliberately a different source than admission's `APFSClone.freeSpace(at:)` (which prefers
+  /// "important usage" free space and falls back to available capacity, logging once when the
+  /// volume is unreadable): this is a status-display figure, not an admission gate, so it stays
+  /// the plain filesystem attribute and does not need that fallback or logging.
   static func freeDiskBytes(at url: URL) -> UInt64 {
     let attributes = try? FileManager.default.attributesOfFileSystem(
       forPath: url.path(percentEncoded: false))

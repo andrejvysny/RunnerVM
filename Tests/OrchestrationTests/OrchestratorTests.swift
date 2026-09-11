@@ -49,6 +49,7 @@ import Testing
 
       await manual.set(profile: profile, assignedJobs: 0)
       await orchestrator.tick()
+      await orchestrator.drainCancels()
 
       let live = try await harness.instanceRows.list(profile: profile, states: nil)
         .filter { $0.state != .deleted }
@@ -75,11 +76,45 @@ import Testing
       await manual.set(profile: profile, assignedJobs: 0)
       await demand.setConfirmed(false)
       await orchestrator.tick()
+      await orchestrator.drainCancels()
       #expect(try await harness.record(started.id).state != .deleted)
 
       await demand.setConfirmed(true)
       await orchestrator.tick()
+      await orchestrator.drainCancels()
       #expect(try await harness.record(started.id).state == .deleted)
+    }
+  }
+
+  /// A cancel walks the whole teardown ladder -- `worker.shutdown`, the profile's grace window,
+  /// then the worker's exit -- so it runs detached like a start does: a tick that waited for one
+  /// would stall the 10 s reconcile loop, worker recovery included. The wedge here is a worker
+  /// that answers `worker.shutdown` and then keeps its lock, which is what a slow guest looks like.
+  @Test func aCancelThatCannotFinishNeverStallsTheNextTick() async throws {
+    try await withHarness { harness in
+      let (instance, agent) = try await harness.idleInstance()
+      await harness.launcher.worker(for: instance.id)?.setExitHandler {}
+      let profile = try await harness.profileID("linux")
+      let manual = ManualDemandProvider()
+      await manual.set(profile: profile, assignedJobs: 0)
+      let orchestrator = await harness.orchestrator(demand: manual)
+
+      // Well inside the wedge: the exit wait alone runs for seconds, so a tick that waited for
+      // the teardown fails here rather than merely being slow.
+      try await withHangGuard(
+        "two ticks while a cancel is still tearing a VM down", limit: .seconds(5)) {
+        await orchestrator.tick()
+        await orchestrator.tick()
+      }
+
+      // Still going: the row cannot reach `deleted` while its worker holds the lock.
+      #expect(try await harness.record(instance.id).state != .deleted)
+
+      // Unwedge, and the detached delete finishes on its own.
+      await harness.launcher.killWorker(instance.id)
+      await orchestrator.drainCancels()
+      #expect(try await harness.record(instance.id).state == .deleted)
+      await agent.stop()
     }
   }
 
@@ -209,6 +244,42 @@ import Testing
     }
   }
 
+  /// The same protection for the boot half of the ladder, which lands after `create` has already
+  /// returned: `timeouts.vmBoot` expires on a watcher, not inside the start task, so what keeps the
+  /// next tick from cloning and booting the same unbootable image again is the failed row itself --
+  /// it holds the profile's reservation until the reaper takes it, and the demand it was started
+  /// for stays accounted for.
+  @Test func aBootTimeoutHoldsTheProfileDown() async throws {
+    // Well above the create ladder: the budget starts at `cloning`, and a ladder that overran it
+    // under load would report the timeout against a different phase.
+    let config = M2Harness.configuration(vmBoot: .seconds(3))
+    try await withHarness(configuration: config) { harness in
+      try await harness.importLinuxImage()
+      // A worker that acknowledges `vm.start` and then never reports the guest running.
+      var behaviour = FakeWorkerLauncher.Behaviour()
+      behaviour.statesAfterStart = []
+      await harness.launcher.set(behaviour)
+      let profile = try await harness.profileID("linux")
+      let manual = ManualDemandProvider()
+      await manual.set(profile: profile, assignedJobs: 1)
+      let orchestrator = await harness.orchestrator(demand: manual, configuration: config)
+
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      let started = try #require(
+        try await harness.instanceRows.list(profile: profile, states: nil).first)
+      let failed = try await harness.awaitInstance(started.id, state: .failed)
+      #expect(failed.failureCode == "VM_BOOT_TIMEOUT")
+
+      // The second tick must not clone and boot the same broken image again: a full disk clone and
+      // a dead VM per tick is exactly what this bounds.
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      #expect(try await harness.instanceCount(profile: "linux") == 1)
+      #expect(try await harness.record(started.id).state == .failed)
+    }
+  }
+
   @Test func warmPoolKeepsOneIdleInstanceWithoutASession() async throws {
     let config = M2Harness.configuration(warmPool: WarmPoolPolicy(minIdle: 1, maxIdle: 1))
     try await withHarness(configuration: config) { harness in
@@ -236,6 +307,48 @@ import Testing
       #expect(try await harness.record(record.id).state == .idle)
       #expect(try await harness.runners.list().isEmpty)
       #expect(try await harness.instanceCount(profile: "linux") == 1)
+      await agent.stop()
+    }
+  }
+
+  /// A JIT deadline destroys the VM it failed on (nothing is wrong with the guest), so with demand
+  /// still standing the next tick would clone and boot a replacement, hand it to the same
+  /// unreachable GitHub, and destroy that one too -- a VM per tick for the length of the outage.
+  /// The hold-down the VM-start path already uses governs the retry cadence instead.
+  @Test func aGitHubFailureDuringHandOffHoldsTheProfileDownLikeAFailedStart() async throws {
+    let config = M2Harness.configuration(jitGeneration: .milliseconds(50))
+    try await withHarness(configuration: config) { harness in
+      harness.stubGitHub()
+      // Reachable, never answers: the shape that expires the JIT deadline.
+      harness.github.stub(.post, M2Harness.jitPath, .json("{}", delay: .seconds(10)))
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      let profile = try await harness.profileID("linux")
+      let manual = ManualDemandProvider()
+      await manual.set(profile: profile, assignedJobs: 1)
+      let clock = TestClock()
+      let orchestrator = await harness.orchestrator(
+        demand: manual, configuration: config, now: { clock.now })
+
+      // Tick 1 needs no new VM (the idle one covers the demand); it hands that one off, the JIT
+      // deadline expires, and the VM is destroyed.
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      try await harness.awaitInstance(instance.id, state: .deleted)
+      let afterFailure = try await harness.instanceRows.list(profile: profile, states: nil).count
+      #expect(afterFailure == 1)
+
+      // Tick 2: demand is still standing and there is no VM left to serve it, but the profile is
+      // held down, so nothing is cloned or booted.
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      #expect(try await harness.instanceRows.list(profile: profile, states: nil).count == 1)
+
+      // Once the window passes the profile is startable again -- held down, not switched off.
+      clock.advance(by: Double(Orchestrator.Tuning().startHoldDown.components.seconds) + 1)
+      await orchestrator.tick()
+      await orchestrator.drainStarts()
+      #expect(try await harness.instanceRows.list(profile: profile, states: nil).count == 2)
       await agent.stop()
     }
   }
@@ -267,4 +380,5 @@ actor ConfirmationGatedDemand: DemandProvider {
 
   func refresh() async { await inner.refresh() }
   func report() async -> [DemandProviderReport] { await inner.report() }
+
 }

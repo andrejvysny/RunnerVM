@@ -17,8 +17,9 @@ import RunnerLogging
 /// restarted. Re-observing is safe because `agent.runnerStatus` is a read — the guest, not the
 /// daemon, is the authority on whether the runner is still up.
 extension RunnerSessionManager {
-  /// What one sweep did. `deferred` counts sessions an observer is already watching, which is
-  /// what makes repeating the sweep on every reconcile tick free.
+  /// What one sweep did. `deferred` counts sessions this sweep deliberately left alone -- an
+  /// observer is already watching them, a `register` still owns them, or they moved under the
+  /// snapshot -- which is what makes repeating the sweep on every reconcile tick free.
   public struct RecoveryReport: Sendable, Hashable {
     public var reattached = 0
     public var terminalized = 0
@@ -38,8 +39,8 @@ extension RunnerSessionManager {
   /// out; a GitHub call made against this scope fails and is queued as a retryable operation row.
   static let unresolvedScope = GitHubScope.organization(owner: "", runnerGroupID: nil)
 
-  /// Idempotent, and safe to call on every tick: a session already being observed is skipped, and
-  /// a terminal row is not a session any more.
+  /// Idempotent, and safe to call on every tick: a session already being observed -- or still
+  /// being registered -- is skipped, and a terminal row is not a session any more.
   public func recoverSessions() async -> RecoveryReport {
     var report = RecoveryReport()
     guard let rows = try? await sessions.list(limit: nil) else { return report }
@@ -50,7 +51,27 @@ extension RunnerSessionManager {
       }
       let from = row.state
       let context = await contextForRecovery(row)
+      // A `register` between its row insert and its first observer owns this row: it is parked in
+      // a JIT call with nothing to defer to, and closing the session under it would drop the
+      // registration GitHub is about to hand back and tear the VM down mid-call. Checking the mark
+      // after `contextForRecovery` is safe, and needed for the profile's own `jitGeneration`: for a
+      // row that is already in `rows` the mark can only disappear (its `register` finished, which
+      // also moved the row), never appear.
+      guard !isRegistering(row.id, within: Self.registrationGrace(context.profile)) else {
+        report.deferred += 1
+        continue
+      }
+      // Anything still marked here is older than the grace -- a `register` that will never come
+      // back -- so reap it: nothing else prunes the map, and `register`'s own `defer` is exactly
+      // what such a caller never reached.
+      registering[row.id] = nil
       let outcome = await recover(row, context: context)
+      // Nothing happened, so nothing is recorded: a metric per tick per live session would be all
+      // this sweep ever says.
+      guard outcome != Self.skippedOutcome else {
+        report.deferred += 1
+        continue
+      }
       switch outcome {
       case Self.reattachedOutcome: report.reattached += 1
       default: report.terminalized += 1
@@ -62,6 +83,8 @@ extension RunnerSessionManager {
 
   static let reattachedOutcome = "reattached"
   static let terminalizedOutcome = "terminalized"
+  /// The row moved, or somebody took ownership of it, between the snapshot and the decision.
+  static let skippedOutcome = "skipped"
 
   private func record(
     _ session: RunnerSessionRecord, from: RunnerSessionState, outcome: String
@@ -78,12 +101,23 @@ extension RunnerSessionManager {
 
   // MARK: - Per-state recovery
 
+  /// Decides on a *re-read* row, never on the caller's snapshot.
+  ///
+  /// `rows` was listed and `contextForRecovery` awaited four more times before this call, and the
+  /// manager is a reentrant actor: a `register`, an observer or a second sweep can have moved this
+  /// row -- or taken ownership of it -- across any of those suspensions. Acting on the snapshot
+  /// anyway would be fatal rather than merely wasted work, because `settle` deliberately re-targets
+  /// its terminal CAS from whatever the row actually says: a session that has since gone
+  /// `runnerOnline` would be closed and its VM destroyed under a live runner.
   private func recover(_ session: RunnerSessionRecord, context: SessionContext) async -> String {
-    switch session.state {
+    guard let fresh = try? await sessions.get(id: session.id), fresh.state == session.state,
+          observers[session.id] == nil
+    else { return Self.skippedOutcome }
+    switch fresh.state {
     case .planned:
       // Nothing was asked of GitHub yet, so there is nothing to clean up there.
       await finish(
-        session, to: .jitFailed, failureCode: Self.restartFailureCode,
+        fresh, to: .jitFailed, failureCode: Self.restartFailureCode,
         result: Self.restartResult, context: context,
         // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
         // capacity comes back now rather than after `failedInstanceRetention`.
@@ -91,13 +125,13 @@ extension RunnerSessionManager {
     case .jitRequested:
       // The POST may or may not have been processed before the daemon died; the runner's name is
       // the only handle on a registration whose id never reached the row.
-      if let runnerID = await strayRunnerID(session, context: context) {
+      if let runnerID = await strayRunnerID(fresh, context: context) {
         await ensureRunnerRemoved(
-          session: session.id, runnerID: runnerID, scope: context.scope,
-          source: session.jitSource)
+          session: fresh.id, runnerID: runnerID, scope: context.scope,
+          source: fresh.jitSource)
       }
       await finish(
-        session, to: .jitFailed, failureCode: Self.restartFailureCode,
+        fresh, to: .jitFailed, failureCode: Self.restartFailureCode,
         result: Self.restartResult, context: context,
         // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
         // capacity comes back now rather than after `failedInstanceRetention`.
@@ -106,13 +140,13 @@ extension RunnerSessionManager {
       // The registration exists but its config never reached the guest, and it never will:
       // `finish` drops the runner and hands the VM back.
       await finish(
-        session, to: .runnerStartFailed, failureCode: Self.restartFailureCode,
+        fresh, to: .runnerStartFailed, failureCode: Self.restartFailureCode,
         result: Self.restartResult, context: context,
         // Nothing to diagnose: the daemon went away, the VM did nothing wrong. Destroy it so the
         // capacity comes back now rather than after `failedInstanceRetention`.
         retainVM: false)
     case .jitDelivered, .runnerStarting, .runnerOnline, .jobRunning:
-      return await reattach(session, context: context)
+      return await reattach(fresh, context: context)
     default:
       return Self.terminalizedOutcome
     }
@@ -183,18 +217,27 @@ extension RunnerSessionManager {
   /// GitHub may or may not hold a registration under the VM's name. Blocking recovery behind a
   /// GitHub outage for a runner that probably does not exist would be a worse trade than leaving
   /// this one orphan to the operator.
-  private func strayRunnerID(
+  ///
+  /// The plane that would have *issued* the registration is asked first, because that is the plane
+  /// the removal will go back to (`removeRunner` switches on `jitSource`): a scale-set runner found
+  /// through the REST listing is only useful if the two id spaces agree, while the scale-set
+  /// listing is authoritative for it. The other plane stays as a fallback, since a registration
+  /// that exists at all is better dropped through whichever API can see it.
+  ///
+  /// Also used by `register`'s JIT-deadline path, which is the live version of the same question:
+  /// the POST may have been processed after the caller stopped waiting for the answer.
+  func strayRunnerID(
     _ session: RunnerSessionRecord, context: SessionContext
   ) async -> Int64? {
     guard let instance = try? await instanceRows.get(id: session.instanceId) else { return nil }
-    if let plane = context.plane,
-       let runner = try? await plane.findRunner(scope: context.scope, name: instance.name) {
-      return runner.id
+    if session.jitSource == .scaleSet, let plane = context.scaleSetPlane,
+       let found = try? await plane.runner(scope: context.scope, name: instance.name) {
+      return found.id
     }
-    guard session.jitSource == .scaleSet, let plane = context.scaleSetPlane,
-          let found = try? await plane.runner(scope: context.scope, name: instance.name)
+    guard let plane = context.plane,
+          let runner = try? await plane.findRunner(scope: context.scope, name: instance.name)
     else { return nil }
-    return found.id
+    return runner.id
   }
 
   // MARK: - Context

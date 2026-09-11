@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/runnervm/guest-agent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
 )
 
 // parseEnvFile turns the env dump the stand-in run.sh wrote into a map.

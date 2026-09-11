@@ -5,8 +5,8 @@ import (
 	"errors"
 	"syscall"
 
-	guestexec "github.com/runnervm/guest-agent/internal/exec"
-	"github.com/runnervm/guest-agent/internal/rpc"
+	guestexec "github.com/andrejvysny/RunnerVM/GuestAgent/internal/exec"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
 )
 
 // handleExec streams a command's output as chunks and finishes with a

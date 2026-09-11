@@ -211,6 +211,20 @@ extension RunnerProfileConfig {
     )]
   }
 
+  /// Virtualization.framework reports a macOS guest `running` the moment the VM starts, long
+  /// before macOS itself has finished booting, so `vmBoot` is satisfied almost immediately and the
+  /// only timeout that actually covers a macOS first boot is `agentReady`.
+  private func validateMacOSAgentReady(
+    path: String, timeouts: TimeoutPolicy
+  ) -> [ConfigurationIssue] {
+    guard guestOS == .macos, timeouts.agentReady.seconds < 120 else { return [] }
+    return [.warning(
+      "PROFILE_TIMEOUT_AGENT_READY_SHORT", "\(path).timeouts.agentReady",
+      "below 2m on a macOS profile: Virtualization reports the VM running before macOS has "
+        + "booted, so agentReady -- not vmBoot -- is what bounds a macOS first boot, and a cold "
+        + "one takes minutes")]
+  }
+
   func validateTimeouts(path: String) -> [ConfigurationIssue] {
     guard let timeouts else { return [] }
     var issues = timeouts.all.filter { !$0.value.isPositive }.map {
@@ -219,11 +233,54 @@ extension RunnerProfileConfig {
     }
     // `clone` is parsed but never applied: `clonefile(2)` is synchronous and uninterruptible, and
     // faking a deadline around it would only ever report a timeout after the work was done.
+    // The whole window is spent waiting: runnerd holds the row in `stopping`/`deleting`, and the
+    // worker only forces the guest down once it closes. A grace this long is far more often a
+    // typo ("10m" for "10s") than a guest that really needs ten minutes to shut down.
+    if timeouts.gracefulShutdown.seconds > 600 {
+      issues.append(.warning(
+        "PROFILE_TIMEOUT_GRACEFUL_SHUTDOWN_LONG", "\(path).timeouts.gracefulShutdown",
+        "a stop or delete of this profile's VMs waits out the whole window before the guest is "
+          + "forced down; values above 10m keep host capacity reserved for that long"))
+    }
     if timeouts.clone != TimeoutPolicy.default.clone {
       issues.append(.warning(
         "PROFILE_TIMEOUT_CLONE_IGNORED", "\(path).timeouts.clone",
         "not enforced: instance disks are created with clonefile(2), which has no cancellation "
-          + "point; remove the setting"))
+          + "point; a clone that overruns is charged to timeouts.vmBoot, which now bounds the "
+          + "whole clone-to-running window. Remove the setting"))
+    }
+    // The same budget covers the clone, the worker spawn and the guest's boot, and the clone is
+    // effectively free (clonefile(2) copies metadata, not the disk). Under 30s leaves nothing for
+    // the boot itself, so an ordinary VM is failed with VM_BOOT_TIMEOUT and retried forever.
+    if timeouts.vmBoot.seconds < 30 {
+      issues.append(.warning(
+        "PROFILE_TIMEOUT_VM_BOOT_SHORT", "\(path).timeouts.vmBoot",
+        "below 30s: this budget spans the disk clone, the vmworker spawn and the guest reporting "
+          + "itself running, so a VM that would have booted is failed with VM_BOOT_TIMEOUT "
+          + "(default 3m)"))
+    }
+    // The first `vm create` against a new digest pays for the whole transfer inside this budget
+    // (prefetch is off by default), and a real image is gigabytes. Under a minute only ever fails
+    // creates that were downloading normally -- and leaves the transfer running, so the retry
+    // after it lands is the one that succeeds.
+    if timeouts.imagePull.seconds < 60 {
+      issues.append(.warning(
+        "PROFILE_TIMEOUT_IMAGE_PULL_SHORT", "\(path).timeouts.imagePull",
+        "below 60s: this budget covers resolving the reference and transferring the image itself "
+          + "on the first create that needs it, which is gigabytes over whatever link this host "
+          + "has (default 60m). Pre-pull with `runnerctl image pull` or images.prefetch: true "
+          + "instead of shortening it"))
+    }
+    issues += validateMacOSAgentReady(path: path, timeouts: timeouts)
+    // A JIT call can spend a credential mint plus a couple of GitHub's own 429/503 retries before
+    // it succeeds, and under a minute it gives up on requests that were about to. It is not meant
+    // to cover the full retry ladder either -- the scheduler's hold-down governs how soon a failed
+    // registration is attempted again.
+    if timeouts.jitGeneration.seconds < 60 {
+      issues.append(.warning(
+        "PROFILE_TIMEOUT_JIT_GENERATION_SHORT", "\(path).timeouts.jitGeneration",
+        "below 60s: a credential mint plus a couple of GitHub's rate-limit/5xx retries can outlast "
+          + "it, so a JIT request that was about to succeed is failed instead (default 2m)"))
     }
     return issues
   }

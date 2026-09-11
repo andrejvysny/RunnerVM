@@ -19,6 +19,10 @@ let package = Package(
   targets: [
     // Domain: IDs, models, state machines, errors, configuration model. No I/O.
     .target(name: "RunnerCore"),
+    // posix_spawn runner: process-group signal escalation, deadline-bounded drain, decoded exit
+    // status. A leaf with no dependencies on purpose -- `HostSetup` must never import
+    // `Orchestration`, and both shell out.
+    .target(name: "ProcessSpawn"),
     .target(name: "RunnerLogging", dependencies: [
       "RunnerCore",
       .product(name: "Logging", package: "swift-log"),
@@ -56,12 +60,12 @@ let package = Package(
     // plan, service account, launchd, installer. ConfigLoader so a rendered plan can be proved to
     // load before it is written; Scheduler for the concurrency recommendation's capacity math.
     .target(name: "HostSetup", dependencies: [
-      "RunnerCore", "DaemonAPI", "GuestControl", "ConfigLoader", "Scheduler",
+      "RunnerCore", "DaemonAPI", "GuestControl", "ConfigLoader", "Scheduler", "ProcessSpawn",
     ]),
     .target(name: "Orchestration", dependencies: [
       "RunnerCore", "RunnerLogging", "RPC", "DaemonAPI", "Persistence", "Scheduler",
       "WorkerProtocol", "GuestControl", "ImageStore", "ImageBuild", "OCIRegistry", "GitHubControl",
-      "Metrics",
+      "Metrics", "ProcessSpawn",
     ]),
     .executableTarget(name: "runnerd", dependencies: [
       "Orchestration", "DaemonAPI", "ConfigLoader", "RunnerLogging",
@@ -81,6 +85,7 @@ let package = Package(
       .product(name: "ArgumentParser", package: "swift-argument-parser"),
     ]),
     .testTarget(name: "RunnerCoreTests", dependencies: ["RunnerCore"]),
+    .testTarget(name: "ProcessSpawnTests", dependencies: ["ProcessSpawn"]),
     .testTarget(name: "RPCTests", dependencies: ["RPC"]),
     .testTarget(name: "RunnerLoggingTests", dependencies: ["RunnerLogging"]),
     .testTarget(name: "PersistenceTests", dependencies: ["Persistence"]),

@@ -34,6 +34,18 @@ extension ImageBuilder {
 
   /// `true` when the row reached a terminal state on this tick, `false` when it is still pending.
   private func recover(_ row: ImageBuildRecord) async -> Bool {
+    // Before any verdict on the builder VM, and whatever that verdict turns out to be: a
+    // provisioning script left behind by a dead daemon is an orphan holding an SSH session open
+    // against a guest nobody owns, and it is not a child of this process, so nothing reaps it and
+    // nothing else will ever notice it. Rows this daemon *does* own never reach here (`tasks`),
+    // so a live run's marker is never touched.
+    if let pgid = ProvisionProcessGroup.terminate(in: provisionWork(row.id), logger: logger) {
+      logger.warning(
+        "terminated an orphaned macOS provisioning script",
+        metadata: [
+          "build_id": .string(row.id.rawValue), "pgid": .stringConvertible(pgid),
+        ])
+    }
     let verdict = await probeOrphan(row)
     // Replay runs first and whatever the verdict is: it only registers a digest the store already
     // holds, and touches neither the build directory nor the VM, so even a live worker cannot make

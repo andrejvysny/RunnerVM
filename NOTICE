@@ -1,3 +1,19 @@
 RunnerVM contains code derived from Tart (https://github.com/openai/tart), commit 16d186c,
 licensed under the Functional Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2).
 Derived files are listed in PROVENANCE.md and carry a provenance header.
+
+RunnerVM contains a Swift port of the runner scale-set protocol from github.com/actions/scaleset
+v0.4.0 (MIT License, Copyright GitHub, Inc.). Ported files are listed in PROVENANCE.md and carry a
+provenance header.
+
+Third-party dependencies distributed with RunnerVM binaries:
+  - GRDB.swift (github.com/groue/GRDB.swift) - MIT License
+  - swift-nio (github.com/apple/swift-nio) - Apache License 2.0
+  - swift-argument-parser (github.com/apple/swift-argument-parser) - Apache License 2.0
+  - swift-log (github.com/apple/swift-log) - Apache License 2.0
+  - Yams (github.com/jpsim/Yams) - MIT License
+  - github.com/mdlayher/vsock (guest agent) - MIT License
+  - golang.org/x/sys (guest agent) - BSD 3-Clause License
+The legacy host-side image builder script invokes lima-vm/go-qcow2reader (Apache License 2.0) as an
+unmodified external tool; it is not distributed with RunnerVM.
+

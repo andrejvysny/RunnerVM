@@ -32,11 +32,16 @@ extension Upgrader {
     }
 
     deps.io.heading("Rolling back to \(report.fromVersion)")
+    guard await previousPackageIsInstallable(package, report: &report) else {
+      printManualRestoration(report)
+      return false
+    }
     do {
       _ = try? await deps.runner.run([
         Self.launchctl, "bootout", "\(domainTarget)/\(LaunchdManager.label)",
       ])
-      try await deps.runner.runChecked([Self.installer, "-pkg", package, "-target", "/"])
+      try await deps.runner.runChecked(
+        [Self.installer, "-pkg", package, "-target", "/"], timeout: Self.transferTimeout)
       try await restoreState(from: backup, owner: report.stateOwner)
       try await deps.runner.runChecked([Self.launchctl, "bootstrap", domainTarget, plistPath])
       _ = try await deps.launchd.waitForSocket(at: socketPath, timeout: options.socketTimeout)
@@ -48,6 +53,56 @@ extension Upgrader {
       printManualRestoration(report)
       return false
     }
+  }
+
+  /// The cached pkg is re-verified here rather than trusted for having been verified once.
+  ///
+  /// It has been sitting in the state directory since the last install -- exactly where anyone who
+  /// briefly had write access to this host would want it -- and a rollback runs `installer` on it
+  /// as root, unattended, at the worst possible moment. So it has to clear the same two gates the
+  /// new package cleared: the detached checksum cached beside it, and the publisher pin.
+  ///
+  /// A missing `.sha256` fails the checksum check. Skipping it when the file is absent would be a
+  /// bypass, since whatever can replace the pkg can delete the file that would have caught it; and
+  /// the cost of refusing is bounded, because a refused rollback is not a stranded host, it is the
+  /// manual restoration steps printed with the exact commands.
+  private func previousPackageIsInstallable(
+    _ package: String, report: inout UpgradeReport
+  ) async -> Bool {
+    let directory = (package as NSString).deletingLastPathComponent
+    let name = (package as NSString).lastPathComponent
+    do {
+      // The same `(cd … && shasum -a 256 -c …)` form the upgrade's checksum step runs: the
+      // checksum file names the pkg relative to its own directory.
+      try await deps.runner.runChecked([
+        Self.sh, "-c",
+        "cd \(Self.quote(directory)) && \(Self.shasum) -a 256 -c "
+          + Self.quote("\(name).sha256"),
+      ])
+    } catch {
+      deps.io.say("\(name) does not match the \(name).sha256 cached beside it, so it is not")
+      deps.io.say("reinstalled. Nothing has been rolled back.")
+      report.record(
+        UpgradeReport.Name.rollback, false,
+        "refused: \(name) failed its cached checksum")
+      return false
+    }
+    let (signature, assessmentsEnabled) = await verifySignature(of: package)
+    guard !signature.isForeign(to: options.expectedTeamID) else {
+      let error = UpgradeError.signatureRejected(
+        found: signature.team ?? "", expected: options.expectedTeamID ?? "")
+      deps.io.say(error.message)
+      report.record(UpgradeReport.Name.rollback, false, Self.describe(error))
+      return false
+    }
+    // Weaker evidence than a notarized signature is not a refusal here, for the same reason it is
+    // not one on the way up: this pkg is the version the host was already running, and leaving a
+    // host on a broken upgrade is the worse outcome. It is said out loud instead.
+    if !signature.isNotarized {
+      deps.io.say("reinstalling \(name): \(signature.summary)"
+        + (assessmentsEnabled ? "" : "; notarization unverified on this host"))
+    }
+    return true
   }
 
   /// The database first, then the configuration, then ownership: the daemon is not running while

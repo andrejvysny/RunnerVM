@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/rpc"
-	"github.com/runnervm/guest-agent/internal/runner"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/runner"
 )
 
 // defaultStopGrace is the SIGTERM→SIGKILL delay when the host omits

@@ -112,10 +112,24 @@ developer's own workstation, or a host where something in the job workload needs
   failure, a Swift runtime trap, anything that escapes the logging system. The daemon's actual
   JSON log is `<state>/logs/runnerd/runnerd.log`, which `runnerd` writes and rotates itself
   (`logging.file` in the configuration; see `docs/logging.md`).
-- launchd creates the stdio *file* but not its directory. `runnerd` creates
-  `<state>/logs/runnerd/` at startup, so it exists from the first run onward; on a brand new host
-  create it once before the first `launchctl bootstrap` so no early crash output is lost:
+- launchd creates the stdio *file* but **not its directory**, and it does that before the job's
+  first instruction runs — so a missing `<state>/logs/runnerd/` is a spawn failure, not a runtime
+  one, and `runnerd` never gets the chance to create it. `scripts/install.sh` (section 6) and
+  `runnerctl setup` both create it 0750, owned by the service account, before anything prints or
+  runs `launchctl bootstrap`. A hand-rolled install must do the same:
   `sudo mkdir -p "<state>/logs/runnerd" && sudo chown _runnervm "<state>/logs/runnerd"`.
+- **`launchctl print` shows `last exit code = 78` and `<state>/logs/runnerd/stdio.log` is missing
+  or empty, with a high `runs` count: launchd never spawned the daemon.** That 78 is launchd's
+  own, not `runnerd`'s `EX_CONFIG` — a `runnerd` that started and rejected its configuration
+  leaves a log line behind. The usual cause is exactly the missing stdio directory above. (Seen
+  on a real host, 2026-08-28: 70547 respawns over four days, `runnerd` never ran once.)
+- Both plists set `ThrottleInterval` to 30 s and pass `RUNNERVM_STARTUP_BACKOFF=60` plus
+  `RUNNERVM_SUPERVISED=1` in `EnvironmentVariables`. These are two halves of one guard:
+  `ThrottleInterval` bounds how fast launchd may restart a failing job, and the environment
+  variables tell `runnerd` to sleep that long before exiting on a configuration-class startup
+  failure. The in-process half is what protects an **upgraded** host, whose already-installed
+  plist is not re-rendered by `runnerctl upgrade` and may still carry the old
+  `ThrottleInterval` of 5.
 - `runnerd` reopens every log file it owns on `SIGHUP`, so external rename-based rotation
   (`packaging/newsyslog/runnervm.conf`) takes effect immediately rather than at the next restart.
   launchd owns the pid and writes no pid file, so signal it with

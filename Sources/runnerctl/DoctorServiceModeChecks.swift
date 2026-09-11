@@ -138,6 +138,47 @@ extension DoctorChecks {
     }
   }
 
+  /// Read once for both plist-backed checks below; `nil` means no plist is installed, unreadable,
+  /// or not a property list at all (the checks tell those apart from `facts` plus `plistPath`).
+  static func launchdPlistFacts(
+    at path: String,
+    readFile: (String) -> Data? = { FileManager.default.contents(atPath: $0) }
+  ) -> DoctorLaunchd.PlistFacts? {
+    readFile(path).flatMap(DoctorLaunchd.plistFacts(fromPropertyList:))
+  }
+
+  /// The check the blackpen incident was invisible to: launchd creates the stdio file but not its
+  /// directory, and without the directory every spawn fails before `runnerd` runs.
+  static func launchdStdioDirectory(
+    mode: ServiceModeFacts, facts: DoctorLaunchd.PlistFacts?,
+    directoryExists: (String) -> Bool = Self.directoryExists
+  ) -> DoctorCheck {
+    DoctorLaunchd.stdioDirectoryCheck(
+      plistPath: mode.plistPath, facts: facts, kickstartTarget: kickstartTarget(mode),
+      directoryExists: directoryExists
+    )
+  }
+
+  static func launchdThrottle(
+    mode: ServiceModeFacts, facts: DoctorLaunchd.PlistFacts?
+  ) -> DoctorCheck {
+    DoctorLaunchd.throttleCheck(plistPath: mode.plistPath, facts: facts)
+  }
+
+  private static func directoryExists(_ path: String) -> Bool {
+    var isDirectory: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+    return exists && isDirectory.boolValue
+  }
+
+  private static func kickstartTarget(_ facts: ServiceModeFacts) -> String? {
+    switch facts.mode {
+    case .foreground: nil
+    case .daemon: "system/\(launchdLabel)"
+    case .agent: "gui/\(getuid())/\(launchdLabel)"
+    }
+  }
+
   private static func bootstrapCommand(_ facts: ServiceModeFacts) -> String {
     guard let plistPath = facts.plistPath else { return "" }
     return facts.mode == .daemon

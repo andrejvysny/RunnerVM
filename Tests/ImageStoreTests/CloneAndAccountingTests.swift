@@ -17,6 +17,28 @@ import Testing
     #expect(APFSClone.freeSpace(at: missing) > 0)
   }
 
+  @Test(
+    "freeSpace(importantUsage:available:) picks the right source and flags unreadable volumes",
+    arguments: [
+      // (importantUsage, available, expectedBytes, expectedUnreadable)
+      (Int64(70_000_000_000), Int64(70_000_000_000), UInt64(70_000_000_000), false),
+      // The live-outage regression: a per-login-session service answers importantUsage 0 with
+      // nobody logged in, even though the volume has real free space -- must fall through to
+      // `available`, not be trusted as "no space".
+      (Int64(0), Int64(70_000_000_000), UInt64(70_000_000_000), false),
+      (nil, nil, UInt64(0), true),
+      (Int64(0), Int64(0), UInt64(0), true),
+      (Int64(-1), nil, UInt64(0), true),
+    ] as [(Int64?, Int64?, UInt64, Bool)]
+  )
+  func freeSpacePureDecision(
+    importantUsage: Int64?, available: Int64?, expectedBytes: UInt64, expectedUnreadable: Bool
+  ) throws {
+    let result = APFSClone.freeSpace(importantUsage: importantUsage, available: available)
+    #expect(result.bytes == expectedBytes)
+    #expect(result.unreadable == expectedUnreadable)
+  }
+
   @Test func cloneSharesBlocksAndFailsOnAnExistingDestination() throws {
     let env = try TempStore()
     let source = try env.makeSparseDisk(named: "source.img")

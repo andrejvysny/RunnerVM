@@ -426,6 +426,26 @@ readable Runnerfile directly always works.
 and outliving the build's own VM directory, which is removed once the build reaches a terminal
 state. `runnerctl build show <id>` reports the exact path.
 
+## Host tool timeouts
+
+Every host tool a build shells out to (`tar` and `hdiutil` for the context and the boot seed,
+`provision-macos-tart.sh` for a managed macOS build) runs under a wall clock. When it expires the
+tool's whole **process group** is sent `SIGTERM`, then `SIGKILL` ten seconds later, and the build
+fails `BUILD_TOOL_TIMEOUT` naming the tool and the ceiling it exceeded. The group, not the pid, is
+what gets signalled: `hdiutil` and the provisioning script both fork helpers, and killing only the
+leader leaves those running against the same files.
+
+`BUILD_TOOL_TIMEOUT` is **not retryable** — a tool that needed longer than its budget needs a
+bigger budget (`build.timeout`), not another attempt on the same one. It is distinct from
+`BUILD_TIMEOUT` (the build as a whole ran out) and from `BUILD_TOOL_MISSING` (the tool is not on
+this host at all).
+
+A macOS provisioning build gives `provision-macos-tart.sh` its own ceiling five minutes inside the
+build's, through `RVM_PROVISION_TIMEOUT`, so the script's `trap cleanup EXIT` and its `--result`
+write always happen before the host's kill lands. If the host ceiling is reached anyway, the
+build fails `BUILD_TOOL_TIMEOUT` rather than reporting whatever half-written `result.json` the
+script left behind.
+
 ## Known limitations
 
 * **30-minute step ceiling.** The guest agent silently clamps every `agent.exec` timeout at 30

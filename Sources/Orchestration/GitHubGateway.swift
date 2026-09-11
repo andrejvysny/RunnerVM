@@ -61,7 +61,10 @@ public actor GitHubGateway {
   // MARK: - Configuration
 
   /// Called on every `config.apply` and at bootstrap. Rebuilding the client here — rather than
-  /// per request — keeps a single connection pool and a single App-token cache.
+  /// per request — keeps a single connection pool and a single App-token cache. Refreshing that
+  /// cache is the client's job, not this one's: it drops the credential and retries once when
+  /// GitHub answers an idempotent request with a 401, so a revoked installation token heals
+  /// without a `config.apply`.
   public func updateConfiguration(_ config: RunnerConfiguration?) {
     configuration = config
     plane = nil

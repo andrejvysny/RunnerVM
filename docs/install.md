@@ -24,10 +24,11 @@ curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/inst
 `scripts/bootstrap.sh`, published byte-for-byte as the `install.sh` release asset, is
 self-contained: it assumes nothing beyond stock macOS tools, never clones this repo, never runs
 `swift`/`go`, and never builds anything. It fetches `release-manifest.json`, downloads the pkg and
-its `.sha256`, verifies the checksum, prints an unsigned-package warning to `/dev/tty` and waits for
-confirmation (the pkg is not yet Developer-ID-signed — see "Unsigned phase" in
-[`docs/design/distribution.md`](design/distribution.md)), runs `installer -pkg`, verifies the
-install, and hands off to `runnerctl setup` on the same tty.
+its `.sha256`, verifies the checksum, then verifies the package's Developer ID signature and
+notarization itself with `pkgutil`/`spctl` (a package signed by another team is refused outright;
+an unsigned or unnotarized one prints a warning to `/dev/tty` and waits for confirmation — see
+"Signing and notarization" in [`docs/design/distribution.md`](design/distribution.md)), runs
+`installer -pkg`, verifies the install, and hands off to `runnerctl setup` on the same tty.
 
 Any failure — a bad checksum, a network error, an install that does not verify — leaves the host
 exactly as it was before the script ran; nothing partial is left behind.
@@ -322,6 +323,25 @@ reachable it also folds in a `system.status` summary. Exits 1 if any check fails
 for automation (used by `scripts/qualify-host.sh`, which also runs `hdiutil` and a real
 `image build` under the service identity itself — see `docs/qualification.md`).
 
+Three of those checks are about the launchd job specifically, and exist because a host can look
+perfectly healthy while `runnerd` has never once run. `launchd_job` goes past "is it loaded": it
+reads `runs` and `last exit code` out of `launchctl print` and warns when the job has restarted
+more than ten times or last exited non-zero, naming both numbers and the `stdio.log` to read.
+`launchd_stdio_dir` **fails** when the directory that the installed plist's `StandardOutPath` /
+`StandardErrorPath` point into does not exist — launchd creates the stdio *file* but never its
+directory, and while it is missing every spawn fails before `runnerd` starts — and tells you to
+create it (`mkdir -p`, owned by the service account) and `launchctl kickstart -k` the job.
+`launchd_throttle` warns when the installed plist's `ThrottleInterval` is below 30, which is what
+a host installed before that floor was raised still carries (`runnerctl upgrade` never re-renders
+a plist); re-run `runnerctl setup`, or `scripts/install.sh --launchd daemon|agent`, to re-render
+it. Both plist checks read it with `PropertyListSerialization`, so an XML or a `plutil`-converted
+binary plist works, and both `skip` on a host with no launchd job installed.
+
+`free_disk` failing with **"could not read free space"**, or `runnerctl status` showing capacity
+`0` for free disk, means the volume's free-space keys could not be read at all (not "genuinely
+full") — `APFSClone.freeSpace` logs this once per process at `component=image`; grep
+`runnerd.log`/`stdio.log` for that line to see why the volume query failed.
+
 ## Log locations
 
 - `<state-dir>/logs/runnerd/runnerd.log` — the daemon's JSON log. `runnerd` writes and rotates it
@@ -340,6 +360,31 @@ for automation (used by `scripts/qualify-host.sh`, which also runs `hdiutil` and
 **Full reference: [`docs/logging.md`](logging.md)** — field glossary, the `logging:` configuration
 block, retention, `_diag` collection and its limits, and ready-made Vector and Fluent Bit
 pipelines.
+
+### runnerd exit codes
+
+`launchctl print system/com.runnervm.runnerd` reports `last exit code`. runnerd classifies a failed
+startup before it exits, so that number alone says whether anything has to be fixed by hand:
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| 0 | Clean stop (`SIGTERM`, `launchctl bootout`, `system shutdown`). | Nothing. |
+| 75 | Transient — the lock is still held by an outgoing daemon, a host-row write lost a CAS race, the host was out of descriptors or memory. (A busy database while opening or migrating exits 72.) | Nothing; launchd retries at its `ThrottleInterval`. Ten in a row escalate to the 60 s backoff below. |
+| 78 | Configuration — the config file was rejected, or the database schema is newer than this build. | Fix `config.yaml` (`runnerctl config validate`) or reinstall the matching version. |
+| 72 | State directory, database or identity file is not usable — permissions, a missing directory, a corrupt database, no space. | Check `<state-dir>` ownership and free space; `runnerctl doctor`. |
+| 69 | Something runnerd needs is taken — the lock file is unreadable, `runnerd.sock` could not be bound, the metrics port is in use. | Find the process holding it; check `metrics.listen`. |
+
+Before exiting with 69/72/75/78, a *supervised* runnerd (launchd sets `RUNNERVM_SUPERVISED=1`, and
+`getppid() == 1` says the same thing) sleeps first, so a broken host cannot produce a respawn loop
+whatever `ThrottleInterval` the installed plist carries: 5 s for a transient failure, otherwise
+`RUNNERVM_STARTUP_BACKOFF` seconds (default 60, clamped to 0–300, set in both plists). `SIGTERM`
+and `SIGINT` keep their default disposition during that sleep, so `launchctl bootout` is still
+immediate. Run in a terminal, runnerd never sleeps — it reports and exits.
+
+**exit code 78 with a missing or empty `stdio.log` and a high `runs` count means launchd itself
+could not spawn runnerd** (its stdio redirect directory did not exist) — see
+[`packaging/launchd/README.md`](../packaging/launchd/README.md). That is a different failure from
+runnerd's own 78, and no runnerd log line accompanies it.
 
 ## Upgrade procedure
 

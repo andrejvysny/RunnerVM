@@ -1,4 +1,5 @@
 import Foundation
+import ProcessSpawn
 import RunnerCore
 
 /// What one external command produced. `stdout`/`stderr` are decoded as UTF-8 and never `nil`:
@@ -7,11 +8,21 @@ public struct CommandResult: Sendable, Hashable {
   public var exitCode: Int32
   public var stdout: String
   public var stderr: String
+  /// The wall-clock ceiling expired and the command's process group was killed. `exitCode` alone
+  /// cannot say so -- a tool that handles `SIGTERM` still exits `0`.
+  public var timedOut: Bool
+  /// The calling task was cancelled and the command's process group was killed for that reason.
+  public var cancelled: Bool
 
-  public init(exitCode: Int32, stdout: String = "", stderr: String = "") {
+  public init(
+    exitCode: Int32, stdout: String = "", stderr: String = "", timedOut: Bool = false,
+    cancelled: Bool = false
+  ) {
     self.exitCode = exitCode
     self.stdout = stdout
     self.stderr = stderr
+    self.timedOut = timedOut
+    self.cancelled = cancelled
   }
 
   public var isSuccess: Bool { exitCode == 0 }
@@ -34,22 +45,35 @@ public struct CommandResult: Sendable, Hashable {
 /// outside `DefaultCommandRunner`, so a test can prove the exact `dscl`/`launchctl` sequence a
 /// step would run without a root shell, and `--dry-run` can intercept the same calls.
 public protocol CommandRunner: Sendable {
-  func run(_ argv: [String], stdin: String?) async throws -> CommandResult
+  /// `timeout` is the wall clock this command gets before its process group is killed; `nil`
+  /// means the runner's own default. Almost every caller wants that default -- the exceptions are
+  /// the download and `installer` steps of an upgrade, which are bounded by a network and a
+  /// package size rather than by a host tool's usual latency.
+  func run(_ argv: [String], stdin: String?, timeout: Duration?) async throws -> CommandResult
 }
 
 extension CommandRunner {
-  public func run(_ argv: [String]) async throws -> CommandResult {
-    try await run(argv, stdin: nil)
+  public func run(_ argv: [String], stdin: String? = nil) async throws -> CommandResult {
+    try await run(argv, stdin: stdin, timeout: nil)
   }
 
   /// Runs `argv` and throws `SetupError.commandFailed` unless it exited zero.
   @discardableResult
-  public func runChecked(_ argv: [String], stdin: String? = nil) async throws -> CommandResult {
-    let result = try await run(argv, stdin: stdin)
+  public func runChecked(
+    _ argv: [String], stdin: String? = nil, timeout: Duration? = nil
+  ) async throws -> CommandResult {
+    let result = try await run(argv, stdin: stdin, timeout: timeout)
+    // Cancellation first: an operator who pressed ctrl-C mid-`setup` gets a cancellation, not a
+    // report that `installer` failed.
+    guard !result.cancelled else { throw CancellationError() }
     guard result.isSuccess else {
+      // A killed command's exit code names the signal that ended it, not what went wrong, so the
+      // ceiling is what the message has to lead with.
+      let detail = result.timedOut
+        ? "timed out after \(DefaultCommandRunner.describe(timeout)) and was killed"
+        : result.failureDetail
       throw SetupError.commandFailed(
-        command: argv.joined(separator: " "), exitCode: result.exitCode,
-        detail: result.failureDetail)
+        command: argv.joined(separator: " "), exitCode: result.exitCode, detail: detail)
     }
     return result
   }
@@ -91,51 +115,67 @@ public enum SetupError: RunnerError {
   public var retryable: Bool { false }
 }
 
-/// Foundation `Process`. The only place in this module that spawns anything.
+/// `ProcessSpawn`. Every process this module starts goes through here (`SmokeTest`'s `ps` scan
+/// included).
+///
+/// A leaf `posix_spawn` target rather than `Foundation.Process` because `HostSetup` must never
+/// import `Orchestration` (it is a client of the daemon, not part of it) and both need the same
+/// guarantees: a bounded wall clock, `SIGTERM` then `SIGKILL` against the command's whole process
+/// group, both pipes drained concurrently against a deadline, and a decoded exit code. `setup`
+/// runs `launchctl`/`dscl`/`installer` as root; every one of those can wedge, and the previous
+/// implementation read stdout to EOF before stderr and had no ceiling at all -- a `dscl` waiting
+/// on the directory server hung `runnerctl setup` with no output.
+///
+/// Unlike the daemon's runner this passes the **whole** environment through. `runnerctl` is the
+/// operator's own CLI, run from their shell: `curl` needs `http_proxy`/`HTTPS_PROXY`,
+/// `CURL_CA_BUNDLE`, `SSL_CERT_FILE`; `installer` and `launchctl` read locale and `SUDO_*`.
+/// Allowlisting here would break an upgrade behind a corporate proxy for no benefit -- there is no
+/// trust boundary to defend, since the caller and the child are the same operator.
 public struct DefaultCommandRunner: CommandRunner {
-  public init() {}
+  /// Every host tool this module runs answers in well under a minute or is stuck.
+  public static let defaultTimeout: Duration = .seconds(60)
 
-  /// The whole spawn/drain/wait sequence is blocking, so it runs on a GCD thread: parking a
-  /// cooperative-pool thread per subprocess starves every other task in the process (measured
-  /// 2026-08-28 on CI's 3-thread pool).
-  public func run(_ argv: [String], stdin: String?) async throws -> CommandResult {
-    try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.global(qos: .utility).async {
-        continuation.resume(with: Result { try Self.blockingRun(argv, stdin: stdin) })
-      }
-    }
+  private let timeout: Duration
+  private let killGrace: Duration
+  private let drainGrace: Duration
+
+  public init(
+    timeout: Duration = defaultTimeout, killGrace: Duration = .seconds(10),
+    drainGrace: Duration = .seconds(5)
+  ) {
+    self.timeout = timeout
+    self.killGrace = killGrace
+    self.drainGrace = drainGrace
   }
 
-  private static func blockingRun(_ argv: [String], stdin: String?) throws -> CommandResult {
+  public func run(_ argv: [String], stdin: String?, timeout: Duration?) async throws -> CommandResult {
     guard let executable = argv.first else {
       throw SetupError.executableMissing("<empty command>")
     }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: executable)
-    process.arguments = Array(argv.dropFirst())
-    let stdout = Pipe()
-    let stderr = Pipe()
-    process.standardOutput = stdout
-    process.standardError = stderr
-    let input = Pipe()
-    process.standardInput = input
+    let request = SpawnRequest(
+      executable: executable, arguments: Array(argv.dropFirst()),
+      environment: ProcessInfo.processInfo.environment, standardInput: stdin,
+      timeout: timeout ?? self.timeout, killGrace: killGrace, drainGrace: drainGrace)
     do {
-      try process.run()
-    } catch {
+      let result = try await ProcessSpawn.run(request)
+      return CommandResult(
+        exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
+        timedOut: result.timedOut, cancelled: result.cancelled)
+    } catch SpawnError.executableMissing, SpawnError.spawnFailed {
       throw SetupError.executableMissing(executable)
+    } catch let error as SpawnError {
+      // `pipeFailed` (EMFILE and friends) is this process failing to set the child up, not a
+      // missing tool. Reported as a command failure so it reaches the operator through the same
+      // `SETUP_COMMAND_FAILED` path every other step already handles, instead of escaping as a
+      // module-foreign error nothing maps.
+      throw SetupError.commandFailed(
+        command: argv.joined(separator: " "), exitCode: -1, detail: "\(error)")
     }
-    if let stdin {
-      input.fileHandleForWriting.write(Data(stdin.utf8))
-    }
-    try? input.fileHandleForWriting.close()
-    // Read before waiting: a command that fills a 64 KiB pipe buffer would otherwise deadlock.
-    let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return CommandResult(
-      exitCode: process.terminationStatus,
-      stdout: String(decoding: outData, as: UTF8.self),
-      stderr: String(decoding: errData, as: UTF8.self))
+  }
+
+  /// The ceiling that applied, for a message. `nil` means the runner's default was used.
+  static func describe(_ timeout: Duration?) -> String {
+    "\(timeout ?? defaultTimeout)"
   }
 }
 
@@ -154,12 +194,12 @@ public actor PlanningCommandRunner: CommandRunner {
     self.underlying = underlying
   }
 
-  public func run(_ argv: [String], stdin: String?) async throws -> CommandResult {
+  public func run(_ argv: [String], stdin: String?, timeout: Duration?) async throws -> CommandResult {
     guard Self.isReadOnly(argv) else {
       planned.append(argv)
       return .success
     }
-    return try await underlying.run(argv, stdin: stdin)
+    return try await underlying.run(argv, stdin: stdin, timeout: timeout)
   }
 
   /// Every command whose whole job is to report. `dscl` is split on its verb: `-read`/`-list`
@@ -226,7 +266,9 @@ public actor RecordingCommandRunner: CommandRunner {
     self.fallback = fallback
   }
 
-  public func run(_ argv: [String], stdin _: String?) async throws -> CommandResult {
+  public func run(
+    _ argv: [String], stdin _: String?, timeout _: Duration?
+  ) async throws -> CommandResult {
     commands.append(argv)
     guard let index = stubs.firstIndex(where: { stub in
       stub.tokens.allSatisfy { token in argv.contains { $0.contains(token) } }

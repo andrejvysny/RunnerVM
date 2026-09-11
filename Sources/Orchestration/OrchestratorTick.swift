@@ -1,4 +1,5 @@
 import Foundation
+import Metrics
 import Persistence
 import RunnerCore
 import RunnerLogging
@@ -47,10 +48,10 @@ extension Orchestrator {
     guard let pass = await buildPass() else { return }
     await refreshMetrics(pass)
     await startInstances(pass)
-    await cancelInstances(pass)
+    cancelInstances(pass)
     await assignSessions(pass)
-    await recycleRetiredIdle(pass)
-    await reapExpiredIdle(pass)
+    recycleRetiredIdle(pass)
+    reapExpiredIdle(pass)
   }
 
   // MARK: - Pass construction
@@ -188,8 +189,14 @@ extension Orchestrator {
   }
 
   private func holdDownProfile(_ profileId: RunnerProfileID, name: String, reason: String) {
-    holdDown[profileId] = now().addingTimeInterval(Double(tuning.startHoldDown.components.seconds))
+    beginHoldDown(profileId)
     note(.instanceStartFailed(profile: name, reason: reason))
+  }
+
+  /// The window on its own, for a caller that reports the failure as something other than a failed
+  /// start. `buildPass` reads it, so a hold-down begun in this tick takes effect in the next one.
+  private func beginHoldDown(_ profileId: RunnerProfileID) {
+    holdDown[profileId] = now().addingTimeInterval(Double(tuning.startHoldDown.components.seconds))
   }
 
   private func finishStart(_ token: Int, profile: RunnerProfileID) {
@@ -209,7 +216,7 @@ extension Orchestrator {
 
   // MARK: - Cancellation (spec §107)
 
-  private func cancelInstances(_ pass: SchedulingPass) async {
+  private func cancelInstances(_ pass: SchedulingPass) {
     for entry in pass.profiles {
       // Fail safe on a figure the message session has not confirmed yet (right after a restart):
       // starting is cheap to undo, cancelling a VM that is about to receive its job is not.
@@ -223,14 +230,14 @@ extension Orchestrator {
         continue
       }
       for id in entry.plan.toCancel {
-        await cancel(id, profile: entry.name, reason: "demand dropped")
+        cancel(id, profile: entry.name, reason: "demand dropped")
       }
     }
   }
 
   /// Reaps warm instances that have outlived `idleTTL` (spec §127). Skipped while the profile has
   /// demand it has not served yet: an idle VM about to be handed a job is not stale.
-  private func reapExpiredIdle(_ pass: SchedulingPass) async {
+  private func reapExpiredIdle(_ pass: SchedulingPass) {
     for entry in pass.profiles {
       let ttl = entry.config.warmPool.idleTTL
       guard ttl.isPositive, entry.demandConfirmed,
@@ -241,7 +248,7 @@ extension Orchestrator {
         && !pass.bound.contains(record.id) && !pass.maintenance.contains(record.id) {
         let since = record.agentReadyAt?.date ?? record.createdAt.date
         guard now().timeIntervalSince(since) >= Double(ttl.seconds) else { continue }
-        await cancel(record.id, profile: entry.name, reason: "idle ttl")
+        cancel(record.id, profile: entry.name, reason: "idle ttl")
       }
     }
   }
@@ -249,29 +256,67 @@ extension Orchestrator {
   /// Spec §126, §138: an idle VM that may not be trusted, or whose profile has moved to a new
   /// image digest, never receives another session. Removing it here is what lets the next tick
   /// start a clean replacement against the same demand.
-  private func recycleRetiredIdle(_ pass: SchedulingPass) async {
+  private func recycleRetiredIdle(_ pass: SchedulingPass) {
     let names = Dictionary(
       pass.profiles.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     for record in pass.instances
     where record.state == .idle && (record.tainted || record.retireAfterSession)
       && !pass.bound.contains(record.id) && !pass.maintenance.contains(record.id) {
-      await cancel(
+      cancel(
         record.id, profile: names[record.profileId] ?? record.profileId.rawValue,
         reason: record.tainted ? "tainted" : "retired")
     }
   }
 
-  private func cancel(_ id: InstanceID, profile: String, reason: String) async {
+  /// Detached on purpose, exactly like `launchStart`: `delete` waits out the profile's
+  /// `timeouts.gracefulShutdown` plus the worker's exit, and a tick that awaited that would stall
+  /// the whole 10 s reconcile loop -- worker recovery included -- behind one VM's grace window.
+  ///
+  /// Keyed by instance rather than by a token, so the next tick (which still sees the row) cannot
+  /// start a second delete for a teardown that is already running.
+  private func cancel(_ id: InstanceID, profile: String, reason: String) {
+    guard cancelTasks[id] == nil else { return }
+    cancelTasks[id] = Task { [weak self] in
+      await self?.performCancel(id, profile: profile, reason: reason)
+      await self?.finishCancel(id)
+    }
+  }
+
+  private func performCancel(_ id: InstanceID, profile: String, reason: String) async {
     do {
       _ = try await instances.delete(id: id)
+      cancelFailures[id] = nil
       note(.instanceCancelled(profile: profile, instance: id.rawValue, reason: reason))
     } catch {
-      logger.warning(
-        "could not cancel instance",
-        metadata: .context(instance: id).merging([
-          "reason": .string(reason), "error": .string(Self.describe(error)),
-        ]) { $1 })
+      await recordCancelFailure(id, profile: profile, reason: reason, error: error)
     }
+  }
+
+  private func finishCancel(_ id: InstanceID) {
+    cancelTasks[id] = nil
+  }
+
+  /// A cancel that keeps failing is a row holding cpu, memory and disk that nothing will reclaim,
+  /// so it is counted per attempt. The code label is the error's `RunnerError.code` and never
+  /// `describe(error)`: that embeds per-instance paths, which would make the series unbounded.
+  private func recordCancelFailure(
+    _ id: InstanceID, profile: String, reason: String, error: any Error
+  ) async {
+    let failures = (cancelFailures[id] ?? 0) + 1
+    cancelFailures[id] = failures
+    await metrics.increment(
+      RunnerVMMetrics.instanceCancelFailuresTotal,
+      labels: [
+        RunnerVMMetrics.profileLabel: profile,
+        RunnerVMMetrics.codeLabel: (error as? any RunnerError)?.code ?? "INTERNAL",
+      ])
+    guard let level = CancelBackoff.level(failures: failures) else { return }
+    logger.log(
+      level: level, "could not cancel instance",
+      metadata: .context(instance: id).merging([
+        "reason": .string(reason), "error": .string(Self.describe(error)),
+        "failures": .stringConvertible(failures),
+      ]) { $1 })
   }
 
   // MARK: - Session hand-off (spec §48 steps 14-17)
@@ -291,7 +336,8 @@ extension Orchestrator {
         }
         .sorted { $0.createdAt.date < $1.createdAt.date }
       for record in idle where entry.assignedJobs > active {
-        guard await assign(record, profile: entry.name, origin: origin) else { break }
+        guard await assign(record, profileId: entry.id, profile: entry.name, origin: origin)
+        else { break }
         active += 1
       }
     }
@@ -307,7 +353,8 @@ extension Orchestrator {
   }
 
   private func assign(
-    _ record: InstanceRecord, profile: String, origin: RunnerSessionManager.JITOrigin
+    _ record: InstanceRecord, profileId: RunnerProfileID, profile: String,
+    origin: RunnerSessionManager.JITOrigin
   ) async -> Bool {
     do {
       let session = try await runners.startSession(instanceId: record.id, origin: origin)
@@ -319,6 +366,14 @@ extension Orchestrator {
       note(
         .sessionAssignmentFailed(
           profile: profile, instance: record.id.rawValue, reason: Self.describe(error)))
+      // A GitHub failure is about GitHub, not about this VM, and the demand that asked for the
+      // session is still standing. `GITHUB_JIT_GENERATION_TIMEOUT` additionally destroys the VM it
+      // failed on, so without a hold-down the next tick would create a replacement, hand it to the
+      // same unreachable GitHub and destroy that one too -- a clone and a boot per tick for as long
+      // as the outage lasts. The same window the VM-start path uses governs the retry cadence.
+      if (error as? any RunnerError)?.code.hasPrefix("GITHUB_") == true {
+        beginHoldDown(profileId)
+      }
       return false
     }
   }

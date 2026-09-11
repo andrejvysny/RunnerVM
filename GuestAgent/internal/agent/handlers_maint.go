@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/cleanup"
-	"github.com/runnervm/guest-agent/internal/disk"
-	"github.com/runnervm/guest-agent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/cleanup"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/disk"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
 )
 
 func (s *Service) handleResizeDisk(ctx context.Context, req rpc.Envelope) (any, error) {

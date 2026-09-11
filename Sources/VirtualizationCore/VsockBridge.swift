@@ -26,16 +26,25 @@ public final class VsockBridge {
   /// relay paths can be tested without the virtualization entitlement.
   public typealias GuestConnector = @Sendable () async throws -> CInt
 
+  /// Notified with the peer's uid for every connection turned away by the uid check, once per
+  /// rejected connection. Injected rather than logged here because this module has no logger.
+  public typealias RejectionHandler = @Sendable (uid_t) -> Void
+
   public let socketPath: URL
   private let allowedUID: uid_t
+  private let onRejected: RejectionHandler?
   private let connect: GuestConnector
   private let registry = RelayRegistry()
   private var acceptor: UnixSocketAcceptor?
   private var acceptThread: Thread?
 
-  public init(socketPath: URL, allowedUID: uid_t = getuid(), connect: @escaping GuestConnector) {
+  public init(
+    socketPath: URL, allowedUID: uid_t = getuid(), onRejected: RejectionHandler? = nil,
+    connect: @escaping GuestConnector
+  ) {
     self.socketPath = socketPath
     self.allowedUID = allowedUID
+    self.onRejected = onRejected
     self.connect = connect
   }
 
@@ -53,12 +62,14 @@ public final class VsockBridge {
     let acceptor = try UnixSocketAcceptor(path: socketPath)
     self.acceptor = acceptor
     let allowedUID = self.allowedUID
+    let onRejected = self.onRejected
     let connect = self.connect
     let registry = self.registry
     let thread = Thread {
       acceptor.run { descriptor, uid in
         guard uid == allowedUID else {
           close(descriptor)
+          onRejected?(uid)
           return
         }
         registry.enter(descriptor)

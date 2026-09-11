@@ -24,6 +24,9 @@ public actor ImageBuilder: ImageBuildService, ImageBuildReservationSource {
     public var agentReadiness = GuestAgentClient.ReadinessPolicy()
     /// Per-step ceiling on what the guest may stream back before the build fails (B9).
     public var maxOutputBytesPerStep: Int64 = 16 << 20
+    /// Builds are not instances: no profile owns a build, so `timeouts.gracefulShutdown` does not
+    /// apply and this stays a fixed 120 s -- long enough for a guest that is mid-`sync` after a
+    /// recipe step to come down cleanly rather than be killed with a dirty disk.
     public var gracefulShutdownMs: Int64 = 120_000
     public var sealTimeout: Duration = .seconds(600)
     public var probeTimeout: Duration = .seconds(300)

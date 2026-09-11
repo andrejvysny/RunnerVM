@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import ProcessSpawn
 import RunnerCore
 
 /// What runnerd tells a fresh `vmworker run` about the incarnation it is starting.
@@ -11,10 +12,14 @@ public struct WorkerLaunchRequest: Sendable, Hashable {
   public var nonce: String
   /// stdout+stderr are appended here; the worker outlives runnerd, so it cannot inherit its pipes.
   public var logPath: URL
+  /// SIGTERM-to-SIGKILL window for the shutdowns the worker starts on its own (hard deadline,
+  /// orphan idle, SIGTERM), where no `worker.shutdown` request carries one. The instance profile's
+  /// `timeouts.gracefulShutdown`; the default matches vmworker's own.
+  public var gracefulShutdownMs: Int64
 
   public init(
     instanceId: InstanceID, specPath: URL, socketDir: URL, generation: Int, nonce: String,
-    logPath: URL
+    logPath: URL, gracefulShutdownMs: Int64 = 30_000
   ) {
     self.instanceId = instanceId
     self.specPath = specPath
@@ -22,6 +27,7 @@ public struct WorkerLaunchRequest: Sendable, Hashable {
     self.generation = generation
     self.nonce = nonce
     self.logPath = logPath
+    self.gracefulShutdownMs = gracefulShutdownMs
   }
 
   var arguments: [String] {
@@ -32,6 +38,7 @@ public struct WorkerLaunchRequest: Sendable, Hashable {
       "--socket-dir", socketDir.path(percentEncoded: false),
       "--generation", String(generation),
       "--nonce", nonce,
+      "--graceful-ms", String(gracefulShutdownMs),
     ]
   }
 }
@@ -53,8 +60,11 @@ public protocol WorkerLauncher: Sendable {
 /// `posix_spawn` launcher for the real `vmworker` binary.
 ///
 /// The child gets its own session (`POSIX_SPAWN_SETSID`) so it survives runnerd's exit and is not
-/// in runnerd's terminal process group, and `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps the daemon's
-/// SQLite handles, listening sockets and lock descriptors out of a process that may outlive it.
+/// in runnerd's terminal process group, `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps the daemon's SQLite
+/// handles, listening sockets and lock descriptors out of a process that may outlive it, and
+/// `POSIX_SPAWN_SETSIGDEF`/`SETSIGMASK` undo runnerd's own `SIG_IGN` dispositions -- an ignored
+/// disposition survives `exec`, so without them a worker inherits "ignore SIGTERM" from the
+/// daemon and `WorkerSupervisor`'s graceful stop is dead code (`SpawnAttributes`).
 public struct ProcessWorkerLauncher: WorkerLauncher {
   private let executable: URL
 
@@ -73,9 +83,14 @@ public struct ProcessWorkerLauncher: WorkerLauncher {
     guard FileManager.default.isExecutableFile(atPath: path) else {
       throw VMError.workerSpawnFailed(reason: "\(path) is not executable", cause: nil)
     }
-    var actions = try FileActions(logPath: request.logPath)
+    var actions = try FileActions.make(logPath: request.logPath)
     defer { actions.destroy() }
-    var attributes = SpawnAttributes()
+    var attributes: SpawnAttributes
+    do {
+      attributes = try SpawnAttributes(placement: .ownSession)
+    } catch {
+      throw VMError.workerSpawnFailed(reason: "posix_spawnattr_init failed", cause: nil)
+    }
     defer { attributes.destroy() }
 
     var pid: pid_t = 0
@@ -83,9 +98,8 @@ public struct ProcessWorkerLauncher: WorkerLauncher {
     // Allowlisted, not inherited: runnerd's environment carries GitHub/registry credentials the
     // worker must never see. Sorted for a deterministic argv across runs.
     let environment = WorkerEnvironment.build(from: ProcessInfo.processInfo.environment)
-    let envPairs = environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
     let status = withCStrings(argv) { cArgv in
-      withCStrings(envPairs) { cEnv in
+      withCStrings(environmentPairs(environment)) { cEnv in
         posix_spawn(&pid, path, &actions.value, &attributes.value, cArgv, cEnv)
       }
     }
@@ -101,45 +115,18 @@ public struct ProcessWorkerLauncher: WorkerLauncher {
 
 /// stdin from `/dev/null`, stdout+stderr appended to `worker.log`. Opened by the child so a
 /// failure to create the log is the child's problem, not a half-spawned worker.
-private struct FileActions {
-  var value = posix_spawn_file_actions_t(bitPattern: 0)
-
-  init(logPath: URL) throws {
-    guard posix_spawn_file_actions_init(&value) == 0 else {
+private enum FileActions {
+  static func make(logPath: URL) throws -> SpawnFileActions {
+    var actions: SpawnFileActions
+    do {
+      actions = try SpawnFileActions()
+    } catch {
       throw VMError.workerSpawnFailed(reason: "posix_spawn_file_actions_init failed", cause: nil)
     }
     let log = logPath.path(percentEncoded: false)
-    posix_spawn_file_actions_addopen(&value, 0, "/dev/null", O_RDONLY, 0)
-    posix_spawn_file_actions_addopen(&value, 1, log, O_WRONLY | O_CREAT | O_APPEND, 0o600)
-    posix_spawn_file_actions_adddup2(&value, 1, 2)
+    actions.open(0, path: "/dev/null", flags: O_RDONLY, mode: 0)
+    actions.open(1, path: log, flags: O_WRONLY | O_CREAT | O_APPEND, mode: 0o600)
+    actions.duplicate(1, onto: 2)
+    return actions
   }
-
-  mutating func destroy() {
-    posix_spawn_file_actions_destroy(&value)
-  }
-}
-
-private struct SpawnAttributes {
-  var value = posix_spawnattr_t(bitPattern: 0)
-
-  init() {
-    posix_spawnattr_init(&value)
-    let flags = POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT
-    posix_spawnattr_setflags(&value, Int16(flags))
-  }
-
-  mutating func destroy() {
-    posix_spawnattr_destroy(&value)
-  }
-}
-
-/// `posix_spawn` wants a NULL-terminated `char *const []`; the buffers must outlive the call, so
-/// the body runs inside the allocation rather than returning the pointers.
-private func withCStrings<T>(
-  _ values: [String], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> T
-) -> T {
-  var pointers: [UnsafeMutablePointer<CChar>?] = values.map { strdup($0) }
-  pointers.append(nil)
-  defer { for pointer in pointers where pointer != nil { free(pointer) } }
-  return pointers.withUnsafeMutableBufferPointer { body($0.baseAddress!) }
 }

@@ -95,15 +95,52 @@ struct RunnerD: AsyncParsableCommand {
     do {
       try await runtime.start()
     } catch {
-      logger.critical("startup failed", metadata: ["error": .string(describe(error))])
-      throw ExitCode.failure
+      throw await startupExit(error, paths: paths, logger: logger)
     }
+    // A clean start makes the next transient failure a first failure again.
+    StartupAttemptCounter(runtimeDir: paths.runtimeDir).reset()
 
+    // Only now: SIGTERM/SIGINT keep their default disposition for the whole of `startupExit`, so
+    // `launchctl bootout` (or ^C) kills a backing-off runnerd immediately instead of waiting out
+    // the sleep. Installing the sources earlier would SIG_IGN both signals and strand it.
     let stop = StopSignal()
     let sources = installSignalHandlers { await stop.fire() }
     await stop.wait()
     withExtendedLifetime(sources) {}
     await runtime.stop()
+  }
+
+  /// Classifies the failure, records it for the escalation counter, and — only when something is
+  /// supervising this process — sleeps before exiting so launchd cannot respawn runnerd in a tight
+  /// loop whatever `ThrottleInterval` the installed plist carries. Policy lives in
+  /// `StartupFailure`; this is its caller.
+  private func startupExit(_ error: any Error, paths: RunnerPaths, logger: Logger) async -> ExitCode {
+    let environment = ProcessInfo.processInfo.environment
+    let counter = StartupAttemptCounter(runtimeDir: paths.runtimeDir)
+    let attempts = counter.record(transient: StartupFailure.classify(error) == .transient)
+    let plan = StartupFailure.plan(
+      for: error, environment: environment,
+      supervised: StartupFailure.isSupervised(environment: environment),
+      consecutiveTransientFailures: attempts)
+    logger.critical(
+      "startup failed",
+      metadata: [
+        "error": .string(describe(error)),
+        "class": .string(plan.failureClass.rawValue),
+        "exit_code": .stringConvertible(plan.exitCode),
+        "backoff_seconds": .stringConvertible(plan.sleep.components.seconds),
+        "override": .string(StartupFailure.backoffVariable),
+      ])
+    if plan.sleep > .zero {
+      logger.critical(
+        "runnerd cannot start until this is fixed; sleeping before exit so launchd does not respawn it",
+        metadata: [
+          "class": .string(plan.failureClass.rawValue),
+          "backoff_seconds": .stringConvertible(plan.sleep.components.seconds),
+        ])
+      try? await Task.sleep(for: plan.sleep)
+    }
+    return ExitCode(plan.exitCode)
   }
 
   /// stderr always keeps the log — launchd captures it, and an operator running this in a terminal

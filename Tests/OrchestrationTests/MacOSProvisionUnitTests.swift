@@ -455,3 +455,22 @@ import Testing
     }
   }
 }
+
+/// The ceiling the host puts on `provision-macos-tart.sh` versus the one the script puts on
+/// itself.
+@Suite struct MacOSProvisionTimeoutTests {
+  /// `RVM_PROVISION_TIMEOUT` defaults to 3600 s, which is exactly `build.timeout`, so without this
+  /// both expire in the same instant and the host kills the script in the breath it would have
+  /// used to write a `--result` explaining itself.
+  @Test func theScriptCeilingSitsFiveMinutesInsideTheBuildCeiling() {
+    #expect(ImageBuilder.scriptTimeoutSeconds(.seconds(3_600)) == 3_300)
+    #expect(ImageBuilder.scriptTimeoutSeconds(.seconds(2_400)) == 2_100)
+  }
+
+  /// A build timeout shorter than the headroom would otherwise hand the script a negative ceiling,
+  /// which its `${RVM_PROVISION_TIMEOUT}` arithmetic would take literally.
+  @Test func aBuildCeilingSmallerThanTheHeadroomStillLeavesAPositiveOne() {
+    #expect(ImageBuilder.scriptTimeoutSeconds(.seconds(120)) == 60)
+    #expect(ImageBuilder.scriptTimeoutSeconds(.seconds(0)) == 60)
+  }
+}

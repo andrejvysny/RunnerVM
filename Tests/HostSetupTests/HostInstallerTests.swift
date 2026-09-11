@@ -89,6 +89,20 @@ import Testing
         + "/Library/Application Support/RunnerVM/config.yaml"))
   }
 
+  /// launchd creates the stdio *file* both plists name but never its directory: a `logs/runnerd`
+  /// that does not exist yet makes every spawn fail with exit 78 before `runnerd` runs at all
+  /// (blackpen, 2026-08-28). The directory step must land before the job is bootstrapped.
+  @Test func createsTheStdioDirectoryBeforeBootstrappingTheJob() async throws {
+    let runner = ServiceAccountManagerTests.freshHost()
+    _ = await HostInstaller(Self.dependencies(runner: runner)).install(Self.plan(), token: "")
+
+    let lines = await runner.lines
+    let mkdir = try #require(lines.firstIndex(
+      of: "/bin/mkdir -p /Library/Application Support/RunnerVM/logs/runnerd"))
+    let bootstrap = try #require(lines.firstIndex { $0.contains("launchctl bootstrap") })
+    #expect(mkdir < bootstrap)
+  }
+
   @Test func printsTheRunsOnSampleAndTheLabels() async {
     let io = ScriptedSetupIO(answers: [])
     _ = await HostInstaller(Self.dependencies(io: io)).install(Self.plan(), token: "ghp_x")

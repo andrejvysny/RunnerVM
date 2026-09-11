@@ -6,6 +6,7 @@ import Logging
 import Persistence
 import RunnerCore
 import RunnerLogging
+import Synchronization
 
 /// Drives one GitHub runner session over an already-booted, idle VM (spec §47, §48 steps 14-23).
 ///
@@ -18,8 +19,6 @@ public actor RunnerSessionManager {
   public struct Tuning: Sendable {
     /// Cadence of `agent.runnerStatus`. Injected so tests drive the state machine without waiting.
     public var pollInterval: Duration = .seconds(2)
-    /// SIGTERM-to-SIGKILL window when a timeout forces the runner down.
-    public var stopGraceMs: Int64 = 30_000
     /// Consecutive unreadable `agent.runnerStatus` answers before the runner counts as lost.
     public var lostPollThreshold: Int = 3
 
@@ -76,6 +75,31 @@ public actor RunnerSessionManager {
   let tuning: Tuning
   let logger: Logger
   var observers: [RunnerSessionID: Task<Void, Never>] = [:]
+  /// Sessions whose `register` is still in flight, and when each mark was last stamped.
+  ///
+  /// The stretch between `insertRow` and the first `observe` is a persisted, non-terminal row with
+  /// no observer -- exactly the shape `recoverSessions` terminalizes -- and every `await` inside it
+  /// suspends this reentrant actor, so a reconcile tick runs *inside* the registration. This map is
+  /// that window's owner, and it covers the whole of `register`, not just the JIT call: the mark is
+  /// re-stamped when `issueJIT` returns, so the grace bounds one stage rather than the sum of them.
+  ///
+  /// Monotonic on purpose. A wall clock steps forward under NTP, and an in-memory claim that
+  /// expired on a clock correction would hand a live registration to the next sweep.
+  ///
+  /// Deliberately not a placeholder in `observers`: the success path installs the real observer
+  /// under the same key, so clearing a placeholder on the way out would clobber it, and both
+  /// `detachObservers` and `observedSessions()` would see entries watching nothing.
+  var registering: [RunnerSessionID: ContinuousClock.Instant] = [:]
+  /// Runner ids that must ride along on a session's next state write, by session.
+  ///
+  /// `finish` closes a session through a compare-and-swap whose `mutate` it owns, and a terminal
+  /// `runner_sessions` state has no outgoing edge, so a caller can neither add a column to that
+  /// write nor add one afterwards. The JIT-deadline path discovers a runner id at exactly that
+  /// moment -- the registration GitHub made while the caller was giving up -- and
+  /// `retryPendingRemovals` re-drives a failed DELETE from `githubRunnerId` and nothing else, so
+  /// the id has to travel on the closing CAS or be lost. `move` merges it in; the writer clears the
+  /// entry as soon as its `finish` returns, so nothing lingers.
+  var pendingRunnerID: [RunnerSessionID: Int64] = [:]
   /// `logs/events.jsonl`. Attached after construction; see `InstanceManager.attachEventLog`.
   var events: LifecycleEventLog?
 
@@ -195,19 +219,72 @@ public actor RunnerSessionManager {
 
   // MARK: - Registration
 
+  /// Slack on top of the profile's `jitGeneration` before a `registering` mark counts as stale.
+  /// Two guest `callDeadline`s wide, because the stage after the JIT call spends them back to
+  /// back: `deliver`'s `agent.startRunner` and the `startedAnyway` fallback that follows a lost
+  /// reply. The row writes and the instance claim fit in the same budget.
+  static let registrationSlack = DurationValue.seconds(60)
+
+  /// How long a mark keeps recovery off its row, per stage: `register` re-stamps it on progress.
+  /// Bounded on purpose: a `register` that never finished -- a caller parked forever in a GitHub
+  /// or guest call -- must not strand its VM, so an older mark is ignored and reaped and the row is
+  /// recovered as if it had never been marked.
+  static func registrationGrace(_ profile: RunnerProfileConfig) -> DurationValue {
+    DurationValue(profile.effectiveTimeouts.jitGeneration.duration + registrationSlack.duration)
+  }
+
+  /// Spec §73: `timeouts.jitGeneration` bounds `generate-jitconfig`, on both the REST and the
+  /// scale-set path. Without it a GitHub that never answers parks `register` -- and the VM it has
+  /// claimed -- until the daemon restarts.
+  static func jitDeadline(_ profile: RunnerProfileConfig) -> DurationValue {
+    profile.effectiveTimeouts.jitGeneration
+  }
+
+  static func jitTimedOut(_ profile: RunnerProfileConfig) -> GitHubControlError {
+    .jitGenerationTimeout(seconds: Double(jitDeadline(profile).milliseconds) / 1_000)
+  }
+
+  /// Whether a live `register` still owns `id`'s row, `grace` being how long its mark is trusted.
+  func isRegistering(_ id: RunnerSessionID, within grace: DurationValue) -> Bool {
+    guard let stamped = registering[id] else { return false }
+    return stamped.duration(to: .now) < grace.duration
+  }
+
   private func register(
     instance: InstanceRecord, context: SessionContext
   ) async throws -> RunnerSessionRecord {
-    let planned = try await insertRow(instance: instance, context: context)
+    // The id is minted here rather than inside `insertRow` so the row can be claimed *before* it
+    // becomes visible to `recoverSessions`. The `defer` releases the claim on every exit -- return,
+    // throw, cancellation -- and never leaves a gap: `observe` installs the real observer inside
+    // `deliverAndStart`, with no suspension point between it and this frame's return, so the actor
+    // cannot run a sweep in between.
+    let id = RunnerSessionID.generate()
+    registering[id] = .now
+    defer { registering[id] = nil }
+    let planned = try await insertRow(id: id, instance: instance, context: context)
     let requested = try await move(planned, to: .jitRequested)
 
     let config: JITRunnerConfig
+    let issued = IssuedRunnerID()
     do {
-      config = try await issueJIT(instance: instance, context: context)
+      config = try await withDeadline(
+        Self.jitDeadline(context.profile), expired: { Self.jitTimedOut(context.profile) }
+      ) { [self] in
+        let config = try await issueJIT(instance: instance, context: context)
+        // Published before the value leaves the body, because the deadline can still win the race
+        // the task group is running: past this point the id is the only handle anyone has on the
+        // registration. The id only — `encodedJITConfig` is the secret and never leaves the local
+        // `let` below (spec §36, §128).
+        issued.publish(config.runnerID)
+        return config
+      }
     } catch {
-      await finish(requested, to: .jitFailed, error: error, result: "jit-failed", context: context)
+      await failJIT(requested, issued: issued.current, error: error, context: context)
       throw error
     }
+    // Progress re-stamps the claim: `grace` is a per-stage budget, so the guest handoff below gets
+    // its own rather than inheriting whatever the JIT call left of the first one.
+    registering[id] = .now
     do {
       return try await deliverAndStart(config, session: requested, instance: instance, context: context)
     } catch {
@@ -242,6 +319,70 @@ public actor RunnerSessionManager {
         scope: context.scope, scaleSetID: id, runnerName: instance.name,
         workFolder: Self.defaultWorkFolder)
     }
+  }
+
+  /// Terminal state for a JIT request that never produced a config this caller could use.
+  ///
+  /// A plain failure (a 4xx/5xx `generate-jitconfig`) is what it has always been: GitHub refused,
+  /// so nothing was created and the VM is kept for diagnosis. A *deadline* is different in both
+  /// halves. GitHub may hold a registration nobody has seen — the config can have arrived after the
+  /// race was already lost (`issued`), or the POST can have been processed with its answer still in
+  /// flight (`strayRunnerID`) — and the id must reach the row, because `retryPendingRemovals` re-
+  /// drives a failed DELETE from `githubRunnerId` alone. And a slow GitHub says nothing about this
+  /// VM, so retaining it for `failedInstanceRetention` would let one outage eat the host's capacity
+  /// one boot at a time.
+  private func failJIT(
+    _ session: RunnerSessionRecord, issued: Int64?, error: any Error, context: SessionContext
+  ) async {
+    // Closing out is a stage like any other, and it spends GitHub and guest calls of its own, so it
+    // gets its own budget: the mark stamped for the JIT call is already `jitGeneration` old, and a
+    // sweep that reached this row mid-teardown would close it under a second failure code and
+    // remove the registration twice.
+    registering[session.id] = .now
+    guard let failure = error as? GitHubControlError, case .jitGenerationTimeout = failure else {
+      await finish(session, to: .jitFailed, error: error, result: "jit-failed", context: context)
+      return
+    }
+    var found = issued
+    if found == nil {
+      // Bounded by the same budget that just expired: the outage that caused the timeout must not
+      // then park the caller -- and the VM it is holding -- inside the cleanup lookup.
+      found = try? await withDeadline(
+        Self.jitDeadline(context.profile), expired: { Self.jitTimedOut(context.profile) }
+      ) { [self] in await strayRunnerID(session, context: context) }
+    }
+    if let runnerID = found {
+      logger.warning(
+        "JIT generation timed out but GitHub holds a registration; removing it",
+        metadata: .context(instance: session.instanceId, session: session.id).merging([
+          "runner_id": .stringConvertible(runnerID),
+          "arrived_late": .stringConvertible(issued != nil),
+        ]) { $1 })
+      // `finish` is what removes it: the id reaches the terminal write through `pendingRunnerID`,
+      // so the removal happens exactly once, bracketed by its `operations` row, and the column it
+      // read is still there for `retryPendingRemovals`.
+      pendingRunnerID[session.id] = runnerID
+    } else {
+      // "Not found" is not "does not exist": the lookup was made against the very GitHub that had
+      // just stopped answering, and it is bounded, so a refusal and a real absence look the same
+      // from here. This is the one path that can leave a registration with no id, no row and no
+      // operation to retry from, so it says so where an operator will see it.
+      var name = session.githubRunnerName
+      if name == nil { name = (try? await instanceRows.get(id: session.instanceId))?.name }
+      let advice = "JIT generation timed out and no registration could be found; if GitHub created "
+        + "one it is orphaned and has to be removed by hand -- check `runnerctl runner list` and "
+        + "the scope's runner settings on GitHub"
+      logger.warning(
+        "\(advice)",
+        metadata: .context(instance: session.instanceId, session: session.id).merging([
+          "runner_name": .string(name ?? "-"),
+          "scope": .string(context.scope.description),
+        ]) { $1 })
+    }
+    await finish(
+      session, to: .jitFailed, error: error, result: "jit-failed", context: context,
+      retainVM: false)
+    pendingRunnerID[session.id] = nil
   }
 
   private func deliverAndStart(
@@ -286,12 +427,13 @@ public actor RunnerSessionManager {
   }
 
   /// The row lands before the JIT request so a crash in between leaves something to reconcile.
+  /// `id` comes from `register`, which marks it `registering` before this insert publishes it.
   private func insertRow(
-    instance: InstanceRecord, context: SessionContext
+    id: RunnerSessionID, instance: InstanceRecord, context: SessionContext
   ) async throws -> RunnerSessionRecord {
     let now = DatabaseDate.now
     let record = RunnerSessionRecord(
-      id: .generate(), instanceId: instance.id, profileId: instance.profileId,
+      id: id, instanceId: instance.id, profileId: instance.profileId,
       jitSource: context.origin.source, state: .planned, createdAt: now, updatedAt: now)
     do {
       try await sessions.insert(record)
@@ -347,8 +489,16 @@ public actor RunnerSessionManager {
     _ session: RunnerSessionRecord, to state: RunnerSessionState,
     mutate: @escaping @Sendable (inout RunnerSessionRecord) -> Void = { _ in }
   ) async throws -> RunnerSessionRecord {
+    // See `pendingRunnerID`: a runner id discovered as the row is being closed has no other write
+    // to travel on. Read, never removed here -- `settle` retries `move` once after a lost CAS, and
+    // the second attempt has to carry the id too.
+    let pending = pendingRunnerID[session.id]
     let updated = try await sessions.transition(
-      id: session.id, from: session.state, to: state, mutate: mutate)
+      id: session.id, from: session.state, to: state,
+      mutate: { row in
+        if let pending, row.githubRunnerId == nil { row.githubRunnerId = pending }
+        mutate(&row)
+      })
     logger.debug(
       "runner session transition",
       metadata: .context(
@@ -364,5 +514,23 @@ public actor RunnerSessionManager {
         githubRunnerID: updated.githubRunnerId, from: session.state.rawValue, to: state.rawValue,
         reason: updated.failureCode))
     return updated
+  }
+}
+
+/// The runner id a JIT call produced, published from inside the deadline race so a caller that has
+/// already given up can still name the registration GitHub made for it.
+///
+/// A box rather than a bare `Mutex` local because `Mutex` is non-copyable and cannot be captured by
+/// the escaping body closure `withDeadline` runs. It holds the id and nothing else: the encoded JIT
+/// config is the secret and never outlives `register`'s local `let` (spec §36, §128).
+private final class IssuedRunnerID: Sendable {
+  private let id = Mutex<Int64?>(nil)
+
+  func publish(_ value: Int64) {
+    id.withLock { $0 = value }
+  }
+
+  var current: Int64? {
+    id.withLock { $0 }
   }
 }

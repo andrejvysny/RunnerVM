@@ -20,6 +20,10 @@ struct Run: ParsableCommand {
   @Option(name: .long, help: "Incarnation nonce supplied by runnerd.") var nonce: String
   @Option(name: .long, help: "Initial lease TTL in milliseconds.") var leaseTtlMs: Int64 = 30_000
   @Option(name: .long, help: "Idle time after lease expiry before self-stop.") var orphanIdleMs: Int64 = 600_000
+  /// The profile's `timeouts.gracefulShutdown`. Only the shutdowns this worker starts by itself
+  /// use it; a `worker.shutdown` request carries its own window.
+  @Option(name: .long, help: "SIGTERM-to-SIGKILL window for self-initiated shutdowns, in milliseconds.")
+  var gracefulMs: Int64 = 30_000
 
   func run() throws {
     let logger = Self.makeLogger(instance: instance, generation: generation)
@@ -49,7 +53,8 @@ struct Run: ParsableCommand {
         try await service.startServing()
       } catch {
         logger.error("startup failed", metadata: ["error": .string("\(error)")])
-        Foundation.exit(WorkerExitCode.vzStartFailed.rawValue)
+        // `startServing` may already have published both sockets before the VM refused to start.
+        await service.abort(exitCode: .vzStartFailed)
       }
     }
     logger.info(
@@ -112,14 +117,26 @@ struct Run: ParsableCommand {
       logger.info("macOS guest slot acquired", metadata: ["slot": .string(lock.url.lastPathComponent)])
       return lock
     } catch {
+      let code = exitCode(forSlotFailure: error)
       logger.error(
         "macOS guest slot unavailable",
         metadata: [
           "error": .string("\(error)"),
           "limit": .stringConvertible(HostConstants.macOSGuestLimit),
+          "exit_code": .stringConvertible(code.rawValue),
         ])
-      throw ExitCode(WorkerExitCode.lockHeld.rawValue)
+      throw ExitCode(code.rawValue)
     }
+  }
+
+  /// "This host is already running its two macOS guests" and "this instance directory is not
+  /// usable" are different operator problems, so they must not share exit 75: the first is
+  /// retryable capacity, the second is a broken host.
+  static func exitCode(forSlotFailure error: any Error) -> WorkerExitCode {
+    guard let error = error as? VMError, case .macOSGuestLimitReached = error else {
+      return .lockHeld
+    }
+    return .macOSGuestLimitReached
   }
 
   /// The macOS counterpart of the EFI variable store: minted once, on the first boot after this
@@ -171,6 +188,6 @@ struct Run: ParsableCommand {
       workerSocket: socketDir.appendingPathComponent("vm-\(shortID).sock"),
       agentSocket: socketDir.appendingPathComponent("vm-\(shortID)-agent.sock"),
       orphanIdle: TimeInterval(run.orphanIdleMs) / 1000, initialLeaseTtlMs: run.leaseTtlMs,
-      hardDeadline: loaded.spec.hardDeadline)
+      hardDeadline: loaded.spec.hardDeadline, gracefulShutdownMs: run.gracefulMs)
   }
 }

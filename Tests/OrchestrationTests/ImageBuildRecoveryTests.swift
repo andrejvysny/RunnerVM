@@ -3,6 +3,7 @@ import Foundation
 import ImageStore
 import Metrics
 import Persistence
+import ProcessSpawn
 import RunnerCore
 import Scheduler
 import Testing
@@ -85,6 +86,30 @@ struct ImageBuildRecoveryTests {
       #expect(row.recoverySince == nil)
       #expect(try await self.buildPins(harness) == 0)
       #expect(!self.directoryExists(harness, id))
+    }
+  }
+
+  /// A daemon that died mid-provisioning leaves a script nothing else can find: it is not a child
+  /// of the restarted process, holds no lock, and appears in no table. The marker in the build
+  /// directory is the only handle, and recovery has to consume it -- here for a leader that is
+  /// already gone, which is the case that must *not* signal a recycled pid.
+  @Test func recoveryConsumesAnOrphanedProvisioningMarker() async throws {
+    try await withBuildHarness { harness in
+      let id = try await harness.seedBuildRow(state: .provisioning, name: "orphan-provision")
+      let work = harness.paths.buildDir(id)
+        .appending(path: ".provision", directoryHint: .isDirectory)
+      try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+      // A pid this process has already reaped: `startTime` answers `nil`, so `terminate` logs that
+      // the group was left alone rather than signalling whatever holds the number now.
+      let done = try await ProcessSpawn.run(
+        SpawnRequest(executable: "/usr/bin/true", timeout: .seconds(10)))
+      #expect(ProcessSpawn.startTime(of: done.pid) == nil)
+      let marker = ProvisionProcessGroup.marker(in: work)
+      try Data("\(done.pid) 1234567890\n".utf8).write(to: marker)
+
+      _ = await harness.builder.recover()
+
+      #expect(!FileManager.default.fileExists(atPath: marker.path(percentEncoded: false)))
     }
   }
 

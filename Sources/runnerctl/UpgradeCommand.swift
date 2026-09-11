@@ -110,8 +110,13 @@ struct UpgradeCommand: AsyncParsableCommand {
     print("installed:  \(result.current)")
     print("released:   \(result.latest)")
     print("package:    \(result.manifest.package) "
-      + "(\(result.manifest.signed ? "signed" : "unsigned"), \(result.manifest.architecture), "
-      + "macOS \(result.manifest.minimumMacOS)+)")
+      + "(\(result.manifest.architecture), macOS \(result.manifest.minimumMacOS)+)")
+    // "claims", not "signed": the manifest ships in the same release as the package it describes,
+    // so this line is a label. The signature itself is read off the downloaded pkg with pkgutil
+    // and spctl during the upgrade, which is the only thing that verifies anything.
+    print("manifest claims: \(result.manifest.signingClaim)")
+    print("            (a claim from the release; sudo runnerctl upgrade verifies the package's")
+    print("             own signature on this host before it touches anything)")
     print("verdict:    \(result.summary)")
     guard result.verdict == .upgradeAvailable else { return }
     print("")

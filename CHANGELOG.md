@@ -2,14 +2,122 @@
 
 Dates are when the work landed on `master`; see `docs/verification.md` for what was proven live.
 
+## Unreleased — v0.3.0 (in progress)
+
+Hardening from the pre-release review (`PLAN.md`). Everything here is unit/integration-tested;
+the hardware matrix runs before the tag.
+
+- The reconciler now reaps `failed`, `interrupted` and `stopped` instances of every lifecycle once
+  `diagnostics.failedInstanceRetention` has passed — previously only ephemeral ones were reaped,
+  so a reusable VM that was stopped or never reached `idle` held its cpu, memory, disk
+  reservation, image pin and directory until the daemon was restarted. Maintenance instances
+  inside their pin, and rows a delete or restart is already walking down, are untouched. The
+  sweep commits against the state it judged (compare-and-swap), never against a row that moved.
+- Rows stuck in `deleting` (a worker that never released its lock) are retried once per
+  `deletingRetryGrace` (5 min) by a background task that never stalls the reconcile tick;
+  `runnervm_instance_delete_retries_total{profile}` counts them. Scheduler cancel failures are
+  counted in `runnervm_instance_cancel_failures_total{profile,code}` and logged with backoff
+  instead of every 10 seconds. Image rows abandoned in `pulling` are invalidated.
+- New `ProcessSpawn` runner for every host subprocess (`hdiutil`, `tar`, the macOS provisioning
+  script, `vmworker probe`, setup/upgrade commands): `posix_spawn` with a private process group,
+  default signal dispositions (runnerd ignores SIGTERM and used to pass that on), process-group
+  SIGTERM→SIGKILL escalation, and a deadline-bounded pipe drain — a helper whose grandchild holds
+  the pipe can no longer hang a build forever. `BUILD_TOOL_TIMEOUT` names a killed tool; the
+  provisioning script gets `RVM_PROVISION_TIMEOUT` below the build timeout, an explicit
+  environment and `--out`; an orphaned provisioning process group is terminated by build recovery
+  after a daemon crash. `vmworker probe` is re-tried on the maintenance tick while degraded.
+- A revoked or rotated GitHub App installation token self-heals: a 401 on an idempotent request
+  drops the cached credential once per minute and retries once.
+- Session recovery can no longer terminalize a live session whose registration is mid-JIT, nor act
+  on a stale snapshot: `register` owns its row from before the insert until the observer exists,
+  and recovery re-reads every row before deciding.
+- `vmworker` unlinks its sockets on every exit path (including a VZ start failure) and reports
+  exit 79 when the guest could not be force-stopped and 80 when the host is at the macOS
+  guest ceiling (was 75, indistinguishable from a held lock). `worker.shutdown`'s `drain` and
+  `stop` are documented as identical; `agentBootId` is dropped from the protocol document.
+- `timeouts.gracefulShutdown` is now enforced on every runnerd-driven teardown instead of a
+  hardcoded 30 s: `worker.shutdown`, the guest's `agent.stopRunner`, and — through the new
+  `vmworker run --graceful-ms` option — the shutdowns a worker starts by itself (hard deadline,
+  orphan idle, SIGTERM). The `agent.stopRunner` call now gets its own deadline of the grace plus
+  15 s, so a window longer than 30 s is no longer cancelled into a SIGKILL at 30 s. The wait for
+  the worker's lock to drop scales with the grace and is capped at 120 s, and the scheduler's
+  cancellations run as tracked detached tasks so a long grace cannot stall the reconcile tick.
+  A profile above 10 min is flagged `PROFILE_TIMEOUT_GRACEFUL_SHUTDOWN_LONG`; image builds are not
+  profile-owned and keep their fixed 120 s.
+- `install.sh` (bootstrap) refuses a manifest package name that is not a plain `<name>.pkg`
+  filename; `APFSClone.freeSpace` logs once when the volume is unreadable instead of silently
+  reporting 0.
+- `timeouts.jitGeneration` is enforced: `generate-jitconfig` is now bounded on both the REST and
+  the scale-set path, and expiry closes the session as `jitFailed` with
+  `GITHUB_JIT_GENERATION_TIMEOUT` and hands the VM straight back instead of retaining it. A
+  registration GitHub made anyway — the config arrived after the deadline, or its answer was lost —
+  is found by id or by runner name, written to the session row and removed, so a failed DELETE is
+  still retried by the maintenance loop. The default is raised **30s -> 2m**, which covers a
+  credential mint plus a few 429/503 retries — deliberately not the whole `RetryPolicy.github`
+  ladder, because giving up earlier and letting the scheduler's hold-down set the retry cadence is
+  the point; `PROFILE_TIMEOUT_JIT_GENERATION_SHORT` warns below 60s. A session hand-off that fails
+  with any `GITHUB_*` code now holds the profile down like a failed VM start, so a GitHub outage
+  can no longer turn standing demand into a create/destroy loop. The scale-set token exchange is now cancellable per waiter (it used to be awaited as
+  `Task.value`, which ignores cancellation), while the exchange itself keeps running for the other
+  callers that share it. A scale-set runner lookup by name is re-filtered for an exact match, as
+  the REST one already was.
+- `timeouts.imagePull` is enforced, per caller: the deadline covers resolving the reference and
+  waiting for the image inside `instance.create`, and expiry answers `IMAGE_PULL_TIMEOUT` with the
+  planning pin released and no instance row left behind — while the transfer everyone on that
+  digest shares keeps running, so the next create is served from the store instead of downloading
+  the image again. A caller waiting on someone else's transfer is told what that transfer actually
+  failed with (`REGISTRY_AUTH`, `IMAGE_INSUFFICIENT_DISK_SPACE`, …) rather than a flattened
+  `IMAGE_PULL_FAILED`. `image.pull` and `runnerctl image pull` stay unbounded. The default is
+  raised **30m -> 60m** (a real image is ~2.9 GiB compressed and ~16 GiB of content to hash, and
+  `images.prefetch` is off by default, so the first `vm create` pays for the whole transfer);
+  `PROFILE_TIMEOUT_IMAGE_PULL_SHORT` warns below 60s.
+- `timeouts.vmBoot` is enforced: the clock starts at `cloning` and bounds the whole window up to
+  the guest reporting itself running. The clone and the worker spawn are checked against it as they
+  finish (`clonefile(2)` has no cancellation point, so an overrun can only be reported afterwards),
+  and the rest — which outlives the `instance.create` RPC, still returning at `startingVM` — is
+  watched by a tracked background task per instance. Expiry fails the row with `VM_BOOT_TIMEOUT`,
+  names the phase that overran in `failure.json`, and shuts the worker down while keeping the
+  directory for diagnostics; a `running` event that lands first wins the row and leaves no failure
+  record, metric or shutdown behind. The watch is rebuilt on the first reconcile tick after a daemon
+  restart — from the row's `started_at`, so a restart cannot hand the same boot a fresh budget —
+  after asking the re-adopted worker what state it sees, which finishes a guest that came up while
+  runnerd was away instead of failing it. `InstanceManager.fail` now commits the state first and
+  writes the failure record, metric and log line only when that compare-and-swap lands (it used to
+  write the record before checking, and to report a failure whose transition had been rejected).
+  `PROFILE_TIMEOUT_VM_BOOT_SHORT` warns below 30s, and `PROFILE_TIMEOUT_AGENT_READY_SHORT` warns
+  when a macOS profile allows under 2m for `agentReady` — Virtualization reports a macOS guest
+  running before macOS has booted, so that first boot is bounded by `agentReady`, not `vmBoot`.
+
+## 2026-09-02 — v0.2.1 patch
+
+- `fad78a0`: fixed the cooperative-pool thread starvation that made `v0.2.0`'s CI (`d742a1c`) red —
+  blocking probes/subprocess calls were parking cooperative-pool threads.
+- `runnerd` startup-failure classification and backoff, using sysexits codes (69, 72, 75, 78) to
+  decide retry vs. give up; new `RUNNERVM_STARTUP_BACKOFF` and `RUNNERVM_SUPERVISED` env vars.
+- `install.sh` now creates `<state>/logs/runnerd`, the launchd stdio directory — its absence on a
+  real host made launchd fail to spawn `runnerd` 70,547 times, reported as exit 78.
+- launchd plists: `ThrottleInterval` 30, agent `ExitTimeOut` 60; `HostProbe` bounded by 60 s.
+- `doctor` reports launchd `runs`/`last exit code`, a missing stdio directory, and a stale
+  `ThrottleInterval`.
+- `publish-images.yml`'s cron trigger removed (dispatch only) until a publisher host exists —
+  a cron run would otherwise queue forever with no `runnervm-publisher` runner registered.
+- Guest agent Go module path is `github.com/andrejvysny/RunnerVM/GuestAgent` (was the placeholder
+  `github.com/runnervm/guest-agent`); binary name, version injection and behavior unchanged.
+- Licensing stated explicitly: README "License and provenance", `NOTICE` lists the actions/scaleset
+  MIT port and every third-party dependency's license, `PROVENANCE.md` audit record re-verified
+  19/19 Tart-derived and 7/7 scaleset-ported headers.
+- The 8 stale `.claude/worktrees/` agent clones and their branches were deleted (local only).
+
 ## 2026-08-28 — Distribution hardening (milestone D)
 
 Closes the distribution milestone (`docs/design/distribution.md`, `TODO.md` "D — Distribution
 hardening"): a fresh Apple Silicon Mac becomes a working runner host from one `curl … | sudo bash`.
-Every item below is unit/integration-tested only. **Nothing here has been released, published to
-GHCR, or run on real hardware yet** — no tag is pushed, no GitHub release exists, and the operator
-matrix (fresh-Mac install, reboot loop, upgrade, managed macOS provisioning, keychain e2e, first
-publish) is still open. Track it in `docs/status.md` "Open verification".
+Every item below is unit/integration-tested only at the time it landed. **Nothing published to
+GHCR yet** — the operator matrix (fresh-Mac install, reboot loop, upgrade, managed macOS
+provisioning, keychain e2e, first publish) is still open. Track it in `docs/status.md` "Open
+verification". `v0.2.0` was tagged from `d742a1c` with a red CI (Swift job failing on
+cooperative-pool thread starvation), fixed afterwards by `fad78a0` on `master` — see the v0.2.1
+section above.
 
 - **Repository renamed** to `andrejvysny/RunnerVM`, `LICENSE` is now Apache-2.0 for RunnerVM code
   (FSL attribution for ported Tart files unchanged in `NOTICE`/`PROVENANCE.md`), and

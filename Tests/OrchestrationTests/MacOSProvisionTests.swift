@@ -148,9 +148,33 @@ import Testing
       #expect(argv.contains("--result"))
       #expect(argv.contains("--agent-binary"))
       #expect(argv.contains("--work"))
+      // Named rather than defaulted: the script's own `OUT="${OUT:-$HOME/Library/Caches/…}"`
+      // runs under `set -u` against whatever `HOME` the allowlist carried.
+      #expect(argv.contains("--out"))
+      #expect(
+        script.argument("--out") == harness.paths.buildDir(row.id).path(percentEncoded: false))
       #expect(!argv.contains("--debug-ssh"))
       let attached = try #require(script.argument("--attach"))
       #expect(attached.hasPrefix("192.168.64."))
+
+      // `posix_spawn` inherits nothing, so the script's environment is exactly what was passed:
+      // the `vmworker` allowlist plus a ceiling five minutes inside the build's own.
+      let environment = try #require(script.environment)
+      #expect(environment["PATH"] != nil)
+      #expect(environment["HOME"] != nil)
+      #expect(environment["RUNNERVM_GITHUB_TOKEN"] == nil)
+      #expect(
+        environment["RVM_PROVISION_TIMEOUT"]
+          == String(ImageBuilder.scriptTimeoutSeconds(.milliseconds(row.timeoutMs))))
+
+      // The `onSpawn` hook recorded the script's process group while it was running, and the
+      // stage took the marker away afterwards -- the two halves a daemon crash mid-provisioning
+      // depends on (`ImageBuilderRecovery` reads exactly this file).
+      #expect(script.markerExistedDuringRun)
+      #expect(!FileManager.default.fileExists(
+        atPath: harness.paths.buildDir(row.id)
+          .appending(path: ".provision/\(ProvisionProcessGroup.fileName)")
+          .path(percentEncoded: false)))
 
       // Two VMs came up: the provisioning one and the qualification clone, each with its own
       // directory and therefore its own machine identity.
@@ -203,6 +227,21 @@ import Testing
 
       #expect(row.state == .failed)
       #expect(row.failureCode == "BUILD_MACOS_PROVISION_FAILED")
+      #expect(row.imageDigest == nil)
+      #expect(try await harness.base.imageRows.alias(name: Self.managedName) == nil)
+    }
+  }
+
+  /// A script whose process group was killed at the build's ceiling wrote whatever it had got to;
+  /// reading its `result.json` would report some downstream symptom as the cause.
+  @Test func aScriptKilledAtTheCeilingFailsWithTheTimeoutRatherThanItsResult() async throws {
+    try await withMacOSHarness(script: FakeProvisionScript(timesOut: true)) {
+      harness, _, _, source, _ in
+      let row = try await harness.settle(
+        try await harness.builder.startMacOSProvision(managed: source).rawValue)
+
+      #expect(row.state == .failed)
+      #expect(row.failureCode == "BUILD_TOOL_TIMEOUT")
       #expect(row.imageDigest == nil)
       #expect(try await harness.base.imageRows.alias(name: Self.managedName) == nil)
     }

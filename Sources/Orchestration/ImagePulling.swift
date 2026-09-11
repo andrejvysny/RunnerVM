@@ -61,7 +61,25 @@ extension ImageManager {
 
   enum PullOutcome {
     case present(ImagePullStart, ImageRecord)
-    case started(ImagePullStart, Task<ImageRecord, any Error>)
+    /// The one transfer everyone sharing this digest is waiting on, and the reference it will land
+    /// under. `start.operationId` is deliberately `nil`: resolving it means awaiting an unstructured
+    /// `Task`, which only `startPull` -- the one caller with no deadline over it -- may do.
+    case started(ImagePullStart, canonical: OCIReference, running: InFlightPull)
+  }
+
+  /// A shared transfer's own failure, rebuilt from its `pull-image` operation row for a caller that
+  /// waited on it rather than started it.
+  ///
+  /// The row is the only place that outcome is written down (the transfer's `Task` belongs to
+  /// whoever started it, and awaiting it is exactly what the deadline design forbids), so the class
+  /// of failure -- `REGISTRY_AUTH`, `IMAGE_INSUFFICIENT_DISK_SPACE` -- is preserved rather than
+  /// flattened into a bare `IMAGE_PULL_FAILED`. Retryable like `ImageError.pullFailed`, which is
+  /// what the caller that *started* the same transfer gets: the row records no retryability, and a
+  /// waiter must not be more permanent than the starter it was sharing with.
+  struct SharedPullFailure: RunnerError {
+    let code: String
+    let message: String
+    var retryable: Bool { true }
   }
 
   // MARK: - Resolution
@@ -71,8 +89,12 @@ extension ImageManager {
   /// `purpose` travels all the way into `inspect`, so a profile pointing at an agentless remote
   /// image is refused after its config blobs and before any disk transfer, operation row, staging
   /// directory or pin exists (spec §58).
+  ///
+  /// `timeout` bounds *this caller's* wait (a profile's `timeouts.imagePull`), never the transfer:
+  /// `.zero` -- what every caller but `instance.create` passes -- waits as long as the pull takes.
   func resolveRecord(
-    reference: String, profile: String?, purpose: ImagePullPurpose = .storage
+    reference: String, profile: String?, purpose: ImagePullPurpose = .storage,
+    timeout: DurationValue = .zero
   ) async throws -> ImageRecord {
     guard let ref = Self.registryReference(reference) else {
       return try await record(for: reference)
@@ -83,7 +105,79 @@ extension ImageManager {
     if let known = try await cachedRegistryRecord(ref) {
       return try await touch(known)
     }
-    return try await pull(reference: ref.description, profile: profile, purpose: purpose)
+    return try await boundedPull(ref, profile: profile, purpose: purpose, timeout: timeout)
+  }
+
+  /// Pulls under one caller's deadline (spec §73), leaving the transfer everyone shares untouched.
+  ///
+  /// Two phases, because only the first one is this caller's work to cancel. Resolution and
+  /// inspection are raced against the deadline directly -- `RunnerVMImageTransfer.inspect` is
+  /// `URLSession`'s async API all the way down, so cancelling it cancels a real request. The wait
+  /// that follows cannot be: the transfer is an unstructured `Task` shared with every other caller
+  /// on this digest, and awaiting its value would ignore cancellation and park the deadline's task
+  /// group until the download finished (see `withDeadline`'s hard rule). So the second phase polls
+  /// the in-flight map instead, and expiry leaves the transfer running for whoever else wants it.
+  ///
+  /// `ContinuousClock`, not `now`: the injected clock is frozen in tests and is a wall clock in
+  /// production, neither of which can measure how much of the budget phase one spent.
+  private func boundedPull(
+    _ ref: OCIReference, profile: String?, purpose: ImagePullPurpose, timeout: DurationValue
+  ) async throws -> ImageRecord {
+    let startedAt = ContinuousClock.now
+    let reference = ref.description
+    let outcome = try await withDeadline(
+      timeout, expired: { ImageError.pullTimeout(reference: reference) }
+    ) {
+      try await self.beginPull(
+        reference: reference, profile: profile, progress: nil, purpose: purpose)
+    }
+    switch outcome {
+    case let .present(_, record):
+      return record
+    case let .started(start, canonical, running):
+      return try await awaitInFlightPull(
+        digest: start.manifestDigest, canonical: canonical, mine: running.task,
+        limit: timeout.isPositive ? startedAt.advanced(by: timeout.duration) : nil)
+    }
+  }
+
+  /// Waits for the transfer `mine` to leave the in-flight map, then reports *its* outcome.
+  ///
+  /// The exit condition is `!= mine`, never `== nil`: prefetch runs on every reconcile tick and can
+  /// re-register the same digest inside a poll window, and a waiter that read that as "still mine"
+  /// would wait for a transfer it never joined.
+  ///
+  /// `limit` is the absolute instant this caller gives up at; `nil` waits as long as it takes.
+  func awaitInFlightPull(
+    digest: ImageDigest, canonical: OCIReference, mine: Task<ImageRecord, any Error>,
+    limit: ContinuousClock.Instant?
+  ) async throws -> ImageRecord {
+    while inFlightPulls[digest]?.task == mine {
+      if let limit, ContinuousClock.now >= limit {
+        throw ImageError.pullTimeout(reference: canonical.description)
+      }
+      try await Task.sleep(for: pullWaitPollInterval)
+    }
+    // The map entry is cleared only after `performPull` has written the row and finished the
+    // operation, so both are already readable here.
+    if let record = try await readyRecord(canonical: canonical) {
+      return try await touch(record)
+    }
+    throw await sharedPullFailure(digest: digest, canonical: canonical)
+  }
+
+  /// What the shared transfer failed with, as its `pull-image` operation row recorded it. Falls
+  /// back to `pullFailed` only when there is nothing to read -- an image row left `invalid` by a
+  /// transfer whose operation row could not be written, or no evidence at all.
+  private func sharedPullFailure(digest: ImageDigest, canonical: OCIReference) async -> any Error {
+    let rows = (try? await operations?.list(state: nil)) ?? []
+    let row = rows
+      .filter { $0.kind == Self.pullOperationKind && $0.resourceId == digest.rawValue }
+      .max { $0.startedAt.date < $1.startedAt.date }
+    if let row, row.state == .failed, let code = row.errorCode {
+      return SharedPullFailure(code: code, message: row.errorMessage ?? "pull failed")
+    }
+    return ImageError.pullFailed(reference: canonical.description, cause: nil)
   }
 
   /// A `ready` row for `ref` without touching the network: a digest reference is its own answer, a
@@ -149,7 +243,9 @@ extension ImageManager {
       reference: reference, profile: profile, progress: progress, format: format, purpose: purpose
     ) {
     case let .present(_, record): return record
-    case let .started(_, task): return try await task.value
+    // Nothing bounds this call, so waiting on the shared transfer's own `Task` is safe here —
+    // unlike the deadline-bounded `boundedPull`, which polls instead.
+    case let .started(_, _, running): return try await running.task.value
     }
   }
 
@@ -163,7 +259,12 @@ extension ImageManager {
       reference: reference, profile: profile, progress: nil, format: format
     ) {
     case let .present(start, _): return start
-    case let .started(start, _): return start
+    // The only place the operation row is waited for: the RPC has to answer with the id the
+    // caller follows the transfer by, and no deadline is racing this call.
+    case let .started(start, _, running):
+      return ImagePullStart(
+        reference: start.reference, manifestDigest: start.manifestDigest,
+        operationId: await running.operation.value, localDigest: nil)
     }
   }
 
@@ -189,10 +290,12 @@ extension ImageManager {
     }
     let running = inFlightPulls[remote.digest]
       ?? launchPull(remote: remote, canonical: canonical, profile: profile, progress: progress)
+    // `running.operation` is *not* awaited here: it is an unstructured `Task`, and a caller under
+    // a deadline (`boundedPull`) would park its task group on it rather than time out.
     return .started(
       ImagePullStart(
-        reference: canonical.description, manifestDigest: remote.digest,
-        operationId: await running.operation.value, localDigest: nil), running.task)
+        reference: canonical.description, manifestDigest: remote.digest, operationId: nil,
+        localDigest: nil), canonical: canonical, running: running)
   }
 
   /// Synchronous on purpose: everything between the `inFlightPulls` miss above and this
@@ -285,6 +388,58 @@ extension ImageManager {
         ])
       throw ImageError.pullFailed(reference: canonical.description, cause: error as? any RunnerError)
     }
+  }
+
+  /// Marks `pulling` rows nothing is pulling any more as `invalid` (spec §119).
+  ///
+  /// `performPull` sets that state itself on failure, but with a `try?`: a database hiccup on that
+  /// one write leaves a row claiming a transfer that ended, which then pins its digest against
+  /// `image prune` and makes `image.list` and `system.status` lie for the life of the daemon.
+  ///
+  /// The in-flight map is the authority on whether a transfer is live: `launchPull` registers an
+  /// entry synchronously, before its first `await`, so a miss means no transfer in this process —
+  /// and there is only ever one daemon per state directory.
+  ///
+  /// `firstTick` is what makes that sufficient on its own. Nothing this process did not itself
+  /// register can be running yet, so a `pulling` row with no entry is abandoned however its
+  /// `pull-image` operation row reads — and after a crash that row is *always* left `running`,
+  /// because the daemon that owned it never got to finish it. On later ticks the operation row is
+  /// consulted again, since by then a pull may legitimately be resuming one.
+  ///
+  /// Neither the operation row nor the staging directory is touched: a later pull adopts the
+  /// operation through `restart` and resumes into the bytes already staged, which is exactly what
+  /// `invalid` (rather than a delete) leaves possible.
+  @discardableResult
+  public func sweepStalePulls(firstTick: Bool = false) async -> Int {
+    guard let rows = try? await images.list(state: .pulling) else { return 0 }
+    var running: Set<String> = []
+    if !firstTick {
+      guard let inProgress = await runningPullDigests() else { return 0 }
+      running = inProgress
+    }
+    var invalidated = 0
+    for row in rows
+    where inFlightPulls[row.digest] == nil && !running.contains(row.digest.rawValue) {
+      guard (try? await images.setState(digest: row.digest, from: .pulling, to: .invalid)) != nil
+      else { continue }
+      invalidated += 1
+      logger.warning(
+        "abandoned image pull marked invalid",
+        metadata: .context(imageDigest: row.digest).merging([
+          "reference": .string(row.canonicalReference ?? "-"),
+        ]) { $1 })
+    }
+    return invalidated
+  }
+
+  /// Resource ids of the `pull-image` operations still marked `running`, or `nil` when the rows
+  /// exist but could not be read: the sweep then does nothing rather than invalidate a row it
+  /// cannot prove is abandoned. A wiring with no operation repository at all has only the
+  /// in-flight map to go on, which is the authority inside this process anyway.
+  private func runningPullDigests() async -> Set<String>? {
+    guard let operations else { return [] }
+    guard let rows = try? await operations.list(state: .running) else { return nil }
+    return Set(rows.filter { $0.kind == Self.pullOperationKind }.map(\.resourceId))
   }
 
   private func transfer(

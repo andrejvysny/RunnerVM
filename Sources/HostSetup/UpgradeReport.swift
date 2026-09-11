@@ -107,6 +107,9 @@ public struct UpgradeReport: Sendable, Hashable, Codable {
     public static let manifest = "release manifest"
     public static let download = "download"
     public static let checksum = "checksum"
+    /// What `pkgutil`/`spctl` said about the downloaded package: evidence, recorded before the
+    /// confirmation that acts on it.
+    public static let signature = "package signature"
     public static let rollbackMaterial = "rollback pkg"
     public static let confirmation = "confirmation"
     public static let backup = "backup"

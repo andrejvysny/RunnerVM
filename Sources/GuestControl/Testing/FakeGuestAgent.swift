@@ -57,6 +57,10 @@ public actor FakeGuestAgent {
     public var cleanup: CleanupResponse
     /// Methods that answer with a wire error instead of a result.
     public var failures: [GuestMethod: RPCErrorPayload]
+    /// Methods that take this long before answering. Models the real agent's blocking work --
+    /// `agent.stopRunner` waits out the whole SIGTERM-to-SIGKILL grace before it replies -- so a
+    /// caller's own deadline can be exercised.
+    public var delays: [GuestMethod: Duration]
 
     public init(
       hello: HelloResponse = Script.defaultHello,
@@ -72,7 +76,8 @@ public actor FakeGuestAgent {
       startRunnerFailsAfterStart: RPCErrorPayload? = nil,
       startRunnerPid: Int64 = 4_242,
       cleanup: CleanupResponse = CleanupResponse(ok: true, removed: []),
-      failures: [GuestMethod: RPCErrorPayload] = [:]
+      failures: [GuestMethod: RPCErrorPayload] = [:],
+      delays: [GuestMethod: Duration] = [:]
     ) {
       self.hello = hello
       self.health = health
@@ -88,6 +93,7 @@ public actor FakeGuestAgent {
       self.startRunnerPid = startRunnerPid
       self.cleanup = cleanup
       self.failures = failures
+      self.delays = delays
     }
 
     /// Boots `starting` for `attempts` polls and then reports `ready`.
@@ -115,6 +121,7 @@ public actor FakeGuestAgent {
   private var runnerStatusIndex = 0
   private var startedSessions: Set<String> = []
   private var stoppedSessions: Set<String> = []
+  private var stopRunnerRequests: [StopRunnerRequest] = []
   private var appliedEpochs: Set<Int64> = []
   private var counters: [GuestMethod: Int] = [:]
   private var lastExecRequest: ExecRequest?
@@ -200,6 +207,10 @@ public actor FakeGuestAgent {
 
   public func cleanupEpochs() -> Set<Int64> { appliedEpochs }
 
+  /// Every `agent.stopRunner` request as decoded off the wire, in order. What a test asserts on to
+  /// see which `graceMs` the host actually sent (`timeouts.gracefulShutdown`).
+  public func stopRunnerCalls() -> [StopRunnerRequest] { stopRunnerRequests }
+
   // MARK: - Handlers
 
   private func register() async {
@@ -219,7 +230,7 @@ public actor FakeGuestAgent {
     }
     await unary(.stopRunner) { [self] envelope in
       let request = try GuestCoding.decode(StopRunnerRequest.self, from: envelope.payload)
-      return try GuestCoding.payload(await stopRunner(sessionId: request.sessionId))
+      return try GuestCoding.payload(await stopRunner(request))
     }
     await unary(.cleanup) { [self] envelope in
       let request = try GuestCoding.decode(CleanupRequest.self, from: envelope.payload)
@@ -238,9 +249,12 @@ public actor FakeGuestAgent {
   ) async {
     await server.register(method: method.rawValue, class: method.methodClass) { [self] envelope, _ in
       try await reject(method)
+      if let delay = await self.delay(for: method) { try await Task.sleep(for: delay) }
       return try await body(envelope)
     }
   }
+
+  private func delay(for method: GuestMethod) -> Duration? { script.delays[method] }
 
   private func reject(_ method: GuestMethod) throws {
     count(method)
@@ -297,9 +311,12 @@ public actor FakeGuestAgent {
     return status
   }
 
-  private func stopRunner(sessionId: String) -> StopRunnerResponse {
-    guard startedSessions.contains(sessionId) else { return StopRunnerResponse(stopped: true) }
-    stoppedSessions.insert(sessionId)
+  private func stopRunner(_ request: StopRunnerRequest) -> StopRunnerResponse {
+    stopRunnerRequests.append(request)
+    guard startedSessions.contains(request.sessionId) else {
+      return StopRunnerResponse(stopped: true)
+    }
+    stoppedSessions.insert(request.sessionId)
     return StopRunnerResponse(stopped: true)
   }
 

@@ -204,6 +204,146 @@ import Testing
       await agent.stop()
     }
   }
+
+  // MARK: - 5: the JIT deadline (`timeouts.jitGeneration`, spec §73)
+
+  /// GitHub accepting the POST and never answering used to park `register` — and the VM it had
+  /// already claimed — until the daemon was restarted: nothing in `jit*` has an observer, so no
+  /// deadline sweep could reach it either.
+  @Test func aScaleSetJITThatNeverAnswersFailsTheSessionAtTheDeadline() async throws {
+    try await withHarness(
+      configuration: M2Harness.configuration(jitGeneration: .milliseconds(50))
+    ) { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      harness.scaleSetPlane.stallJITConfig(for: 777)
+
+      do {
+        _ = try await harness.runners.startSession(
+          instanceId: instance.id, origin: .scaleSet(id: 777))
+        Issue.record("a stalled generate-jitconfig must not produce a session")
+      } catch let error as GitHubControlError {
+        #expect(error.code == "GITHUB_JIT_GENERATION_TIMEOUT")
+      }
+
+      let session = try #require(try await harness.runners.list().first)
+      #expect(session.state == .jitFailed)
+      #expect(session.jitSource == .scaleSet)
+      #expect(session.failureCode == "GITHUB_JIT_GENERATION_TIMEOUT")
+      // No orphan registration: the call was cancelled before the service ever answered, and the
+      // name lookup that follows finds nothing either.
+      #expect(session.githubRunnerId == nil)
+      #expect(harness.scaleSetPlane.removedRunners().isEmpty)
+      // No orphan VM, and nothing retained: a slow GitHub says nothing about this guest, so the
+      // capacity comes back now instead of after `failedInstanceRetention`.
+      try await harness.awaitInstance(instance.id, state: .deleted)
+      await harness.scaleSetPlane.releaseJITConfig()
+      await agent.stop()
+    }
+  }
+
+  /// The other half of the same race. The deadline can expire while the config is already on its
+  /// way back, and then GitHub holds a registration the caller never used: the id the JIT call
+  /// published on its way out is the only handle on it.
+  @Test func aScaleSetJITConfigThatArrivesAfterTheDeadlineIsRemoved() async throws {
+    try await withHarness(
+      configuration: M2Harness.configuration(jitGeneration: .milliseconds(50))
+    ) { harness in
+      harness.stubGitHub()
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      harness.scaleSetPlane.stallJITConfig(for: 777, .pastCancellation)
+
+      do {
+        _ = try await harness.runners.startSession(
+          instanceId: instance.id, origin: .scaleSet(id: 777))
+        Issue.record("a late generate-jitconfig must not produce a session either")
+      } catch let error as GitHubControlError {
+        #expect(error.code == "GITHUB_JIT_GENERATION_TIMEOUT")
+      }
+
+      let session = try #require(try await harness.runners.list().first)
+      #expect(session.state == .jitFailed)
+      #expect(session.failureCode == "GITHUB_JIT_GENERATION_TIMEOUT")
+      // The id reached the row, so the removal ran from the row -- exactly once, bracketed by its
+      // operation -- and `retryPendingRemovals` has the column it needs had that DELETE failed.
+      let runnerID = try #require(session.githubRunnerId)
+      #expect(harness.scaleSetPlane.removedRunners() == [runnerID])
+      #expect(harness.scaleSetPlane.jitCalls().count == 1)
+      try await harness.awaitInstance(instance.id, state: .deleted)
+      await agent.stop()
+    }
+  }
+
+  /// The one case that goes through the *real* `ActionsServiceConnection`.
+  ///
+  /// `FakeScaleSetControlPlane` fakes the protocol, so it can prove what the deadline does but not
+  /// that the scale-set path is cancellable at all: the shared token exchange used to be awaited as
+  /// `Task.value`, which is not a cancellation point, and a 200 ms deadline over it returned after
+  /// 3.2 s with the whole task group parked. Only wall-clock time can tell that apart, so this case
+  /// stalls the exchange for ten seconds and asserts the deadline still returns in well under one.
+  @Test func aStalledTokenExchangeIsAbandonedAtTheDeadlineNotWaitedOut() async throws {
+    let github = FakeGitHubServer()
+    defer { github.shutdown() }
+    let scope = GitHubScope.repository(owner: "acme", repository: "app")
+    let registrationTokenPath = M2Harness.runnersPath + "/registration-token"
+    let exchangePath = "/actions/runner-registration"
+    github.stub(
+      .post, registrationTokenPath,
+      .json("{\"token\":\"registration-token\"}", delay: .seconds(10)))
+    let http = GitHubHTTPClient(
+      baseURL: github.baseURL, credentials: StaticCredentialProvider(token: M2Harness.token),
+      session: github.makeSession(),
+      options: GitHubHTTPClient.Options(retryPolicy: RetryPolicy(maxAttempts: 1)))
+    let client = ActionsScaleSetClient(
+      http: http, apiBaseURL: github.baseURL, configBaseURL: github.baseURL,
+      session: github.makeSession(),
+      options: ActionsServiceOptions(retryPolicy: RetryPolicy(maxAttempts: 1)))
+
+    // A warm-up caller starts the exchange and parks in its first leg. The race below is only
+    // entered once the fake has actually recorded that POST, so the deadline cannot fire before
+    // `URLSession` has dispatched anything -- which under a saturated `--parallel` run it otherwise
+    // does, leaving the first-leg count at 0. It also puts the measured caller on the path that
+    // matters: parking on somebody else's in-flight exchange.
+    let warmUp = Task {
+      try await client.generateJITConfig(
+        scope: scope, scaleSetID: 1, runnerName: "rvm-warmup", workFolder: "_work")
+    }
+    try await waitUntil("the token exchange to be in flight") {
+      !github.requests(.post, registrationTokenPath).isEmpty
+    }
+
+    let started = ContinuousClock.now
+    do {
+      _ = try await withDeadline(
+        .milliseconds(100), expired: { GitHubControlError.jitGenerationTimeout(seconds: 0.1) }
+      ) {
+        try await client.generateJITConfig(
+          scope: scope, scaleSetID: 1, runnerName: "rvm-runner", workFolder: "_work")
+      }
+      Issue.record("the stalled exchange must not have produced a JIT config")
+    } catch let error as GitHubControlError {
+      #expect(error.code == "GITHUB_JIT_GENERATION_TIMEOUT")
+    }
+    // Ordering first, because it does not depend on how loaded the machine is: the exchange only
+    // reaches its second leg once the first one has answered, so a caller that was still waiting
+    // for GitHub would have seen that leg happen before it was let go.
+    #expect(github.requests(.post, exchangePath).isEmpty)
+    // Exactly one: the deadline caller parked on the warm-up's exchange rather than starting a
+    // second one, which is the sharing the cancellable waiter has to preserve.
+    #expect(github.requests(.post, registrationTokenPath).count == 1)
+    // And the stopwatch the design asks for, loose enough for a saturated `--parallel` run (a
+    // 100 ms deadline has been seen to land ~2 s late there) but still well under the 10 s stall
+    // the un-cancellable version waited out in full.
+    let elapsed = started.duration(to: .now)
+    #expect(elapsed < .seconds(5), "the deadline returned after \(elapsed)")
+
+    // Never leave the warm-up running past the test: cancelling it drops its waiter (the shared
+    // exchange itself is deliberately not cancellable by a caller, and simply finishes unwatched).
+    warmUp.cancel()
+    _ = try? await warmUp.value
+  }
 }
 
 /// Queues one scripted failure per entry in `failures` for `scaleSetID`'s long poll, then enqueues

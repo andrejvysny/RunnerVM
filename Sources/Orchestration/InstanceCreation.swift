@@ -56,13 +56,18 @@ extension InstanceManager {
     let profile = try profileRow.decodedConfig()
 
     let instanceId = InstanceID.generate()
-    // The override stands in for the profile's reference here and nowhere else: every later check
-    // (guest OS, macOS platform floors, runner freshness, admission) grades the image that was
-    // actually reserved, which is the whole point of qualifying a candidate image this way.
-    let (digest, image) = try await images.reserve(
-      reference: options.imageOverride ?? profile.image, for: instanceId, profile: profile.name)
     let planned: (record: InstanceRecord, macos: MacOSInstancePlatformSpec?)
     do {
+      // The override stands in for the profile's reference here and nowhere else: every later check
+      // (guest OS, macOS platform floors, runner freshness, admission) grades the image that was
+      // actually reserved, which is the whole point of qualifying a candidate image this way.
+      //
+      // Inside the `do` because `reserve` can throw *after* it has pinned: `timeouts.imagePull`
+      // races a deadline against the resolution, and losing that race must not leave the planning
+      // pin the winning branch may have just committed.
+      let (digest, image) = try await images.reserve(
+        reference: options.imageOverride ?? profile.image, for: instanceId, profile: profile.name,
+        pullTimeout: profile.effectiveTimeouts.imagePull)
       planned = try await plan(
         instanceId: instanceId, digest: digest, image: image, profile: profile,
         profileRow: profileRow, options: options)
@@ -244,20 +249,181 @@ extension InstanceManager {
   ) async throws -> InstanceRecord {
     var current = try await transition(record, to: .preparing)
     current = try await transition(current, to: .cloning)
+    // `timeouts.vmBoot` covers the whole clone -> running window, starting here. A host that is
+    // slow at the clone or at the spawn produces exactly the symptom the timeout exists for -- a
+    // VM that never comes up -- so all three phases are charged against one budget, and each
+    // reports the phase it was actually in.
+    let deadline = ContinuousClock.now + profile.effectiveTimeouts.vmBoot.duration
     let layout = try await stage(current, profile: profile, macos: macos)
+    // Checked after the clone rather than around it: `clonefile(2)` is synchronous and has no
+    // cancellation point, so an overrun can only ever be noticed once the copy is done.
+    try await enforceBootDeadline(current.id, deadline: deadline, stage: "the instance disk clone")
     current = try await transition(current, to: .startingWorker)
     let spawnedAt = ContinuousClock.now
     let session = try await spawn(current, specPath: layout.spec)
     await metrics.observe(
       RunnerVMMetrics.workerStartSeconds,
       labels: [RunnerVMMetrics.profileLabel: profile.name], since: spawnedAt)
+    // `workerPid` is stamped by the transition below, so the row does not carry it yet: the
+    // failure record would otherwise name no worker for a phase that definitely spawned one.
+    try await enforceBootDeadline(
+      current.id, deadline: deadline, stage: "the worker to start", workerPID: session.pid)
     current = try await transition(current, to: .startingVM) { record in
       record.workerPid = session.pid
       record.workerSocket = session.socketPath.path(percentEncoded: false)
       record.startedAt = .now
     }
     await boot(current)
+    // What is left of the budget belongs to the guest, and `instance.create` does not wait for it:
+    // a boot is minutes of work and the caller's socket would idle out long before it landed. The
+    // row goes back as `startingVM` and this watches the rest of the window instead.
+    watchBoot(current, deadline: deadline)
     return try await require(current.id)
+  }
+
+  // MARK: - Boot deadline (`timeouts.vmBoot`)
+
+  /// Ends a create whose boot budget is already spent, attributing the overrun to the phase the row
+  /// is in right now, and throws so the caller (and the scheduler's hold-down) learns about it.
+  private func enforceBootDeadline(
+    _ id: InstanceID, deadline: ContinuousClock.Instant, stage: String, workerPID: Int32? = nil
+  ) async throws {
+    guard ContinuousClock.now >= deadline else { return }
+    let fresh = try await require(id)
+    await failBootTimeout(
+      id, expecting: fresh.state, generation: fresh.workerGeneration, stage: stage,
+      workerPID: workerPID)
+    throw VMError.bootTimeout(stage: stage)
+  }
+
+  /// Bounds `startingVM -> waitingForAgent` from a task the actor owns, so the create RPC does not
+  /// have to stay open for the guest's boot. Replaces any watcher already on this instance: only
+  /// the newest boot of a row is the one worth bounding.
+  func watchBoot(_ record: InstanceRecord, deadline: ContinuousClock.Instant) {
+    bootWatchers[record.id]?.cancel()
+    bootWatchers[record.id] = Task { [weak self] in
+      await self?.awaitVMRunning(record, deadline: deadline)
+    }
+  }
+
+  /// Re-arms the boot deadline after a daemon restart (`recheckAgents`, first reconcile tick).
+  ///
+  /// A watcher only ever lived in memory, so a restart used to lose it: a row whose worker survived
+  /// stayed in `startingVM` with nothing bounding it, holding cpu, memory, disk and an image pin
+  /// until an operator noticed. The budget is *rebuilt* from `started_at` -- stamped when the row
+  /// entered `startingVM` -- rather than restarted, so a daemon that crashes often cannot extend one
+  /// boot indefinitely; a row already past it is failed by the watcher's first poll, through the
+  /// same compare-and-swap every other timeout goes through.
+  func rearmBootWatch(_ record: InstanceRecord) async {
+    let id = record.id
+    // A worker that is gone belongs to `InstanceReconciler.interruptDeadWorkers`, which runs on
+    // this same tick and interrupts the row; arming a deadline against it would race that.
+    // `worker_generation == 0` is unreachable through the ladder -- `startingVM` is only entered
+    // after `supervisor.start` has bumped it -- and both recovery paths skip such a row anyway
+    // (`reconnectAll` and `interruptDeadWorkers` have the same guard), so it is left alone here too.
+    guard record.state == .startingVM, record.workerGeneration > 0,
+          await supervisor.liveness(id: id) != .dead else { return }
+    // The worker's own view of the guest comes first. A VM that reached `running` while runnerd was
+    // away has no event left to send -- the state it would report already changed -- and failing
+    // that boot on a deadline would take down a VM that is up.
+    if let reported = await supervisor.state(id: id) {
+      await applyVMState(id, reported, adopted: true)
+    }
+    guard let fresh = try? await require(id), fresh.state == .startingVM else { return }
+    let budget = await vmBootTimeout(for: fresh)
+    let started = (fresh.startedAt ?? fresh.createdAt).date
+    let elapsed = Duration.seconds(tuning.now().timeIntervalSince(started))
+    // Clamped at both ends: a clock that moved backwards must not hand out more than the profile's
+    // window, and one that moved forwards must not produce a deadline in the future.
+    let remaining = min(budget, max(.zero, budget - elapsed))
+    logger.info(
+      "boot deadline re-armed",
+      metadata: .context(profile: fresh.profileId, instance: id, host: hostId).merging([
+        "remaining_ms": .stringConvertible(DurationValue(remaining).milliseconds),
+      ]) { $1 })
+    watchBoot(fresh, deadline: ContinuousClock.now + remaining)
+  }
+
+  /// Polls the row out of `startingVM`: a boot that lands, a teardown, an interruption and a
+  /// restart all end the watch silently, and only the deadline itself synthesizes a failure.
+  private func awaitVMRunning(
+    _ record: InstanceRecord, deadline: ContinuousClock.Instant
+  ) async {
+    let id = record.id
+    var reportedRefusal = false
+    while !Task.isCancelled {
+      // The generation is what makes this watcher belong to *this* boot: a reusable row that was
+      // interrupted and respawned is back in `startingVM` on a budget of its own, and this one
+      // must not fail it.
+      guard let fresh = try? await require(id), fresh.state == .startingVM,
+            fresh.workerGeneration == record.workerGeneration else { break }
+      if ContinuousClock.now >= deadline {
+        if await failBootTimeout(
+          id, expecting: .startingVM, generation: record.workerGeneration,
+          stage: "the VM to report running") { break }
+        // The commit was refused. Either the race this is built to lose -- the row moved, or a
+        // restart claimed a new generation -- which the next poll sees and retires on, or a
+        // database fault, and a row that is still booting must stay bounded rather than have its
+        // deadline dropped on the floor. So the watch continues, and says so once.
+        if !reportedRefusal {
+          reportedRefusal = true
+          logger.warning(
+            "boot deadline expired but the instance could not be failed; still watching",
+            metadata: .context(instance: id))
+        }
+      }
+      do { try await Task.sleep(for: tuning.vmRunningPollInterval) } catch { break }
+    }
+    // Only a watch that ran to its own end clears the slot: a cancelled one may already have been
+    // replaced by a restart's, and removing the successor would leave that boot unbounded.
+    if !Task.isCancelled { bootWatchers.removeValue(forKey: id) }
+  }
+
+  /// Fails an instance whose `timeouts.vmBoot` window closed, and takes its worker down with it.
+  ///
+  /// Nothing is written before the compare-and-swap in `fail` lands: a `running` event that beat
+  /// the deadline by microseconds wins the row, and this must then leave no `failure.json`, no
+  /// failure metric and no shutdown of a worker whose guest is up. The worker only goes once the
+  /// row is `failed`, inside the same `teardown` bracket every stop takes -- it holds the instance
+  /// lock, the vsock bridge and the guest, and its disconnect is expected rather than a second
+  /// interruption. The directory stays: it is the only evidence of why the VM never booted.
+  @discardableResult
+  func failBootTimeout(
+    _ id: InstanceID, expecting state: InstanceState, generation: Int, stage: String,
+    workerPID: Int32? = nil
+  ) async -> Bool {
+    guard let fresh = try? await require(id), fresh.state == state,
+          fresh.workerGeneration == generation else { return false }
+    await afterBootTimeoutRead?()
+    // The reading above is handed to the compare-and-swap rather than re-read inside `fail`: every
+    // `await` between the two is a window a `running` event can land in, and `waitingForAgent ->
+    // failed` is a legal edge, so a re-read would happily fail a guest that had just come up.
+    guard await fail(
+      fresh, phase: state.rawValue, error: VMError.bootTimeout(stage: stage),
+      expecting: state, generation: generation, workerPID: workerPID)
+    else { return false }
+    teardown.insert(id)
+    defer { teardown.remove(id) }
+    let graceMs = await gracefulShutdownMs(for: fresh)
+    if await supervisor.liveness(id: id) == .connected {
+      try? await supervisor.shutdown(id: id, reason: .stop, gracefulTimeoutMs: graceMs)
+    }
+    // Not on a cancelled watcher: the wait exists only to hold this bracket over the worker's
+    // disconnect, and `waitForWorkerExit` polls through a `Task.sleep` that stops sleeping once
+    // cancelled -- it would spin its whole budget while the daemon is trying to shut down.
+    if !Task.isCancelled { _ = await waitForWorkerExit(id: id, graceMs: graceMs) }
+    return true
+  }
+
+  /// The profile's `timeouts.vmBoot`, or the documented default when the profile row or its decoded
+  /// config is gone (a VM outlives a profile the operator removed). Same lookup shape as
+  /// `gracefulShutdownMs(for:)` and `agentReadyTimeout`.
+  func vmBootTimeout(for record: InstanceRecord) async -> Duration {
+    guard let rows = try? await profiles.list(),
+          let row = rows.first(where: { $0.id == record.profileId }),
+          let config = try? row.decodedConfig()
+    else { return TimeoutPolicy.default.vmBoot.duration }
+    return config.effectiveTimeouts.vmBoot.duration
   }
 
   private func stage(
@@ -288,7 +454,9 @@ extension InstanceManager {
 
   func spawn(_ record: InstanceRecord, specPath: URL) async throws -> WorkerSession {
     do {
-      return try await supervisor.start(instance: record, specPath: specPath)
+      return try await supervisor.start(
+        instance: record, specPath: specPath,
+        gracefulShutdownMs: await gracefulShutdownMs(for: record))
     } catch {
       await fail(record, phase: "startingWorker", error: error)
       throw error

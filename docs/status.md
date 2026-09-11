@@ -1,4 +1,4 @@
-# Project status — 2026-08-28
+# Project status — 2026-09-02
 
 The single-page answer to "what does RunnerVM do today, how sure are we, and what is next".
 `TODO.md` is the task-level tracker; `CHANGELOG.md` lists what landed when; `docs/verification.md`
@@ -6,11 +6,15 @@ holds the evidence behind every "live" claim below.
 
 ## Next milestone
 
+`v0.2.0` released 2026-08-28 (tag, GitHub release, pkg/sha256/manifest assets) — built from
+`d742a1c`, whose Swift CI job was actually red (cooperative-pool thread starvation); the fix landed
+afterwards as `fad78a0` on `master` only. `v0.2.1` is a patch that carries `fad78a0` plus runnerd
+startup-failure classification/backoff and the missing-stdio-directory fix (see `CHANGELOG.md`).
 Distribution hardening (milestone D, contract in `docs/design/distribution.md`) is code-complete,
-including `runnerctl upgrade` (D10). Every piece of it is unit/integration-tested only: **nothing
-has been released, published, or run on real hardware yet.** The next milestone is that
-hardware/live matrix, not new code — see "Open verification". Tracked in `TODO.md` "D — Distribution
-hardening".
+including `runnerctl upgrade` (D10); every piece of it is unit/integration-tested, with the
+hardware/live matrix still open — see "Open verification". The next milestone is **v0.3.0**:
+hardening (Developer ID signing/notarization, timeout tuning, reaper fixes) and the macOS guest
+H3–H5 live runs. Tracked in `TODO.md` "D — Distribution hardening".
 
 ## What RunnerVM is
 
@@ -35,7 +39,7 @@ the host, pulled from an OCI registry, or imported from tart.
 | OCI push/pull of RunnerVM images (GHCR-compatible transport, resumable, LZ4 chunks) | done | live 2026-08-27: built image pushed to GHCR, deleted, pulled back by manifest digest, booted, ran a job |
 | Remote inspect without transferring the disk (`image inspect --remote`) | done | unit (FakeRegistry) + live 2026-08-28 against `ghcr.io/cirruslabs/{ubuntu,macos-tahoe-base}:latest`, anonymously |
 | Prefetch profile images at config apply / daemon start (`images.prefetch`) | done, opt-in | unit (FakeRegistry): pulls, is off by default, skips local names, survives an unresolvable reference, repeats for free |
-| Publishing prebuilt images (`scripts/publish-images.sh`, `docs/published-images.md`) | script + docs done | 51 shell assertions in CI; gate ladder dry-run against the four real local images. **Nothing published yet** — the push itself is unrun |
+| Publishing prebuilt images (`scripts/publish-images.sh`, `docs/published-images.md`) | script + docs done | 51 shell assertions in CI; gate ladder dry-run against the four real local images. **Nothing published on GHCR yet** — `runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable` does not work today |
 | **Tart image import** (`image pull ghcr.io/cirruslabs/…`, read-only, spec §58) | done | live: `ghcr.io/cirruslabs/ubuntu:latest` imported; refusal paths verified |
 | **In-daemon image builder** (`runnerctl image build`, Runnerfile recipes) | done | live 2026-08-27: built image ran a real GitHub job (`scripts/live-builder-e2e.sh` 5/5) |
 | Shipped recipes: `ubuntu-24-minimal`, `ubuntu-24`, `-node -python -go -jvm -rust -dotnet` | done | minimal + ubuntu-24 built live; language variants parse/plan-tested only |
@@ -48,14 +52,14 @@ the host, pulled from an OCI registry, or imported from tart.
 | Repo rename, Apache-2.0 `LICENSE`, `RunnerVMVersion.current` version source of truth | done | `runnerctl --version` offline; unit/integration tests; live verification pending |
 | Socket auto-discovery (flag > `RUNNERVM_SOCKET`/`STATE_DIR`/`RUNTIME_DIR` > production-if-exists > dev), root-uid RPC | done | unit/integration tests; live verification pending |
 | `doctor` service-mode detection, `skip` status, login-keychain skip under LaunchDaemon, FileVault + reboot-persistence checks | done | unit/integration tests; live verification pending |
-| Prebuilt pkg (`scripts/build-package.sh`) + tag-gated `release.yml` + curl bootstrap installer | done | unit/integration tests (`scripts/tests/`); **nothing released yet** — no tag pushed, no GitHub release exists |
+| Prebuilt pkg (`scripts/build-package.sh`) + tag-gated `release.yml` + curl bootstrap installer | released v0.2.0; unsigned | unit/integration tests (`scripts/tests/`); **`v0.2.0` released 2026-08-28** (`RunnerVM-macos-arm64.pkg`, `.sha256`, `release-manifest.json`, `install.sh`), built from `d742a1c`; `v0.2.1` patch adds runnerd startup-failure handling. Signing planned for v0.3.0 |
 | `runnerctl setup` wizard (dscl-only `_runnervm` account, daemon/agent mode, PAT no-echo, profiles-after-images, `rvm-<host6>-*` names) | done | unit/integration tests; live verification pending |
 | Maintenance instances (`vm create --pinned --ttl`), `runnerctl system smoke-test` | done | unit/integration tests, incl. the fixed `qualify-macos-image.sh` (H2); live verification pending |
 | Automatic image updates (`images.updates`, `runnerctl image update check\|run\|status`) | done, opt-in | unit/integration tests; live verification pending |
 | Native managed macOS provisioning (`images.managed`, `kind: macos-tart`, no Tart binary on host) | done | unit/integration tests; live verification pending — see `docs/macos-guests.md` |
 | Per-VM macOS CI keychain (Go guest agent, `RUNNERVM_CI_KEYCHAIN`, `agent.selfTest`) | done | unit/integration tests (`Proto/guest_agent.md`); real-workflow e2e (`.github/workflows/e2e.yml` `keychain` job) not yet run on hardware |
 | `runnerctl upgrade` (D10: `--check`/`--version`, drain, backup, doctor, rollback-if-schema-unchanged) | done | unit/integration tests; landed very close to this entry, not yet exercised on real hardware |
-| `publish-images.yml` (self-hosted, monthly) | script + docs done | same caveat as the manual publisher below — **first publish unrun** |
+| `publish-images.yml` (self-hosted, dispatch only — cron removed until a publisher host exists) | script + docs done | same caveat as the manual publisher below — **first publish unrun** |
 
 Test suite: 1665+ Swift tests (`swift test`), Go guest-agent tests (`go test -race`), install-script tests, qualify-host tests, `scripts/tests/*` bash suites — all green. Exact current counts: `swift test --parallel 2>&1 | tail -5`.
 
@@ -145,6 +149,13 @@ doctor`'s `Login keychain` check is a false negative on that host. This is one h
 version, so it does not by itself qualify the LaunchDaemon variant — the reboot loop below is
 still unrun — but it removes the reason to prefer the LaunchAgent path by default.
 
+The Mac mini this deployment ran on is being decommissioned (2026-09). Its LaunchDaemon failure
+there was a missing stdio directory: `install.sh` did not create `<state>/logs/runnerd` (the
+directory launchd writes runnerd's stdio to), so launchd could not spawn runnerd at all — observed
+as 70,547 spawn failures reported as exit 78. Fixed in v0.2.1: `install.sh` now creates
+`<state>/logs/runnerd`, and `doctor` reports launchd `runs`/`last exit code` plus a missing stdio
+directory.
+
 Two things bite on a multi-host or multi-account Mac and are not enforced anywhere:
 
 - **Profile names must be unique per scope across hosts.** Two daemons pointing at one repository
@@ -178,9 +189,10 @@ Two things bite on a multi-host or multi-account Mac and are not enforced anywhe
      `keychain` job) rather than `agent.selfTest` alone;
    - the first `ubuntu-24-base` publish to GHCR (`publish-images.yml` or the manual command in
      `docs/published-images.md`) — package visibility and repo-connection are one-time operator
-     steps that have not been done;
-   - the first tagged GitHub release (`v0.2.0`) — no tag is pushed and no release exists yet, so
-     the curl one-liner above has nothing to download.
+     steps that have not been done, so `runnerctl image pull ghcr.io/andrejvysny/runnervm/ubuntu-24-base:stable`
+     does not work today.
+
+`v0.2.0` is tagged and released (2026-08-28); the curl one-liner resolves against it.
 
 ## Developer quick start
 

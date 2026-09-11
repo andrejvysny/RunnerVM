@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
 )
 
 // stubKeychain stands in for the macOS preparer so the ordering and

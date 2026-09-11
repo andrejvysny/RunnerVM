@@ -18,9 +18,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/runnervm/guest-agent/internal/agent"
-	"github.com/runnervm/guest-agent/internal/rpc"
-	"github.com/runnervm/guest-agent/internal/vsock"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/agent"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/vsock"
 )
 
 // version is stamped at build time with

@@ -179,4 +179,39 @@ struct GitHubAppAuthTests {
     try #expect(try await provider.credential().token == "first")
     try #expect(try await provider.credential().token == "second")
   }
+
+  /// D6 end to end: GitHub revokes an installation early, so a token that is still nowhere near
+  /// its expiry starts answering 401. The client drops it and the provider mints a new one.
+  @Test func revokedInstallationTokenIsReMintedAfterA401() async throws {
+    let server = FakeGitHubServer()
+    defer { server.shutdown() }
+    let mint = "/app/installations/9/access_tokens"
+    server.stub(
+      .post, mint,
+      .json("{\"token\":\"revoked\",\"expires_at\":\"2023-11-15T22:13:20Z\"}", status: 201),
+      .json("{\"token\":\"fresh\",\"expires_at\":\"2023-11-15T22:13:20Z\"}", status: 201)
+    )
+    server.stub(
+      .get, "/user", .error(401, message: "Bad credentials"), .json("{\"login\":\"octocat\"}")
+    )
+
+    let key = try Self.makeKey()
+    let provider = try GitHubAppCredentialProvider(
+      appID: "1", installationID: 9, privateKeyPEM: Self.pem(key.pkcs1, label: "RSA PRIVATE KEY"),
+      baseURL: server.baseURL, session: server.makeSession(), now: { Fixture.now }
+    )
+    let client = GitHubHTTPClient(
+      baseURL: server.baseURL, credentials: provider, session: server.makeSession(),
+      options: GitHubHTTPClient.Options(retryPolicy: Fixture.policy),
+      sleep: { _ in }, random: { _ in 1.0 }, now: { Fixture.now }
+    )
+
+    try #expect(try await GitHubRunnersAPI(client: client).whoAmI() == "octocat")
+
+    #expect(server.requests(.post, mint).count == 2)
+    let calls = server.requests(.get, "/user")
+    #expect(calls.count == 2)
+    #expect(calls.first?.header("Authorization") == "Bearer revoked")
+    #expect(calls.last?.header("Authorization") == "Bearer fresh")
+  }
 }

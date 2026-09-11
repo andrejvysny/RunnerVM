@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/system"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/system"
 )
 
 // commandTimeout bounds each external tool; growpart and resize2fs are

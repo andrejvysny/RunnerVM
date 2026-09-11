@@ -121,11 +121,19 @@ public struct TimeoutPolicy: Codable, Sendable, Hashable {
   public var cleanup: DurationValue
 
   public init(
-    imagePull: DurationValue = .minutes(30),
+    // 60 min, not 30: a real image is ~2.9 GiB compressed and hashes ~16 GiB of content on the way
+    // in, and `images.prefetch` is off by default -- so the first `vm create` after a profile
+    // change pays for the whole transfer inside its own deadline, on whatever link the host has.
+    imagePull: DurationValue = .minutes(60),
     clone: DurationValue = .minutes(10),
     vmBoot: DurationValue = .minutes(3),
     agentReady: DurationValue = .minutes(2),
-    jitGeneration: DurationValue = .seconds(30),
+    // 2 min, not 30 s: one JIT call can mint a credential and still ride out a few 429/503
+    // retries, which 30 s does not cover. It deliberately does NOT cover the whole
+    // `RetryPolicy.github` ladder (~168 s of backoff per send, doubled when a 401 forces a second
+    // one, plus the mint) -- giving up before that is the intent, and the scheduler's hold-down,
+    // not this budget, decides how soon the registration is attempted again.
+    jitGeneration: DurationValue = .minutes(2),
     runnerOnline: DurationValue = .minutes(2),
     jobMaxRuntime: DurationValue = .hours(6),
     gracefulShutdown: DurationValue = .seconds(30),

@@ -128,6 +128,88 @@ import Testing
     }
   }
 
+  /// Spec §73: `timeouts.jitGeneration` bounds `generate-jitconfig` on the REST path too. GitHub
+  /// here is reachable and simply never answers, which is the shape that used to park `register` --
+  /// and the VM it had already claimed -- until the daemon restarted.
+  ///
+  /// The wall-clock assertion is load-bearing: it fails if the deadline expires but the request
+  /// underneath is not actually cancellable, which is a bug no row can show.
+  @Test func aJITRequestThatOutlastsItsDeadlineFailsTheSessionAndFreesTheVM() async throws {
+    try await withHarness(
+      configuration: M2Harness.configuration(jitGeneration: .milliseconds(50))
+    ) { harness in
+      harness.stubGitHub()
+      harness.github.stub(
+        .post, M2Harness.jitPath,
+        .json("""
+          {"runner":{"id":\(M2Harness.runnerID),"name":"rvm-jit-runner","os":"linux",\
+          "status":"offline","busy":false,"labels":[]},\
+          "encoded_jit_config":"\(M2Harness.jitSecret)"}
+          """, delay: .seconds(10)))
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+
+      let started = ContinuousClock.now
+      do {
+        _ = try await harness.runners.startSession(instanceId: instance.id)
+        Issue.record("a generate-jitconfig that never answers must not produce a session")
+      } catch let error as GitHubControlError {
+        #expect(error.code == "GITHUB_JIT_GENERATION_TIMEOUT")
+      }
+      let elapsed = started.duration(to: .now)
+      // Loose on purpose: under a saturated `--parallel` run the cooperative pool can take seconds
+      // to run the cancellation, and the point is only that the 10 s stall was not waited out.
+      #expect(elapsed < .seconds(6), "the JIT deadline returned after \(elapsed)")
+
+      let session = try #require(try await harness.runners.list().first)
+      #expect(session.state == .jitFailed)
+      #expect(session.failureCode == "GITHUB_JIT_GENERATION_TIMEOUT")
+      // Nothing was registered: the POST was cancelled and the name lookup that follows finds no
+      // stray runner either, so there is nothing to remove.
+      #expect(session.githubRunnerId == nil)
+      #expect(harness.github.requests(.delete, M2Harness.runnerPath).isEmpty)
+      // Not retained: a GitHub that is merely slow is no evidence about this guest, so its capacity
+      // comes back now rather than after `failedInstanceRetention`.
+      try await harness.awaitInstance(instance.id, state: .deleted)
+      await agent.stop()
+    }
+  }
+
+  /// The one failure path with no row, metric or event behind it: the deadline expired, the JIT
+  /// call published nothing, and the name lookup -- made against the same GitHub that had just
+  /// stopped answering -- also came back empty. "Not found" is not "does not exist" there, so the
+  /// operator has to be told a registration may be orphaned.
+  @Test func aTimeoutThatCannotFindAnyRegistrationSaysSoInTheLog() async throws {
+    try await withHarness(
+      configuration: M2Harness.configuration(jitGeneration: .milliseconds(50))
+    ) { harness in
+      harness.stubGitHub()
+      harness.github.stub(
+        .post, M2Harness.jitPath, .json("{}", delay: .seconds(10)))
+      try await harness.markScopeHealthy()
+      let (instance, agent) = try await harness.idleInstance()
+      let sink = LogSink()
+      let runners = await harness.restartedRunners(logger: sink.logger())
+
+      await #expect(throws: (any Error).self) {
+        _ = try await runners.startSession(instanceId: instance.id)
+      }
+
+      let session = try #require(try await harness.runners.list().first)
+      #expect(session.state == .jitFailed)
+      #expect(session.failureCode == "GITHUB_JIT_GENERATION_TIMEOUT")
+      #expect(session.githubRunnerId == nil)
+      // Nothing on GitHub was touched -- there was no id to touch -- so the log line is the whole
+      // report, and it has to name the runner and the scope an operator would search for.
+      #expect(harness.github.requests(.delete, M2Harness.runnerPath).isEmpty)
+      // `repository:acme` rather than the full scope: the JSON handler escapes the `/`.
+      let warnings = sink.warnings("orphaned", instance.name, "repository:acme")
+      #expect(warnings.count == 1, "logged: \(sink.all)")
+      #expect(warnings.first?.contains("runnerctl runner list") == true)
+      await agent.stop()
+    }
+  }
+
   /// The guest refused the spawn outright, so the registration GitHub just created is dead weight
   /// and has to go.
   @Test func aRefusedStartRunnerRemovesTheRunnerFromGitHub() async throws {

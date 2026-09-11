@@ -194,7 +194,11 @@ public actor ActionsScaleSetClient: ScaleSetControlPlane {
       query: [URLQueryItem(name: "agentName", value: name)], idempotent: true,
       as: ActionsWire.RunnerReferenceList.self, label: label
     )
-    let runners = list.value ?? []
+    // Re-filtered locally, like the REST path (`GitHubActionsControlPlane.findRunner`): `agentName`
+    // is the service's own filter, and nothing guarantees it stays an exact match rather than a
+    // prefix one. Recovery deletes whatever this returns, so a near-miss would drop the wrong
+    // runner.
+    let runners = (list.value ?? []).filter { $0.name == name }
     guard runners.count <= 1 else {
       throw GitHubControlError.invalidResponse(reason: "\(label): \(runners.count) runners named '\(name)'")
     }

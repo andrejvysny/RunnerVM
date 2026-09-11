@@ -99,6 +99,9 @@ public actor DaemonRuntime {
   private var runners: RunnerSessionManager?
   private var orchestrator: Orchestrator?
   private var builder: ImageBuilder?
+  /// Held only so `teardown` can join the delete retry it may have in flight; the reconcile loop
+  /// itself reaches it through the composite step.
+  private var instanceReconciler: InstanceReconciler?
   /// `system shutdown --force` cancels running image builds; a plain shutdown waits them out.
   private var shutdownForce = false
   private var reconcileTask: Task<Void, Never>?
@@ -238,6 +241,10 @@ public actor DaemonRuntime {
     runners = nil
     await instances?.detachGuests()
     instances = nil
+    // Before the worker connections go: this retry is a `delete` in flight, and it drives the
+    // supervisor it is about to lose.
+    await instanceReconciler?.stop()
+    instanceReconciler = nil
     await supervisor?.detachAll()
     supervisor = nil
     service = nil
@@ -403,11 +410,13 @@ public actor DaemonRuntime {
     // registered with them the moment it exists (spec §121).
     await instances.attachImageBuilds(builder)
     await orchestrator.attachImageBuilds(builder)
+    let instanceStep = InstanceReconciler(
+      instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
+      retention: { await instances.failedInstanceRetention() }, images: images)
+    instanceReconciler = instanceStep
     await reconciler.attach(
       CompositeReconcileStep([
-        InstanceReconciler(
-          instances: instanceRows, manager: instances, supervisor: supervisor, store: instanceStore,
-          retention: { await instances.failedInstanceRetention() }, images: images),
+        instanceStep,
         // Right after the instance sweep, and before the orchestrator plans: a pinned VM whose ttl
         // has passed is capacity this pass should already see as free.
         MaintenanceInstanceReaper(
@@ -430,6 +439,7 @@ public actor DaemonRuntime {
       reconciler: reconciler,
       parseConfig: parseConfig,
       probe: probe,
+      vmworkerExecutable: executable,
       startedAt: Date(),
       actorName: options.actorName,
       diskPressure: diskPressure,

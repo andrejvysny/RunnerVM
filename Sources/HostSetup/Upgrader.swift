@@ -70,8 +70,13 @@ public struct Upgrader: Sendable {
     public var drainTimeout: Duration
     public var socketTimeout: Duration
     public var assumeYes: Bool
-    /// `RUNNERVM_ALLOW_UNSIGNED=1`. Suppresses the unsigned *prompt*, never the warning.
+    /// `RUNNERVM_ALLOW_UNSIGNED=1`. Suppresses the unsigned and not-notarized *prompts*, never
+    /// their warnings, and never the refusal of a package signed by another publisher.
     public var allowUnsigned: Bool
+    /// The publisher this host installs from, defaulting to the value compiled into the binary.
+    /// Injected for the same reason `hostArchitecture` is: the gate is a decision, and a decision
+    /// made from an injected fact is one a test can exercise. `runnerctl` never passes it.
+    public var expectedTeamID: String?
     /// Read once, here, rather than inside the manifest check: the platform gate is a decision
     /// about this host, and a decision made from injected facts is one a test can exercise.
     public var hostArchitecture: String
@@ -88,6 +93,7 @@ public struct Upgrader: Sendable {
       socketTimeout: Duration = .seconds(60),
       assumeYes: Bool = false,
       allowUnsigned: Bool = false,
+      expectedTeamID: String? = RunnerVMSigning.expectedTeamID,
       hostArchitecture: String = ReleaseManifest.hostArchitecture,
       hostMacOSMajor: Int = ReleaseManifest.hostMacOSMajor
     ) {
@@ -103,6 +109,7 @@ public struct Upgrader: Sendable {
       self.socketTimeout = socketTimeout
       self.assumeYes = assumeYes
       self.allowUnsigned = allowUnsigned
+      self.expectedTeamID = expectedTeamID
     }
 
     public var source: ReleaseSource {
@@ -111,7 +118,15 @@ public struct Upgrader: Sendable {
   }
 
   static let curl = "/usr/bin/curl"
+  /// A release package is tens of megabytes over whatever link the host has, and `installer`
+  /// unpacks it and runs a postinstall script -- neither fits `DefaultCommandRunner`'s
+  /// "a host tool answers in under a minute" default.
+  static let transferTimeout: Duration = .seconds(900)
   static let shasum = "/usr/bin/shasum"
+  /// The two tools the publisher gate reads. Both ship with macOS; `pkgutil` reports the
+  /// certificate chain and the stapled notary ticket, `spctl` reports what Gatekeeper makes of it.
+  static let pkgutil = "/usr/sbin/pkgutil"
+  static let spctl = "/usr/sbin/spctl"
   static let sqlite3 = "/usr/bin/sqlite3"
   static let installer = "/usr/sbin/installer"
   static let launchctl = "/bin/launchctl"
@@ -182,9 +197,13 @@ public struct Upgrader: Sendable {
 
     guard let (manifest, manifestText) = await manifestStep(&report) else { return finish(report) }
     guard await downloadStep(manifest, manifestText: manifestText, report: &report),
-          await checksumStep(manifest, report: &report),
-          await rollbackMaterialStep(report: &report),
-          confirmStep(manifest, report: &report),
+          await checksumStep(manifest, report: &report)
+    else { return finish(report) }
+    // Who signed the bytes, read before the rollback question and long before the drain: a
+    // package this host will refuse must leave it exactly as it was.
+    let signature = await signatureStep(manifest, report: &report)
+    guard await rollbackMaterialStep(report: &report),
+          confirmStep(manifest, signature: signature, report: &report),
           await backupStep(manifest, report: &report),
           await drainStep(report: &report),
           await stopStep(report: &report),
@@ -239,7 +258,7 @@ public struct Upgrader: Sendable {
       deps.io.say("downloading \(manifest.package) \(manifest.version) …")
       try await deps.runner.runChecked([
         Self.curl, "-fsSL", options.source.assetURL(manifest.package), "-o", package,
-      ])
+      ], timeout: Self.transferTimeout)
       try await deps.runner.runChecked([
         Self.curl, "-fsSL", options.source.assetURL("\(manifest.package).sha256"), "-o",
         "\(package).sha256",
@@ -335,23 +354,93 @@ public struct Upgrader: Sendable {
     return manifest.package
   }
 
-  /// The unsigned warning and the last chance to stop, both before anything is drained.
-  private func confirmStep(_ manifest: ReleaseManifest, report: inout UpgradeReport) -> Bool {
+  /// Reads the downloaded package's own signature, before the host is touched.
+  ///
+  /// Separate from the checksum on purpose: a checksum proves the bytes match the manifest, which
+  /// anyone who can edit the release can arrange. This is the step that answers *who built them*.
+  /// It only gathers and reports -- `confirmStep` decides -- so that the evidence appears in the
+  /// ladder even for the runs that are then accepted with a warning.
+  private func signatureStep(
+    _ manifest: ReleaseManifest, report: inout UpgradeReport
+  ) async -> PackageSignature {
+    let package = report.packagePath ?? "\(cacheDir(manifest.version))/\(manifest.package)"
+    let (signature, assessmentsEnabled) = await verifySignature(of: package)
+    var detail = signature.summary
+    if !assessmentsEnabled {
+      detail += "; notarization unverified on this host"
+      printAssessmentsDisabledWarning(manifest)
+    }
+    report.record(UpgradeReport.Name.signature, true, detail)
+    reportManifestOverstatement(manifest, signature: signature)
+    return signature
+  }
+
+  /// Runs the two tools and hands their output to the pure parser.
+  ///
+  /// Neither exit code is evidence, so neither is checked: `pkgutil` exits 1 for an unsigned
+  /// package and `spctl` exits 3 for a rejected one, and both of those are answers. Both streams
+  /// are merged because `spctl` writes its assessment to stderr. A tool that cannot be run at all
+  /// leaves no evidence, which reads as unsigned -- a warning and a confirmation, never a lockout.
+  func verifySignature(
+    of package: String
+  ) async -> (signature: PackageSignature, assessmentsEnabled: Bool) {
+    let checked = await output(of: [Self.pkgutil, "--check-signature", package])
+    let assessmentsEnabled = await output(of: [Self.spctl, "--status"])
+      .contains("assessments enabled")
+    // Asking a disabled Gatekeeper for an assessment answers for a policy that is not running.
+    let assessed = assessmentsEnabled
+      ? await output(of: [Self.spctl, "--assess", "-t", "install", "-vv", package])
+      : nil
+    return (
+      PackageSignature.parse(
+        pkgutil: checked, spctl: assessed, spctlAssessmentsEnabled: assessmentsEnabled),
+      assessmentsEnabled)
+  }
+
+  /// stdout and stderr together, empty when the tool could not be run at all.
+  private func output(of argv: [String]) async -> String {
+    guard let result = try? await deps.runner.run(argv) else { return "" }
+    return result.stdout + "\n" + result.stderr
+  }
+
+  /// The signing warnings, the one refusal that has no override, and the last chance to stop --
+  /// all before anything is drained.
+  ///
+  /// Every branch reads the *verified* signature. `manifest.signed` is a claim that ships with the
+  /// package; it decides nothing here.
+  private func confirmStep(
+    _ manifest: ReleaseManifest, signature: PackageSignature, report: inout UpgradeReport
+  ) -> Bool {
     var accepted: [String] = []
-    if !manifest.signed {
-      printUnsignedWarning(manifest)
-      if options.allowUnsigned || options.assumeYes {
-        accepted.append("unsigned package accepted")
-        deps.io.say(options.allowUnsigned
-          ? "RUNNERVM_ALLOW_UNSIGNED=1: continuing without a prompt."
-          : "--yes: continuing without a prompt.")
-      } else if deps.io.confirm("Install this unsigned package?", default: false) {
-        accepted.append("unsigned package confirmed")
-      } else {
-        report.record(UpgradeReport.Name.confirmation, false, "declined: unsigned package")
-        deps.io.say("Nothing was installed; this host is exactly as it was.")
+    switch signature {
+    case let .developerID(team, notarized):
+      guard !signature.isForeign(to: options.expectedTeamID) else {
+        let error = UpgradeError.signatureRejected(
+          found: team, expected: options.expectedTeamID ?? "")
+        printRejection(manifest, error: error)
+        report.record(UpgradeReport.Name.confirmation, false, Self.describe(error))
         return false
       }
+      if options.expectedTeamID == nil {
+        deps.io.say("This build of RunnerVM does not pin a publisher team, so \(manifest.package) "
+          + "is accepted on its notarization alone (it is signed by \(team)).")
+        accepted.append("publisher team not pinned in this build")
+      }
+      if notarized {
+        accepted.append("notarized Developer ID \(team)")
+      } else {
+        printUnnotarizedWarning(manifest, team: team)
+        guard accept(
+          "Install this package that macOS could not confirm is notarized?",
+          reason: "package not notarized", into: &accepted, report: &report)
+        else { return false }
+      }
+    case .unsigned:
+      printUnsignedWarning(manifest)
+      guard accept(
+        "Install this unsigned package?", reason: "unsigned package", into: &accepted,
+        report: &report)
+      else { return false }
     }
     let prompt = "Drain this host and install \(manifest.version)?"
     guard confirm(prompt, default: false) else {
@@ -364,17 +453,95 @@ public struct Upgrader: Sendable {
     return true
   }
 
+  /// The shared shape of the two soft refusals: a package with no signature at all, and one signed
+  /// by the expected publisher that macOS could not confirm is notarized. Both are warned about
+  /// every time and both remain installable -- `RUNNERVM_ALLOW_UNSIGNED` and `--yes` skip the
+  /// prompt, never the warning -- because refusing them outright locks an operator out of their
+  /// own dev build, and out of every host whose Gatekeeper is switched off.
+  private func accept(
+    _ prompt: String, reason: String, into accepted: inout [String], report: inout UpgradeReport
+  ) -> Bool {
+    if options.allowUnsigned || options.assumeYes {
+      accepted.append("\(reason) accepted")
+      deps.io.say(options.allowUnsigned
+        ? "RUNNERVM_ALLOW_UNSIGNED=1: continuing without a prompt."
+        : "--yes: continuing without a prompt.")
+      return true
+    }
+    guard deps.io.confirm(prompt, default: false) else {
+      report.record(UpgradeReport.Name.confirmation, false, "declined: \(reason)")
+      deps.io.say("Nothing was installed; this host is exactly as it was.")
+      return false
+    }
+    accepted.append("\(reason) confirmed")
+    return true
+  }
+
   private func printUnsignedWarning(_ manifest: ReleaseManifest) {
     let io = deps.io
     io.heading("WARNING: RunnerVM \(manifest.version) is UNSIGNED")
-    io.say("This package is not signed with an Apple Developer ID and is not notarized.")
+    io.say("This package carries no Apple Developer ID signature: pkgutil found no certificate")
+    io.say("chain in it at all.")
     io.say("")
     io.say("Its sha256 (\(manifest.sha256)) has been verified against")
     io.say("release-manifest.json. That protects the download against corruption and tampering")
     io.say("in transit only; it does not prove who built the package, because anyone who can")
-    io.say("edit the release can regenerate a matching checksum. Verifying publisher identity")
-    io.say("requires code signing, which this phase does not yet provide.")
+    io.say("edit the release can regenerate a matching checksum.")
     io.say("")
+  }
+
+  private func printUnnotarizedWarning(_ manifest: ReleaseManifest, team: String) {
+    let io = deps.io
+    io.heading("WARNING: RunnerVM \(manifest.version) is NOT NOTARIZED")
+    io.say("The package is signed by Apple Team \(team), which is the publisher this build")
+    io.say("expects, but macOS could not confirm that Apple's notary service has seen it.")
+    io.say("")
+    io.say("A notarized package is one Apple has scanned and can revoke after the fact; this one")
+    io.say("carries a signature and nothing else.")
+    io.say("")
+  }
+
+  /// The only refusal in an upgrade with no override. It asks nothing: a package signed by a
+  /// publisher this build does not expect is not a warning an operator can accept, because
+  /// accepting it is exactly the mistake the pin exists to prevent.
+  private func printRejection(_ manifest: ReleaseManifest, error: UpgradeError) {
+    let io = deps.io
+    io.heading("REFUSED: \(manifest.package) was signed by another publisher")
+    io.say(error.message)
+    io.say("")
+    io.say("There is no flag and no environment variable that installs it: RUNNERVM_ALLOW_UNSIGNED")
+    io.say("covers a missing signature, not a signature belonging to somebody else. Check where")
+    io.say("this package came from (RUNNERVM_PKG_URL, a mirror, a proxy) before doing anything")
+    io.say("with it.")
+    io.say("")
+  }
+
+  private func printAssessmentsDisabledWarning(_ manifest: ReleaseManifest) {
+    let io = deps.io
+    io.say("")
+    io.say("NOTARIZATION UNVERIFIED ON THIS HOST: Gatekeeper assessments are disabled")
+    io.say("(`spctl --status`), so macOS cannot be asked whether \(manifest.package) is")
+    io.say("notarized. What is still readable is the notary ticket stapled into the package")
+    io.say("itself, and that is what the decision below rests on.")
+    io.say("")
+  }
+
+  /// A release whose manifest claims more than this host could verify. Reported, never acted on:
+  /// the manifest is not evidence, so a mismatch means the release is mislabelled or its manifest
+  /// was edited -- and either way the decision below still rests on what the tools said.
+  private func reportManifestOverstatement(
+    _ manifest: ReleaseManifest, signature: PackageSignature
+  ) {
+    if let team = signature.team, !manifest.teamId.isEmpty, manifest.teamId != team {
+      deps.io.say("release-manifest.json names team \(manifest.teamId); the package is signed by "
+        + "\(team). The signature is what counts.")
+    }
+    var overstated: [String] = []
+    if manifest.signed, signature.team == nil { overstated.append("signed") }
+    if manifest.notarized, !signature.isNotarized { overstated.append("notarized") }
+    guard !overstated.isEmpty else { return }
+    deps.io.say("release-manifest.json claims this package is "
+      + "\(overstated.joined(separator: " and ")); this host verified: \(signature.summary).")
   }
 
   // MARK: - Steps that change the host
@@ -476,7 +643,8 @@ public struct Upgrader: Sendable {
       return false
     }
     do {
-      try await deps.runner.runChecked([Self.installer, "-pkg", package, "-target", "/"])
+      try await deps.runner.runChecked(
+        [Self.installer, "-pkg", package, "-target", "/"], timeout: Self.transferTimeout)
       report.installed = true
       report.record(
         UpgradeReport.Name.installPackage, true, "\(manifest.package) \(manifest.version)")

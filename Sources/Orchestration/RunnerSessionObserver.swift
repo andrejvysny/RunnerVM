@@ -150,7 +150,8 @@ extension RunnerSessionManager {
     _ session: RunnerSessionRecord, code: String, context: SessionContext
   ) async {
     _ = try? await instances.stopRunner(
-      id: session.instanceId, sessionId: session.id.rawValue, graceMs: tuning.stopGraceMs)
+      id: session.instanceId, sessionId: session.id.rawValue,
+      graceMs: context.profile.effectiveTimeouts.gracefulShutdown.milliseconds)
     await finish(
       session, to: .timedOut, failureCode: code, result: "timed-out", context: context)
   }

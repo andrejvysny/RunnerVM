@@ -8,6 +8,7 @@ import Testing
 /// and URL resolution. `scripts/bootstrap.sh` parses the same document with `jq`, so the shapes
 /// these tests pin are a two-implementation contract, not an internal detail.
 @Suite struct ReleaseManifestTests {
+  /// The nine-key document `scripts/build-package.sh` writes for an unsigned (dev) build.
   static let full = """
     {
       "version": "0.3.0",
@@ -16,6 +17,23 @@ import Testing
       "package": "RunnerVM-macos-arm64.pkg",
       "sha256": "abc123",
       "signed": false,
+      "teamId": "",
+      "notarized": false,
+      "license": "Apache-2.0"
+    }
+    """
+
+  /// The same document for a release built with the Developer ID certificates.
+  static let signedFull = """
+    {
+      "version": "0.3.0",
+      "architecture": "arm64",
+      "minimumMacOS": "15.0",
+      "package": "RunnerVM-macos-arm64.pkg",
+      "sha256": "abc123",
+      "signed": true,
+      "teamId": "A1B2C3D4E5",
+      "notarized": true,
       "license": "Apache-2.0"
     }
     """
@@ -31,7 +49,17 @@ import Testing
     #expect(manifest.package == "RunnerVM-macos-arm64.pkg")
     #expect(manifest.sha256 == "abc123")
     #expect(manifest.signed == false)
+    #expect(manifest.teamId == "")
+    #expect(manifest.notarized == false)
     #expect(manifest.license == "Apache-2.0")
+  }
+
+  @Test func decodesTheSigningKeysOfASignedRelease() throws {
+    let manifest = try ReleaseManifest.decode(Self.signedFull)
+
+    #expect(manifest.signed)
+    #expect(manifest.teamId == "A1B2C3D4E5")
+    #expect(manifest.notarized)
   }
 
   /// A release published before a key existed still has to install.
@@ -44,13 +72,79 @@ import Testing
     #expect(manifest.license == "Apache-2.0")
     // Unsigned is the safe default: it makes upgrade warn rather than silently skip the warning.
     #expect(manifest.signed == false)
+    // Same reasoning for the two signing keys added in v0.3.0: a release that predates them
+    // claims nothing, and `upgrade` verifies the package itself either way.
+    #expect(manifest.teamId == "")
+    #expect(manifest.notarized == false)
   }
 
   @Test func unknownKeysFromANewerReleaseAreIgnored() throws {
     let manifest = try ReleaseManifest.decode(
-      #"{"version":"0.9.0","package":"p.pkg","sha256":"ab","notarized":true}"#)
+      #"{"version":"0.9.0","package":"p.pkg","sha256":"ab","sbom":"p.pkg.spdx.json"}"#)
 
     #expect(manifest.version == "0.9.0")
+  }
+
+  /// The name is appended to a release URL, written into the cache directory and handed to
+  /// `installer`. `scripts/bootstrap.sh`'s `verify_pkg_name` refuses exactly these, and the two
+  /// installers have to refuse the same documents -- so this is checked at decode, before the
+  /// download, rather than wherever the string is first used.
+  @Test func aPackageNameThatIsNotAPlainPkgFileIsRefused() {
+    let refused = [
+      "../../etc/cron.d/evil.pkg",
+      "/tmp/evil.pkg",
+      "-o/tmp/evil.pkg",
+      "-rf.pkg",
+      "RunnerVM macos.pkg",
+      "RunnerVM;reboot.pkg",
+      "RunnerVM-macos-arm64.dmg",
+      "RunnerVM-macos-arm64.pkg.exe",
+      ".pkg",
+      "",
+    ]
+    for name in refused {
+      #expect(throws: UpgradeError.self, "\(name)") {
+        try ReleaseManifest.decode(
+          #"{"version":"0.3.0","package":"\#(name)","sha256":"ab"}"#)
+      }
+    }
+  }
+
+  @Test func aVersionThatIsNotAPlainSemverTokenIsRefused() {
+    for version in ["../0.3.0", "0.3.0/..", "0.3", "v0.3.0", "0.3.0-", "0.3.0-rc 1", "0.3.0\n", ""] {
+      #expect(throws: UpgradeError.self, "\(version)") {
+        try ReleaseManifest.decode(
+          #"{"version":"\#(version)","package":"RunnerVM-macos-arm64.pkg","sha256":"ab"}"#)
+      }
+    }
+    for version in ["0.3.0", "0.3.0-rc.1", "10.20.30-beta-2"] {
+      #expect(throws: Never.self, "\(version)") {
+        try ReleaseManifest.decode(
+          #"{"version":"\#(version)","package":"RunnerVM-macos-arm64.pkg","sha256":"ab"}"#)
+      }
+    }
+  }
+
+  /// `Character.isNumber` is true for every Unicode decimal digit, so a version in Arabic-Indic
+  /// digits would decode here and be refused by `bootstrap.sh`'s `*[!0-9]*` glob. The version
+  /// names the cache directory, so the two installers have to agree on what one may contain.
+  @Test func aVersionInNonASCIIDigitsIsRefusedLikeBashRefusesIt() throws {
+    for version in ["\u{0661}.\u{0662}.\u{0663}", "0.\u{0663}.0", "\u{FF11}.0.0"] {
+      #expect(throws: UpgradeError.self, "\(version)") {
+        try ReleaseManifest.decode(
+          #"{"version":"\#(version)","package":"p.pkg","sha256":"ab"}"#)
+      }
+    }
+    #expect(try ReleaseManifest.decode(
+      #"{"version":"0.3.0","package":"p.pkg","sha256":"ab"}"#).version == "0.3.0")
+  }
+
+  @Test func theNamesAReleaseActuallyUsesAreAccepted() throws {
+    for name in ["RunnerVM-macos-arm64.pkg", "r.pkg", "RunnerVM_0.3.0-rc.1.pkg"] {
+      let manifest = try ReleaseManifest.decode(
+        #"{"version":"0.3.0","package":"\#(name)","sha256":"ab"}"#)
+      #expect(manifest.package == name)
+    }
   }
 
   @Test func aManifestWithoutTheFieldsAnInstallerNeedsIsRefused() {
@@ -67,6 +161,17 @@ import Testing
 
     #expect(manifest.summary.contains("0.3.0"))
     #expect(manifest.summary.contains("unsigned"))
+  }
+
+  /// What `--check` prints under "manifest claims". It is a label on the release, which is why it
+  /// names the team the *manifest* states -- the gate compares the package's own signature.
+  @Test func theSigningClaimRepeatsTheManifestNotTheSignature() throws {
+    #expect(try ReleaseManifest.decode(Self.signedFull).signingClaim
+      == "signed+notarized (A1B2C3D4E5)")
+    #expect(try ReleaseManifest.decode(Self.full).signingClaim == "unsigned")
+    #expect(try ReleaseManifest.decode(
+      #"{"version":"0.3.0","package":"p.pkg","sha256":"ab","signed":true}"#).signingClaim
+      == "signed, not notarized (team not stated)")
   }
 
   // MARK: - Platform gate
@@ -141,6 +246,29 @@ import Testing
     #expect(!(base < base))
   }
 
+  /// The tag shape `docs/release.md` uses is `v0.3.0-rc.1`, so the tenth candidate is `rc.10` --
+  /// and a lexical comparison puts that *before* `rc.9`, which would make `upgrade --check` offer
+  /// an rc host the previous candidate as if it were newer.
+  @Test func preReleaseSuffixesOrderNumericallyByDotSegment() throws {
+    func version(_ text: String) throws -> SemanticVersion {
+      try #require(SemanticVersion(tag: text))
+    }
+
+    #expect(try version("0.3.0-rc.9") < version("0.3.0-rc.10"))
+    #expect(!(try version("0.3.0-rc.10") < version("0.3.0-rc.9")))
+    #expect(try version("0.3.0-rc.2") < version("0.3.0-rc.10"))
+    #expect(try version("0.3.0-rc.10") < version("0.3.0"))
+    // Equal segments then a longer identifier: `rc` precedes `rc.1`.
+    #expect(try version("0.3.0-rc") < version("0.3.0-rc.1"))
+    // A non-numeric segment still compares as text, and the parts before the suffix still win.
+    #expect(try version("0.3.0-alpha.1") < version("0.3.0-rc.1"))
+    #expect(try version("0.3.0-rc.10") < version("0.3.1-rc.1"))
+    #expect(!(try version("0.3.0-rc.10") < version("0.3.0-rc.10")))
+    // A leading zero is not a semver number, so `rc.01` and `rc.1` stay two distinct suffixes
+    // with a stable order rather than comparing equivalent while being unequal.
+    #expect(try version("0.3.0-rc.01") < version("0.3.0-rc.1"))
+  }
+
   @Test func descriptionRoundTrips() throws {
     #expect(try #require(SemanticVersion(tag: "v0.3.0-rc1")).description == "0.3.0-rc1")
     #expect(try #require(SemanticVersion(tag: "0.2")).description == "0.2.0")
@@ -164,11 +292,18 @@ import Testing
     #expect(ReleaseSource.tagged("0.3.0").baseURL == ReleaseSource.tagged("v0.3.0").baseURL)
   }
 
-  @Test func resolvePrefersTheVersionThenTheOverrideThenLatest() {
+  /// The same precedence `scripts/bootstrap.sh` documents (`RUNNERVM_PKG_URL` >
+  /// `RUNNERVM_VERSION` > latest). Two installers that disagree about where a release comes from
+  /// only show it on the host that has both set, which is the worst place to find out.
+  @Test func resolvePrefersTheOverrideThenTheVersionThenLatest() {
     #expect(ReleaseSource.resolve(version: "v0.3.0", overrideURL: "file:///mirror").baseURL
+      == "file:///mirror/")
+    #expect(ReleaseSource.resolve(version: "v0.3.0", overrideURL: nil).baseURL
       == "https://github.com/andrejvysny/RunnerVM/releases/download/v0.3.0/")
     #expect(ReleaseSource.resolve(version: nil, overrideURL: "file:///mirror").baseURL
       == "file:///mirror/")
+    #expect(ReleaseSource.resolve(version: "v0.3.0", overrideURL: "").baseURL
+      == "https://github.com/andrejvysny/RunnerVM/releases/download/v0.3.0/")
     #expect(ReleaseSource.resolve(version: nil, overrideURL: nil).baseURL
       == ReleaseSource.latest().baseURL)
   }

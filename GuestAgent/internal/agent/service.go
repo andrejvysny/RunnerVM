@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/runnervm/guest-agent/internal/cleanup"
-	"github.com/runnervm/guest-agent/internal/keychain"
-	"github.com/runnervm/guest-agent/internal/metrics"
-	"github.com/runnervm/guest-agent/internal/rpc"
-	"github.com/runnervm/guest-agent/internal/runner"
-	"github.com/runnervm/guest-agent/internal/system"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/cleanup"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/metrics"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/rpc"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/runner"
+	"github.com/andrejvysny/RunnerVM/GuestAgent/internal/system"
 )
 
 // Guest protocol identity, per Proto/envelope.md.

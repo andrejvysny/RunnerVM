@@ -2,7 +2,7 @@
 
 package agent
 
-import "github.com/runnervm/guest-agent/internal/keychain"
+import "github.com/andrejvysny/RunnerVM/GuestAgent/internal/keychain"
 
 // platformCapabilities are the agent.hello capabilities a macOS guest adds
 // to the base list: "ciKeychain" for the per-VM signing keychain

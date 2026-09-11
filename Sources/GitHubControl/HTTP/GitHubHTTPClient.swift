@@ -19,6 +19,9 @@ public actor GitHubHTTPClient {
     /// A `Retry-After` longer than this is surfaced to the caller instead of being slept through:
     /// a scheduler can do something useful with an hour, a blocked task cannot.
     public var maxRetryAfter: Duration
+    /// A rejected credential is dropped and re-fetched at most this often, so a genuinely dead
+    /// credential cannot turn every request in the fleet into a token mint.
+    public var authRefreshInterval: Duration
     public var userAgent: String
     public var apiVersion: String
     /// Guards against a server that keeps advertising a next page.
@@ -27,12 +30,14 @@ public actor GitHubHTTPClient {
 
     public init(
       timeout: Duration = .seconds(30), retryPolicy: RetryPolicy = .github,
-      maxRetryAfter: Duration = .seconds(120), userAgent: String = "RunnerVM",
+      maxRetryAfter: Duration = .seconds(120), authRefreshInterval: Duration = .seconds(60),
+      userAgent: String = "RunnerVM",
       apiVersion: String = GitHubControlModule.apiVersion, maxPages: Int = 20, pageSize: Int = 100
     ) {
       self.timeout = timeout
       self.retryPolicy = retryPolicy
       self.maxRetryAfter = maxRetryAfter
+      self.authRefreshInterval = authRefreshInterval
       self.userAgent = userAgent
       self.apiVersion = apiVersion
       self.maxPages = maxPages
@@ -50,6 +55,8 @@ public actor GitHubHTTPClient {
   private let now: @Sendable () -> Date
   private let observer: (any GitHubRequestObserver)?
   private let decoder = JSONDecoder()
+  /// When the credential was last dropped after a 401; `nil` until the first one.
+  private var lastAuthRefresh: Date?
 
   public init(
     baseURL: URL = GitHubHTTPClient.defaultBaseURL,
@@ -75,7 +82,40 @@ public actor GitHubHTTPClient {
 
   // MARK: - Sending
 
+  /// A 401 means the credential was revoked or rotated — a retry with the same token is pointless,
+  /// but a retry with a fresh one usually succeeds (D6). Only for requests that are safe to repeat:
+  /// a `generate-jitconfig` that reached GitHub has already created a runner.
   public func send<T: Decodable & Sendable>(
+    _ request: GitHubRequest, as type: T.Type
+  ) async throws -> GitHubResponse<T> {
+    do {
+      return try await sendWithRetry(request, as: type)
+    } catch {
+      guard request.idempotent, (error as? GitHubControlError)?.errorClass == .authentication,
+            await invalidateOnce(request)
+      else { throw error }
+      return try await sendWithRetry(request, as: type)
+    }
+  }
+
+  /// Drops the cached credential, rate-limited by `Options.authRefreshInterval`.
+  /// - Returns: `true` when the credential was actually dropped and the request is worth repeating.
+  private func invalidateOnce(_ request: GitHubRequest) async -> Bool {
+    let instant = now()
+    if let lastAuthRefresh,
+       Duration.seconds(instant.timeIntervalSince(lastAuthRefresh)) < options.authRefreshInterval {
+      return false
+    }
+    lastAuthRefresh = instant
+    await credentials.invalidate()
+    logger.warning(
+      "GitHub rejected the credential; refreshing it and retrying once",
+      metadata: ["request": .string(request.logDescription)]
+    )
+    return true
+  }
+
+  private func sendWithRetry<T: Decodable & Sendable>(
     _ request: GitHubRequest, as type: T.Type
   ) async throws -> GitHubResponse<T> {
     // Explicitly `@Sendable`: `RetryPolicy.run` is nonisolated, so the closures leave the actor.
