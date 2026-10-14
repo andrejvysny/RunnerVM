@@ -17,6 +17,9 @@ jobs:
     name: Swift build + tests (Xcode 16.4 / Swift 6.1)
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      # See the Test steps below.
+      TIMING_SUITES: '\.(ProcessSpawnTests|RunProcessTests|CommandRunnerTests|HostProbeTests|GitHubFaultTests|StuckDeleteTests)/'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select Xcode
@@ -30,8 +33,13 @@ jobs:
         run: swift package resolve
       - name: Build (Swift 6 language mode, strict concurrency)
         run: swift build
+      # Suites that assert wall-clock bounds (kill ladders, deadlines, retry budgets) run apart and
+      # serialized: on the 3-vCPU runner, 1900 tests in parallel stretch every timer ~30 s, and
+      # those suites failed only on that oversubscription (2026-10-14, run 38634301495).
       - name: Test
-        run: swift test --parallel
+        run: swift test --parallel --skip "$TIMING_SUITES"
+      - name: Test (timing-sensitive suites, serialized)
+        run: swift test --no-parallel --filter "$TIMING_SUITES"
       - name: Build (release config)
         # The runnervm Homebrew formula runs exactly this; catch release-config-only breakage
         # (e.g. optimizer-only errors) before it silently breaks `brew install`.
