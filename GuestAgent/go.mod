@@ -1,10 +1,10 @@
 module github.com/andrejvysny/RunnerVM/GuestAgent
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/mdlayher/vsock v1.3.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
