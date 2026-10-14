@@ -79,7 +79,10 @@ final class SpawnControl: Sendable {
   func signalGroup(_ signal: Int32, timedOut: Bool = false) {
     state.withLock { current in
       guard case let .running(pgid) = current.phase else { return }
-      if timedOut { current.timedOut = true }
+      // The leader may have exited but not yet been reaped -- the wait thread is on its way to
+      // this lock. That is a run that finished in time, not a timeout. `pgid == pid` (see
+      // `Child.spawn`), and `WNOWAIT` leaves the zombie for `reap`.
+      if timedOut, !Self.hasExited(pid: pgid) { current.timedOut = true }
       kill(-pgid, signal)
     }
   }
@@ -101,6 +104,13 @@ final class SpawnControl: Sendable {
       current.exitCode = code
       return code
     }
+  }
+
+  private static func hasExited(pid: pid_t) -> Bool {
+    var info = siginfo_t()
+    let answered = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+    // `WNOHANG` with nothing to report answers 0 and leaves `si_pid` zero.
+    return answered == 0 && info.si_pid == pid
   }
 
   var snapshot: Snapshot {

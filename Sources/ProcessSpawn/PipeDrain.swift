@@ -112,12 +112,11 @@ enum PipeDrain {
       }
     }
 
-    // The deadline stops the *waiting*, never the reading. This thread can start minutes late --
-    // `DispatchQueue.global` grows its pool by roughly one thread per millisecond once every
-    // existing one is busy, and a loaded host (a `swift test --parallel` run, a build with many
-    // concurrent tools) routinely delays it past a short ceiling -- and a killed tool's last
-    // words are usually the only diagnostic it leaves. So whatever the pipes still hold is taken
-    // before the descriptors go: pipe contents outlive the writer, and this read cannot block.
+    // The deadline stops the *waiting*, never the reading. On a loaded host this thread can still
+    // be scheduled late relative to a short ceiling (it has its own thread -- `BlockingThread` --
+    // but not its own CPU), and a killed tool's last words are usually the only diagnostic it
+    // leaves. So whatever the pipes still hold is taken before the descriptors go: pipe contents
+    // outlive the writer, and this read cannot block.
     if !out.done { out.consume(&buffer, onOutput: onOutput) }
     if !err.done { err.consume(&buffer, onOutput: onOutput) }
     out.flush(onOutput: onOutput)

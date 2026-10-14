@@ -1,5 +1,4 @@
 import Darwin
-import Dispatch
 import Foundation
 import Synchronization
 
@@ -174,10 +173,10 @@ struct Child: Sendable {
 
   /// Drains the pipes and reaps the leader, then answers exactly once.
   ///
-  /// All three blocking steps run on Dispatch rather than in the calling task: `poll(2)`,
-  /// `read(2)` and `waitpid(2)` would each park a cooperative-pool thread for as long as the
-  /// helper runs, which starves every other task in the process (measured 2026-08-28 on CI's
-  /// 3-thread pool).
+  /// The blocking steps -- `poll(2)`/`read(2)` and `waitid(2)` -- each run on a dedicated thread
+  /// (`BlockingThread`), never in the calling task, where they would park a cooperative-pool
+  /// thread for as long as the helper runs (measured 2026-08-28 on CI's 3-thread pool), and never
+  /// on `DispatchQueue.global`, which started them ~40 s late under the same load (2026-09-11).
   func collect(
     request: SpawnRequest, control: SpawnControl, onOutput: (@Sendable (String) -> Void)?
   ) async -> SpawnResult {
@@ -185,29 +184,13 @@ struct Child: Sendable {
     // in which a detached pipe holder may still be read.
     let hardDeadline = ContinuousClock.now
       .advanced(by: request.timeout + request.killGrace + request.drainGrace)
-    let drained = Mutex(DrainOutcome(stdout: OutputCapture(limit: 0), stderr: OutputCapture(limit: 0)))
+    let join = CollectJoin()
     return await withCheckedContinuation { (continuation: CheckedContinuation<SpawnResult, Never>) in
-      let queue = DispatchQueue.global(qos: .utility)
-      let group = DispatchGroup()
-      queue.async(group: group) {
-        let outcome = PipeDrain.run(
-          stdout: stdoutRead, stderr: stderrRead, wake: wakeRead, stdinWrite: stdinWrite,
-          input: input, hardDeadline: hardDeadline, drainGrace: request.drainGrace,
-          captureLimit: request.captureLimit, control: control, onOutput: onOutput)
-        drained.withLock { $0 = outcome }
-      }
-      queue.async(group: group) {
-        Self.awaitExit(of: pid)
-        control.reap(pid: pid, at: .now)
-        // Wakes the drain loop so it shortens its deadline to `exit + drainGrace` instead of
-        // sitting on the hard one.
-        var byte: UInt8 = 1
-        _ = write(wakeWrite, &byte, 1)
-      }
-      group.notify(queue: queue) {
+      // Whichever thread finishes second answers; the wake pipe outlives both of them.
+      let finish: @Sendable (DrainOutcome?) -> Void = { arriving in
+        guard let outcome = join.arrive(arriving) else { return }
         close(wakeRead)
         close(wakeWrite)
-        let outcome = drained.withLock { $0 }
         let state = control.snapshot
         continuation.resume(
           returning: SpawnResult(
@@ -219,6 +202,22 @@ struct Child: Sendable {
             outputTruncated: outcome.stdout.truncated || outcome.stderr.truncated,
             pid: pid,
             pgid: pgid))
+      }
+      BlockingThread.start(name: "runnervm-spawn-drain") {
+        finish(
+          PipeDrain.run(
+            stdout: stdoutRead, stderr: stderrRead, wake: wakeRead, stdinWrite: stdinWrite,
+            input: input, hardDeadline: hardDeadline, drainGrace: request.drainGrace,
+            captureLimit: request.captureLimit, control: control, onOutput: onOutput))
+      }
+      BlockingThread.start(name: "runnervm-spawn-wait") {
+        Self.awaitExit(of: pid)
+        control.reap(pid: pid, at: .now)
+        // Wakes the drain loop so it shortens its deadline to `exit + drainGrace` instead of
+        // sitting on the hard one.
+        var byte: UInt8 = 1
+        _ = write(wakeWrite, &byte, 1)
+        finish(nil)
       }
     }
   }
@@ -268,5 +267,19 @@ struct Child: Sendable {
       write = movedWrite
     }
     return (read, write)
+  }
+}
+
+/// Joins `collect`'s two threads: only the second to arrive gets the drain's outcome back.
+final class CollectJoin: Sendable {
+  private let state = Mutex<(remaining: Int, drained: DrainOutcome?)>((2, nil))
+
+  /// The drain thread passes its outcome, the wait thread `nil`.
+  func arrive(_ outcome: DrainOutcome?) -> DrainOutcome? {
+    state.withLock { current in
+      if let outcome { current.drained = outcome }
+      current.remaining -= 1
+      return current.remaining == 0 ? current.drained : nil
+    }
   }
 }

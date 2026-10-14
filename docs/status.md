@@ -6,6 +6,12 @@ holds the evidence behind every "live" claim below.
 
 ## Next milestone
 
+**Update 2026-10-14:** the v0.3.0 hardening (Phases 0–4) landed as `bdcb166` (2026-09-11). Master
+CI was red from that commit on (subprocess tests starved on the GCD utility pool, see
+`CHANGELOG.md`); the fix landed 2026-10-14 and is verified locally (1906 Swift tests green, also
+under full CPU saturation) — CI confirmation pending. Open work is tracked in Plane (project
+RunnerVM); the rest of this page is the 2026-09-02 snapshot.
+
 `v0.2.0` released 2026-08-28 (tag, GitHub release, pkg/sha256/manifest assets) — built from
 `d742a1c`, whose Swift CI job was actually red (cooperative-pool thread starvation); the fix landed
 afterwards as `fad78a0` on `master` only. `v0.2.1` is a patch that carries `fad78a0` plus runnerd

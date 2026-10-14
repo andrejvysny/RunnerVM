@@ -1,6 +1,7 @@
 // Derived from openai/tart@16d186c Sources/tart/Credentials/DockerConfigCredentialsProvider.swift —
 // FSL-1.1-ALv2. See PROVENANCE.md.
 import Foundation
+import ProcessSpawn
 
 /// `~/.docker/config.json`: inline base64 `auths`, then `credHelpers`/`credsStore` resolved by
 /// running `docker-credential-<helper> get`.
@@ -43,7 +44,11 @@ public struct DockerConfigCredentials: RegistryCredentialProvider {
     let config = try JSONDecoder().decode(DockerConfig.self, from: Data(contentsOf: configURL))
     if let inline = config.inlineCredential(for: registry) { return inline }
     guard let helper = config.helper(for: registry) else { return nil }
-    let output = try runHelper(helper, registry)
+    // The helper blocks (pipe read, exit poll) for up to `helperTimeout`: off the cooperative pool.
+    let runHelper = self.runHelper
+    let output = try await BlockingThread.run(name: "runnervm-docker-credential") {
+      Result { try runHelper(helper, registry) }
+    }.get()
     guard !output.isEmpty else {
       throw HelperFailure(helper: helper, reason: "produced no output")
     }

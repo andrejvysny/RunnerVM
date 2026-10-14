@@ -42,7 +42,7 @@ let package = Package(
     .target(name: "WorkerProtocol", dependencies: ["RunnerCore", "RPC"]),
     .target(name: "GuestControl", dependencies: ["RunnerCore", "RPC"]),
     .target(name: "ImageStore", dependencies: ["RunnerCore", "RunnerLogging"]),
-    .target(name: "OCIRegistry", dependencies: ["RunnerCore", "RunnerLogging"]),
+    .target(name: "OCIRegistry", dependencies: ["RunnerCore", "RunnerLogging", "ProcessSpawn"]),
     // Runnerfile parser and planner: pure, no I/O.
     .target(name: "ImageBuild", dependencies: ["RunnerCore"]),
     .target(name: "GitHubControl", dependencies: ["RunnerCore", "RunnerLogging"]),

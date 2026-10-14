@@ -7,6 +7,13 @@ Dates are when the work landed on `master`; see `docs/verification.md` for what 
 Hardening from the pre-release review (`PLAN.md`). Everything here is unit/integration-tested;
 the hardware matrix runs before the tag.
 
+- `ProcessSpawn` drains pipes and waits for the child on dedicated threads (`BlockingThread`)
+  instead of `DispatchQueue.global(qos: .utility)`. On CI's 3-vCPU runner under
+  `swift test --parallel`, GCD admitted those blocks ~40 s late, so every subprocess call hit its
+  watchdog at once — master CI was red from 2026-09-11. A runnerd host under build load had the
+  same exposure. `PortProbe`, `TCPPortProbe` and the Docker credential helper moved off shared
+  pools the same way, and a leader that exited but was not yet reaped is no longer reported as
+  `timedOut` (2026-10-14).
 - The reconciler now reaps `failed`, `interrupted` and `stopped` instances of every lifecycle once
   `diagnostics.failedInstanceRetention` has passed — previously only ephemeral ones were reaped,
   so a reusable VM that was stopped or never reached `idle` held its cpu, memory, disk

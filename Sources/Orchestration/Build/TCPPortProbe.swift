@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import ProcessSpawn
 
 /// A plain POSIX TCP probe: does anything answer on `host:port`?
 ///
@@ -17,15 +18,12 @@ enum TCPPortProbe {
   /// True when something answers on `host:port` within `timeout` (a listener accepted the
   /// connection, or has not yet refused it); false once the connection is actively refused or
   /// nothing answers before the timeout.
-  /// Runs the blocking POSIX probe on a GCD thread: `connect`/`poll` can park a thread for the
-  /// whole timeout, and parking a cooperative-pool thread starves every other task in the
-  /// process (measured 2026-08-28: the CI runner's 3-thread pool starved the metrics endpoint's
-  /// request handling into URLSession timeouts).
+  /// Runs the blocking POSIX probe on a thread of its own (`BlockingThread`): `connect`/`poll` can
+  /// park a thread for the whole timeout, which starves the cooperative pool (measured
+  /// 2026-08-28) and is admitted late by `DispatchQueue.global` under load (2026-09-11).
   static func isOpen(host: String, port: UInt16, timeout: Duration) async -> Bool {
-    await withCheckedContinuation { continuation in
-      DispatchQueue.global(qos: .utility).async {
-        continuation.resume(returning: blockingIsOpen(host: host, port: port, timeout: timeout))
-      }
+    await BlockingThread.run(name: "runnervm-port-probe") {
+      blockingIsOpen(host: host, port: port, timeout: timeout)
     }
   }
 

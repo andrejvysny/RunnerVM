@@ -248,6 +248,22 @@ import Testing
     #expect(built == ["PATH": "/bin", "HOME": "/tmp", "LC_ALL": "C"])
     #expect(SpawnRequest.defaultEnvironment(from: [:])["PATH"] == SpawnRequest.fallbackPath)
   }
+
+  /// The watchdog can win the lock against a wait thread that has seen the exit but not yet
+  /// reaped: that run finished in time and must not be reported as timed out.
+  @Test func aLeaderThatExitedButIsNotYetReapedIsNotMarkedTimedOut() throws {
+    let control = SpawnControl()
+    let child = try Child.spawn(request("/usr/bin/true"), control: control)
+    defer {
+      for fd in [child.stdoutRead, child.stderrRead, child.wakeRead, child.wakeWrite] { close(fd) }
+    }
+    var info = siginfo_t()
+    while waitid(P_PID, id_t(child.pid), &info, WEXITED | WNOWAIT) != 0, errno == EINTR {}
+
+    control.signalGroup(SIGTERM, timedOut: true)
+    #expect(!control.snapshot.timedOut)
+    #expect(control.reap(pid: child.pid, at: .now) == 0)
+  }
 }
 
 /// Counts `onOutput` callbacks. They all arrive on the one drain thread, so a plain lock is enough.
