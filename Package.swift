@@ -14,7 +14,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
     .package(url: "https://github.com/apple/swift-nio", from: "2.80.0"),
     .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
-    .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
+    .package(url: "https://github.com/jpsim/Yams", from: "6.2.2"),
   ],
   targets: [
     // Domain: IDs, models, state machines, errors, configuration model. No I/O.
