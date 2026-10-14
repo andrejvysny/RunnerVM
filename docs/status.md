@@ -1,7 +1,7 @@
 # Project status — 2026-09-02
 
 The single-page answer to "what does RunnerVM do today, how sure are we, and what is next".
-`TODO.md` is the task-level tracker; `CHANGELOG.md` lists what landed when; `docs/verification.md`
+Open work lives in Plane (project RunnerVM); `CHANGELOG.md` lists what landed when; `docs/verification.md`
 holds the evidence behind every "live" claim below.
 
 ## Next milestone
@@ -20,7 +20,7 @@ Distribution hardening (milestone D, contract in `docs/design/distribution.md`) 
 including `runnerctl upgrade` (D10); every piece of it is unit/integration-tested, with the
 hardware/live matrix still open — see "Open verification". The next milestone is **v0.3.0**:
 hardening (Developer ID signing/notarization, timeout tuning, reaper fixes) and the macOS guest
-H3–H5 live runs. Tracked in `TODO.md` "D — Distribution hardening".
+H3–H5 live runs. Tracked in Plane (module "v0.3.0 Release").
 
 ## What RunnerVM is
 

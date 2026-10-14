@@ -4,7 +4,7 @@ Dates are when the work landed on `master`; see `docs/verification.md` for what 
 
 ## Unreleased — v0.3.0 (in progress)
 
-Hardening from the pre-release review (`PLAN.md`). Everything here is unit/integration-tested;
+Hardening from the pre-release review (plan and run log in git history at `bdcb166`). Everything here is unit/integration-tested;
 the hardware matrix runs before the tag.
 
 - `ProcessSpawn` drains pipes and waits for the child on dedicated threads (`BlockingThread`)
@@ -117,7 +117,7 @@ the hardware matrix runs before the tag.
 
 ## 2026-08-28 — Distribution hardening (milestone D)
 
-Closes the distribution milestone (`docs/design/distribution.md`, `TODO.md` "D — Distribution
+Closes the distribution milestone (`docs/design/distribution.md`, milestone "D — Distribution
 hardening"): a fresh Apple Silicon Mac becomes a working runner host from one `curl … | sudo bash`.
 Every item below is unit/integration-tested only at the time it landed. **Nothing published to
 GHCR yet** — the operator matrix (fresh-Mac install, reboot loop, upgrade, managed macOS

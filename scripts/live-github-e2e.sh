@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live GitHub integration E2E suite for RunnerVM (TODO.md T3, "Live checklist for M6").
+# Live GitHub integration E2E suite for RunnerVM (task T3, "Live checklist for M6").
 #
 # Manually triggered, opt-in: dispatches real workflow_dispatch runs against a dedicated test
 # org/repo on GitHub.com and drives runnerd through REST JIT + Runner Scale Set flows. This is

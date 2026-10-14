@@ -3,7 +3,7 @@
 `scripts/live-github-e2e.sh` drives `runnerd` through REST JIT and Runner Scale Set flows
 against real GitHub.com infrastructure: a dedicated test org (or user) and a dedicated test
 repo. It is manually triggered, opt-in, and **never** runs as part of `swift test` or CI's
-default triggers (TODO.md T3, "Live checklist for M6"). This document is the preconditions,
+default triggers (task T3, "Live checklist for M6"). This document is the preconditions,
 setup and scenario reference for running it.
 
 Companion files:
@@ -245,7 +245,7 @@ alongside the report, since the warnings (`[faults] warning: ...`) are what expl
   against a profile with `warmPool.minIdle: 0`, or accept the occasional false negative.
 - **`restart-during-job`, `restart-while-runner-starts` and `restart-during-job-sigkill`'s
   duplicate-runner check is a heuristic**, not a real correlation: the daemon has no
-  `scale_set_id`/job-id column on `runner_sessions` (TODO.md M6 follow-up), so the script counts
+  `scale_set_id`/job-id column on `runner_sessions` (Plane RUNNERVM-32), so the script counts
   sessions for the profile with a non-null `githubRunnerId` created after the scenario's own
   dispatch time. It is a reasonable proxy for one scenario running in isolation, not a guarantee
   under concurrent scenario runs (don't run scenarios in parallel against the same profile).

@@ -16,7 +16,7 @@
 --
 -- Deliberately no FK from managed_images' digest columns to images(digest): rollback and
 -- retention churn on either table must not be ordering-constrained by the other -- cf. the v1
--- instances.image_digest FK tombstone bug (TODO.md M2 finding (c)).
+-- instances.image_digest FK tombstone bug (M2 finding (c)).
 CREATE TABLE managed_images (
   name TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('registryTag','macosTart')),

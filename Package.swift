@@ -17,7 +17,8 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
   ],
   targets: [
-    // Domain: IDs, models, state machines, errors, configuration model. No I/O.
+    // Domain: IDs, models, state machines, errors, configuration model. No I/O beyond path
+    // resolution (`PathsResolve`: home directory, file existence).
     .target(name: "RunnerCore"),
     // posix_spawn runner: process-group signal escalation, deadline-bounded drain, decoded exit
     // status. A leaf with no dependencies on purpose -- `HostSetup` must never import
@@ -36,7 +37,8 @@ let package = Package(
       "RunnerCore",
       .product(name: "GRDB", package: "GRDB.swift"),
     ]),
-    // Only module allowed to import Virtualization.
+    // The only library module that imports Virtualization; the `vmworker` executable is the other
+    // importer (it hosts the VM and carries the entitlement).
     .target(name: "VirtualizationCore", dependencies: ["RunnerCore"],
             linkerSettings: [.linkedFramework("Virtualization")]),
     .target(name: "WorkerProtocol", dependencies: ["RunnerCore", "RPC"]),

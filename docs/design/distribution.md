@@ -1,7 +1,7 @@
 # Design: distribution & deployment (milestone D)
 
 Status: **contract only** (phase D0) — nothing in this document changes runtime behavior. It fixes
-what every later D-phase (D1–D10, see `TODO.md` "D — Distribution hardening") is built against, so
+what every later D-phase (D1–D10, milestone "D — Distribution hardening") is built against, so
 implementation does not quietly drift from what was decided. Plan: `~/.claude/plans/act-as-senior-swift-federated-willow.md`.
 
 ## Goal

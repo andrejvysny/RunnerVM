@@ -1,5 +1,5 @@
 name: github-integration
-# Manually-triggered, opt-in live GitHub integration suite (TODO.md T3, "Live checklist for M6").
+# Manually-triggered, opt-in live GitHub integration suite (task T3, "Live checklist for M6").
 # Runs scripts/live-github-e2e.sh against a REAL, dedicated test org/repo -- never point
 # vars.E2E_OWNER/vars.E2E_REPO at anything that matters. Setup, PAT scopes and what each
 # scenario asserts: docs/live-integration.md.

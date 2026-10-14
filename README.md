@@ -103,7 +103,7 @@ The catalogue and the disk each guest needs: [`docs/published-images.md`](docs/p
 
 - [`RunnerVM — GitHub Actions VM Orchestrator.md`](<RunnerVM — GitHub Actions VM Orchestrator.md>) — the full architecture/implementation spec.
 - [`docs/status.md`](docs/status.md) — current capability matrix, limitations, next steps; [`CHANGELOG.md`](CHANGELOG.md).
-- [`TODO.md`](TODO.md) — milestone tracking, spike findings, open questions.
+- Open work, decisions and milestone history are tracked in Plane (project RunnerVM), not in the repo.
 - [`SETUP.md`](SETUP.md) — set it up on a fresh Mac, for an organization or a repository.
 - [`docs/published-images.md`](docs/published-images.md) — the prebuilt images on ghcr.io: what is
   in them, how to size a host for one, and how they are published.

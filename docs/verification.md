@@ -6,7 +6,7 @@ What has actually been exercised, and how. Updated 2026-08-28.
 
 Everything below ran on the development Mac against the freshly built tree, before any release or
 tag exists. Hardware matrix items (fresh-Mac curl install, reboot loop, upgrade on a real
-install, managed macOS provisioning) remain open — `TODO.md`.
+install, managed macOS provisioning) remain open — tracked in Plane (RUNNERVM-5).
 
 - **Package**: `scripts/build-package.sh` produced `RunnerVM-macos-arm64.pkg` (22 MB), `shasum -c`
   OK, `release-manifest.json` exactly the documented shape (version 0.2.0, signed false);
@@ -248,7 +248,7 @@ recovers with a second `ImageBuilder` over the same state (20× loop clean). Liv
 `queued` and `resolving` are not observable on a warm local-base build (both pass in <200 ms, the
 script reports them as "never observed" — a driver limitation, not a daemon fault); the
 `staging`/`booting`/`provisioning`/`sealing` kills were still running when this pass was handed
-off — see `TODO.md` for the follow-up.
+off — the follow-up is tracked in Plane (RUNNERVM-13).
 
 ### Startup stall — observed, not root-caused
 

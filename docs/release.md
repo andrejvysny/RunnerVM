@@ -281,6 +281,6 @@ optional step for anyone who prefers `brew install` over the pkg:
 ## Version scheme
 
 Semver, starting at `0.x` while `runnerd`'s wire/schema versions and the milestone list in
-`TODO.md` are still moving — see `docs/status.md` for what's actually load-bearing at any given
-point. Bump to `1.0.0` once the open M8/S3/S5/S7/D-milestone items in `TODO.md` are resolved or
+Plane are still moving — see `docs/status.md` for what's actually load-bearing at any given
+point. Bump to `1.0.0` once the open M8/S3/S5/S7/D-milestone items in Plane are resolved or
 explicitly deferred and live GitHub verification covers the supported feature surface, not before.

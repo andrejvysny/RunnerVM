@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builder fault injection for RunnerVM: SIGKILL a live runnerd in the middle of a real image build,
-# restart it, and prove the restarted daemon converges (TODO.md WP8).
+# restart it, and prove the restarted daemon converges (task WP8).
 #
 # This is the live twin of Tests/OrchestrationTests/ImageBuildFaultInjectionTests.swift. Those
 # freeze an in-process builder at a hook; this kills a real `runnerd --foreground` with a real

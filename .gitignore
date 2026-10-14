@@ -4,6 +4,7 @@
 .swiftpm/
 DerivedData/
 GuestAgent/bin/
+dist/
 *.img
 *.iso
 .DS_Store

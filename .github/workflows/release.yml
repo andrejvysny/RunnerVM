@@ -78,7 +78,7 @@ jobs:
           fi
 
           # The install-side gate compares the pkg's leaf team against a COMPILED-IN constant,
-          # never against the manifest (PLAN.md 4.3). If that constant and the signing identity
+          # never against the manifest (docs/design/distribution.md). If that constant and the signing identity
           # disagree, every install of this release would refuse the pkg -- catch it here.
           signing_swift="Sources/RunnerCore/Signing.swift"
           if [ ! -f "$signing_swift" ]; then

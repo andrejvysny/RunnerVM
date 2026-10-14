@@ -6,7 +6,7 @@ console, a power cut, and a reboot while a job is running. `scripts/qualify-host
 checks; this document is the checklist, the trade-offs behind the two launchd variants, and the
 repeatable procedure that proves the whole chain — cold boot → `runnerd` online → `vmworker` →
 VM boot → guest agent ready → (optionally) a real GitHub job — on your own hardware. This is plan
-task T4 (`TODO.md`, "Production readiness review").
+task T4 ("Production readiness review").
 
 Read `docs/install.md` first if you have not installed RunnerVM yet; this document assumes a host
 already installed with `scripts/install.sh --launchd agent|daemon`.
@@ -184,7 +184,7 @@ run timestamp, the launchd variant detected, and every check's id/title/status/d
 file itself as the evidence:
 
 - Attach `qual.jsonl` (not just a pass/fail summary) to whatever production-readiness review or
-  ticket tracks T4 in `TODO.md` — the per-check detail is what lets a reviewer tell a real fix
+  Plane work item tracks T4 — the per-check detail is what lets a reviewer tell a real fix
   apart from a lucky re-run.
 - A quick recap for a review comment: `jq -s '[.[] | {run_at, boot_time, launchd, summary}]'
   qual.jsonl`.

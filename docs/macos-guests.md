@@ -25,7 +25,7 @@ lockdown, concurrency cap) applies to an image regardless of which path produced
 
 Open: the H3–H5 live runs (two concurrent guests + third-job-waits, crash/restart recovery, the
 100-job soak) and the native IPSW builder (M8.6) — both hardware-pending, unit/integration-tested
-only where code exists. Track progress in `TODO.md` ("M8" and "D — Distribution hardening"). Treat
+only where code exists. Track progress in Plane (module "macOS Guests (M8)"). Treat
 macOS as **experimental** until H3–H5 are recorded.
 
 Sizing note for anyone planning a host: a macOS guest reserves the image's **entire** virtual disk
