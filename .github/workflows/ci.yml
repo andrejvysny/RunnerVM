@@ -18,8 +18,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      # See the Test steps below.
-      TIMING_SUITES: '\.(ProcessSpawnTests|RunProcessTests|CommandRunnerTests|HostProbeTests|GitHubFaultTests|StuckDeleteTests)/'
+      # See the Test steps below: whole suites, then single tests that use a 3 s `vmBoot` deadline.
+      TIMING_SUITES: >-
+        \.(ProcessSpawnTests|RunProcessTests|CommandRunnerTests|HostProbeTests|GitHubFaultTests|StuckDeleteTests|ActionsServiceConnectionTests)/|/(aVMThatNeverReportsRunningFailsWithVMBootTimeout|aRestartRebuildsTheBootDeadlineAndFailsABootThatOverranIt|aRestartAdoptsAGuestThatCameUpWhileTheDaemonWasAway|aRestartedVMThatNeverReportsRunningFailsWithVMBootTimeout|aBootTimeoutHoldsTheProfileDown)\(
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select Xcode
@@ -35,7 +36,8 @@ jobs:
         run: swift build
       # Suites that assert wall-clock bounds (kill ladders, deadlines, retry budgets) run apart and
       # serialized: on the 3-vCPU runner, 1900 tests in parallel stretch every timer ~30 s, and
-      # those suites failed only on that oversubscription (2026-10-14, run 38634301495).
+      # those tests failed only on that oversubscription (2026-10-14, runs 38634301495, 38636450062).
+      # A new wall-clock-bound test belongs in TIMING_SUITES.
       - name: Test
         run: swift test --parallel --skip "$TIMING_SUITES"
       - name: Test (timing-sensitive suites, serialized)
