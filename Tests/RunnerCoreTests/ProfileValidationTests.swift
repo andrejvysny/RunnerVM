@@ -24,6 +24,62 @@ import Testing
     #expect(Self.issues { $0.scope = "nope" }.contains(code: "PROFILE_UNKNOWN_SCOPE"))
   }
 
+  @Test func rejectsGitHubProfileWithoutScope() {
+    #expect(Self.issues { $0.scope = nil }.contains(code: "PROFILE_SCOPE_REQUIRED"))
+    #expect(Self.issues { $0.scope = "" }.contains(code: "PROFILE_SCOPE_REQUIRED"))
+    #expect(!Self.issues { $0.scope = nil }.contains(code: "PROFILE_UNKNOWN_SCOPE"))
+  }
+
+  private static func gitlabIssues(
+    _ transform: (inout RunnerProfileConfig) -> Void = { _ in }
+  ) -> [ConfigurationIssue] {
+    Fixtures.issues {
+      $0.profiles = [Fixtures.linuxProfile.with {
+        $0.provider = .gitlab
+        $0.scope = nil
+        transform(&$0)
+      }]
+    }
+  }
+
+  @Test func aPlainGitLabProfileIsValidWithoutAnyScope() {
+    #expect(Self.gitlabIssues().isEmpty)
+    let noScopes = Fixtures.issues {
+      $0.github = GitHubConfig(scopes: [])
+      $0.profiles = [Fixtures.linuxProfile.with { $0.provider = .gitlab; $0.scope = nil }]
+    }
+    #expect(!noScopes.contains(code: "GITHUB_NO_SCOPES"))
+  }
+
+  @Test func noScopesWarningStillAppliesToGitHubOrEmptyProfileLists() {
+    let github = Fixtures.issues { $0.github = GitHubConfig(scopes: []) }
+    #expect(github.contains(code: "GITHUB_NO_SCOPES"))
+    let empty = Fixtures.issues { $0.github = GitHubConfig(scopes: []); $0.profiles = [] }
+    #expect(empty.contains(code: "GITHUB_NO_SCOPES"))
+  }
+
+  @Test func rejectsGitLabProfileRules() {
+    #expect(Self.gitlabIssues { $0.scope = "engineering" }
+      .contains(code: "PROFILE_GITLAB_SCOPE_UNSUPPORTED"))
+    #expect(Self.gitlabIssues { $0.lifecycle = .reusable }
+      .contains(code: "PROFILE_GITLAB_EPHEMERAL_ONLY"))
+    #expect(Self.gitlabIssues { $0.warmPool = WarmPoolPolicy(minIdle: 1, maxIdle: 2) }
+      .contains(code: "PROFILE_GITLAB_WARM_POOL_UNSUPPORTED"))
+    #expect(Self.gitlabIssues { $0.warmPool = WarmPoolPolicy(minIdle: 0, maxIdle: 1) }
+      .contains(code: "PROFILE_GITLAB_WARM_POOL_UNSUPPORTED"))
+  }
+
+  @Test func gitLabProfilesSkipHostedLabelShadowingAndJitTimeoutRules() {
+    var timeouts = TimeoutPolicy.default
+    timeouts.jitGeneration = .seconds(10)
+    let issues = Self.gitlabIssues {
+      $0.name = "macos-26"
+      $0.timeouts = timeouts
+    }
+    #expect(!issues.contains(code: "PROFILE_NAME_SHADOWS_HOSTED_LABEL"))
+    #expect(!issues.contains(code: "PROFILE_TIMEOUT_JIT_GENERATION_SHORT"))
+  }
+
   @Test func rejectsEmptyOrMalformedProfileNames() {
     #expect(Self.issues { $0.name = "" }.contains(code: "PROFILE_NAME_EMPTY"))
     #expect(Self.issues { $0.name = "Ubuntu 24" }.contains(code: "PROFILE_NAME_INVALID"))

@@ -22,6 +22,8 @@ RUNNER_URL=""
 RUNNER_TARBALL=""
 RUNNER_DIGEST_SOURCE=""
 ALLOW_UNVERIFIED_RUNNER=0
+GITLAB_RUNNER_VERSION=""
+GITLAB_RUNNER_SHA256=""
 AGENT_BINARY=""
 AGENT_VERSION=""
 RUNNER_SUDO="yes"
@@ -89,6 +91,15 @@ actions/runner (resolved and verified on the host, like build-ubuntu-image.sh):
   --allow-unverified-runner
                            Trust the host's own download hash when the release exposes no digest.
 
+GitLab variant (opt-in; docs/macos-guests.md "GitLab variant"):
+  --gitlab-runner <ver>    Install gitlab-runner <ver> (darwin-arm64) at /usr/local/bin/gitlab-runner
+                           and keep sshd ON in the sealed image, key-only, runner account only.
+                           Requires --gitlab-runner-sha256. Metadata records capabilities.ssh and
+                           capabilities.gitlab: true. Not combinable with --debug-ssh.
+  --gitlab-runner-sha256 <hex>
+                           Expected sha256 of that release's gitlab-runner-darwin-arm64 (copy it from
+                           https://gitlab-runner-downloads.s3.amazonaws.com/v<ver>/release.sha256).
+
 Guest agent:
   --agent-binary <path>    Prebuilt darwin/arm64 agent (default: GuestAgent/bin/darwin-arm64/,
                            built with `make -C GuestAgent build-darwin` when absent).
@@ -149,6 +160,8 @@ parse_args() {
         --runner-version) RUNNER_VERSION="$2"; shift 2 ;;
         --runner-sha256) RUNNER_SHA256="$2"; shift 2 ;;
         --allow-unverified-runner) ALLOW_UNVERIFIED_RUNNER=1; shift ;;
+        --gitlab-runner) GITLAB_RUNNER_VERSION="$2"; shift 2 ;;
+        --gitlab-runner-sha256) GITLAB_RUNNER_SHA256="$2"; shift 2 ;;
         --agent-binary) AGENT_BINARY="$2"; shift 2 ;;
         --runner-sudo) RUNNER_SUDO="$2"; shift 2 ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
@@ -171,6 +184,7 @@ parse_args() {
     case "$RUNNER_SUDO" in yes | no) ;; *) die "--runner-sudo must be yes or no" ;; esac
     [ -n "$NAME" ] || die "--name must not be empty"
     [ -z "$RUNNER_SHA256" ] || expect_hex64 --runner-sha256 "$RUNNER_SHA256"
+    validate_gitlab_args
     if [ -n "$ATTACH_IP" ]; then
         if [ -z "$RESULT_PATH" ]; then
             printf 'error: --attach requires --result <path.json>\n' >&2
@@ -183,6 +197,33 @@ parse_args() {
             exit 2
         fi
     fi
+}
+
+# The GitLab variant is all-or-nothing: a version without a digest would install unverified bytes.
+validate_gitlab_args() {
+    [ -n "$GITLAB_RUNNER_VERSION" ] || [ -n "$GITLAB_RUNNER_SHA256" ] || return 0
+    [ -n "$GITLAB_RUNNER_VERSION" ] && [ -n "$GITLAB_RUNNER_SHA256" ] ||
+        die "--gitlab-runner and --gitlab-runner-sha256 must be given together"
+    GITLAB_RUNNER_VERSION="${GITLAB_RUNNER_VERSION#v}"
+    [[ "$GITLAB_RUNNER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        die "--gitlab-runner must be a version like 19.4.1, got: $GITLAB_RUNNER_VERSION"
+    expect_hex64 --gitlab-runner-sha256 "$GITLAB_RUNNER_SHA256"
+    [ "$DEBUG_SSH" -eq 0 ] || die "--gitlab-runner and --debug-ssh are mutually exclusive: the GitLab \
+variant keeps sshd on but still rotates the admin password and removes every authorized_keys"
+}
+
+gitlab_enabled() { [ -n "$GITLAB_RUNNER_VERSION" ]; }
+
+# Whether the sealed image leaves sshd running: the debugging escape hatch or the GitLab variant.
+ssh_kept() { [ "$DEBUG_SSH" -eq 1 ] || gitlab_enabled; }
+
+ssh_kept_json() { if ssh_kept; then printf 'true'; else printf 'false'; fi; }
+
+# " GITLAB_RUNNER_VERSION='..' GITLAB_RUNNER_SHA256='..'" for the guest env, or nothing.
+gitlab_guest_env() {
+    gitlab_enabled || return 0
+    printf ' GITLAB_RUNNER_VERSION=%s GITLAB_RUNNER_SHA256=%s' \
+        "$(shq "$GITLAB_RUNNER_VERSION")" "$(shq "$GITLAB_RUNNER_SHA256")"
 }
 
 expect_hex64() {
@@ -453,6 +494,7 @@ run_guest_provisioning() {
     remote="$remote RUNNER_SHA256=$(shq "$RUNNER_SHA256") RUNNER_SUDO=$(shq "$RUNNER_SUDO")"
     remote="$remote AGENT_VERSION=$(shq "$AGENT_VERSION") IMAGE_NAME=$(shq "$NAME") SHUTDOWN=no"
     remote="$remote STAGE=all AGENT_SHA256=$(shq "$AGENT_SHA256") PLIST_SHA256=$(shq "$PLIST_SHA256")"
+    remote="$remote$(gitlab_guest_env)"
     remote="$remote bash $(shq "$GUEST_SCRIPT_REMOTE")"
     log "running the in-guest provisioner (installs Command Line Tools if absent; minutes)"
     SELFCHECK="$OUT/$NAME/selfcheck.txt"
@@ -494,6 +536,10 @@ check_selfcheck() {
     build="$(selfcheck_value "$SELFCHECK" sw_vers_build_version)"
     [ -n "$uid" ] || die "self-check reported no runner_uid"
     [ -n "$git_version" ] || die "self-check reported no git_version (Command Line Tools missing?)"
+    if gitlab_enabled; then
+        [ -n "$(selfcheck_value "$SELFCHECK" gitlab_runner_version)" ] ||
+            die "self-check reported no gitlab_runner_version (gitlab-runner did not install or run)"
+    fi
     # The one setting a macOS runner must not get wrong (docs/macos-guests.md): a Keychain-backed
     # helper on a headless guest blocks forever with no prompt anyone can answer.
     [ "$helper" = "<empty>" ] || die \
@@ -516,7 +562,7 @@ check_selfcheck() {
 # any of that, so the evidence survives the session dying.
 run_guest_hardening() {
     local remote
-    remote="sudo -H env STAGE=harden HARDEN_USER=$(shq "$SSH_USER") SHUTDOWN=yes"
+    remote="sudo -H env STAGE=harden HARDEN_USER=$(shq "$SSH_USER") SHUTDOWN=yes$(gitlab_guest_env)"
     if [ -z "$SSH_KEY" ]; then
         # Staged as a 0600 file rather than passed as an environment assignment: an `ssh
         # ... env HARDEN_OLD_PASSWORD=...` command line is visible in `ps` on *this* host, which is
@@ -555,14 +601,20 @@ check_harden_report() {
     sshd="$(selfcheck_value "$HARDEN_REPORT" sshd_disabled)"
     keys="$(selfcheck_value "$HARDEN_REPORT" authorized_keys_removed)"
     [ "$rotated" = "yes" ] || die "the guest did not rotate the $SSH_USER password"
-    [ "$sshd" = "yes" ] || die "the guest did not disable com.openssh.sshd"
+    if gitlab_enabled; then
+        [ "$sshd" = "no" ] && [ "$(selfcheck_value "$HARDEN_REPORT" sshd_key_only)" = "yes" ] ||
+            die "the guest did not report a key-only sshd for the GitLab variant"
+    else
+        [ "$sshd" = "yes" ] || die "the guest did not disable com.openssh.sshd"
+    fi
     case "$rejected" in
     yes) ;;
     no) die "the build-time password for $SSH_USER still authenticates after rotation" ;;
     *) warn "could not prove the old $SSH_USER password is rejected (key auth); \
 scripts/qualify-macos-image.sh dials TCP/22 on a cold-booted clone instead" ;;
     esac
-    log "lockdown: password rotated, old credential rejected=$rejected, sshd disabled, \
+    log "lockdown: password rotated, old credential rejected=$rejected, \
+$(gitlab_enabled && echo 'sshd kept on (key-only, runner only)' || echo 'sshd disabled'), \
 authorized_keys cleared from $keys home directories"
 }
 
@@ -632,7 +684,7 @@ run_attach() {
         run_guest_hardening
         HARDEN_DONE=1
         wait_for_port_closed
-        write_result_json true true "$(bool_json "$GRACEFUL_SHUTDOWN")" false ""
+        write_result_json true true "$(bool_json "$GRACEFUL_SHUTDOWN")" "$(ssh_kept_json)" ""
     fi
 }
 
@@ -650,6 +702,9 @@ require_raw_disk_format() {
 disk (RunnerVM imports a raw disk image; tart's asif container cannot be imported)"
 }
 
+# The GitLab variant is recorded twice on purpose: capabilities.gitlab (the documented field) and
+# the label runnervm.gitlab -- `Capabilities` in Sources/RunnerCore has no `gitlab` member, so an
+# import that re-encodes the metadata drops the former but keeps labels.
 # Renders <dest> from a tart config.json plus the globals resolved above, in the shape
 # Sources/RunnerCore/Models/ImageMetadata.swift decodes. Split out so
 # scripts/tests/provision-macos-tart-test.sh can render it from a fixture with no VM.
@@ -680,7 +735,8 @@ image that cannot say what it needs to boot -- add the values the source VM repo
         --arg agentVersion "$AGENT_VERSION" \
         --arg createdAt "$CREATED_AT" \
         --arg tartImage "$SOURCE" \
-        --argjson ssh "$([ "$DEBUG_SSH" -eq 1 ] && echo true || echo false)" \
+        --argjson ssh "$(ssh_kept_json)" \
+        --argjson gitlab "$(gitlab_enabled && echo true || echo false)" \
         '{
           schemaVersion: 1,
           os: "macos",
@@ -696,10 +752,11 @@ image that cannot say what it needs to boot -- add the values the source VM repo
             + (if $sourceVersion == "" then {} else { sourceVersion: $sourceVersion } end)
             + (if $minCPU > 0 then { minimumCPUCount: $minCPU } else {} end)
             + (if $minMem > 0 then { minimumMemoryBytes: $minMem } else {} end)),
-          capabilities: {
+          capabilities: ({
             docker: false, ssh: $ssh, guestAgent: true,
-            labels: { "runnervm.source": "tart", "runnervm.tart.image": $tartImage }
-          }
+            labels: ({ "runnervm.source": "tart", "runnervm.tart.image": $tartImage }
+              + (if $gitlab then { "runnervm.gitlab": "true" } else {} end))
+          } + (if $gitlab then { gitlab: true } else {} end))
         }' >"$dest"
 }
 
@@ -771,10 +828,16 @@ cleanup() {
     # (run_attach) already wrote it; anything that unwound before that -- a die(), or any other
     # command failing under `set -e` -- lands here instead.
     if [ -n "$ATTACH_IP" ] && [ "$RESULT_WRITTEN" -ne 1 ]; then
-        write_result_json false "" "" "$(bool_json "$((1 - HARDEN_DONE))")" \
+        write_result_json false "" "" "$(failure_ssh_json)" \
             "${LAST_ERROR:-provisioning failed (exit $rc)}"
     fi
     return "$rc"
+}
+
+# A failed attach run reports ssh: true until the lockdown is proven -- except the GitLab variant,
+# where sshd is deliberately on in the finished guest either way.
+failure_ssh_json() {
+    if gitlab_enabled; then printf 'true'; else bool_json "$((1 - HARDEN_DONE))"; fi
 }
 
 setup_work_dir() {

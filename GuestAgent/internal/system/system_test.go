@@ -2,6 +2,8 @@ package system
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -118,5 +120,39 @@ func TestIsVirtualBridgeInterface(t *testing.T) {
 		if got := isVirtualBridgeInterface(name); got != want {
 			t.Errorf("isVirtualBridgeInterface(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+type fakeConn struct {
+	net.Conn
+	local net.Addr
+}
+
+func (f fakeConn) LocalAddr() net.Addr { return f.local }
+func (f fakeConn) Close() error        { return nil }
+
+func TestPrimaryAddress(t *testing.T) {
+	dialWith := func(a net.Addr, err error) func(string, string) (net.Conn, error) {
+		return func(network, address string) (net.Conn, error) {
+			if network != "udp4" {
+				t.Fatalf("network = %q, want udp4", network)
+			}
+			if err != nil {
+				return nil, err
+			}
+			return fakeConn{local: a}, nil
+		}
+	}
+	if got := primaryAddress(dialWith(&net.UDPAddr{IP: net.ParseIP("192.168.64.5"), Port: 4000}, nil)); got != "192.168.64.5" {
+		t.Fatalf("got %q, want 192.168.64.5", got)
+	}
+	if got := primaryAddress(dialWith(nil, errors.New("network is unreachable"))); got != "" {
+		t.Fatalf("dial error: got %q, want empty", got)
+	}
+	if got := primaryAddress(dialWith(&net.UDPAddr{IP: net.IPv4zero}, nil)); got != "" {
+		t.Fatalf("unspecified: got %q, want empty", got)
+	}
+	if got := primaryAddress(dialWith(&net.TCPAddr{IP: net.ParseIP("10.0.0.1")}, nil)); got != "" {
+		t.Fatalf("non-udp addr: got %q, want empty", got)
 	}
 }

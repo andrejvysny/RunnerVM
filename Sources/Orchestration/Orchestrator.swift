@@ -194,7 +194,7 @@ public actor Orchestrator {
   public func demandReport() async -> [DemandProviderReport] {
     var byProfile = Dictionary(
       await demand.report().map { ($0.profileId, $0) }, uniquingKeysWith: { first, _ in first })
-    for row in (try? await profiles.list()) ?? [] where row.enabled {
+    for row in (try? await profiles.list()) ?? [] where row.enabled && row.provider == .github {
       guard let record = try? await scaleSets.get(profileId: row.id) else { continue }
       let snapshot = await demand.snapshot(profile: row.id)
       var report = byProfile[row.id]

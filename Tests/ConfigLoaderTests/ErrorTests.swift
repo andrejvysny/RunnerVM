@@ -115,6 +115,56 @@ struct ErrorTests {
     #expect(path == "profiles[0].name")
   }
 
+  @Test func githubProfileMissingScopeProducesMissingKey() {
+    let yaml = """
+    version: 1
+    github:
+      scopes:
+        - {name: engineering, type: organization, owner: acme}
+    profiles:
+      - name: ubuntu-24
+        image: ghcr.io/acme/runners/ubuntu-24:stable
+    """
+    guard case let .failure(error) = Self.load(yaml),
+          case let .missingKey(path) = error
+    else {
+      Issue.record("expected a missing-key failure")
+      return
+    }
+    #expect(path == "profiles[0].scope")
+  }
+
+  @Test func gitlabProfileWithoutScopeLoads() throws {
+    let yaml = """
+    version: 1
+    profiles:
+      - name: glab
+        provider: gitlab
+        image: ghcr.io/acme/runners/ubuntu-24:stable
+    """
+    guard case let .success(config) = Self.load(yaml) else {
+      Issue.record("expected the document to load")
+      return
+    }
+    let profile = try #require(config.profiles.first)
+    #expect(profile.provider == .gitlab)
+    #expect(profile.scope == nil)
+  }
+
+  @Test func unknownProviderIsRejected() {
+    let yaml = """
+    version: 1
+    profiles:
+      - name: glab
+        provider: bitbucket
+        image: ghcr.io/acme/runners/ubuntu-24:stable
+    """
+    guard case .failure = Self.load(yaml) else {
+      Issue.record("expected a failure")
+      return
+    }
+  }
+
   @Test func scopeMissingTypeProducesMissingKey() {
     let yaml = """
     version: 1

@@ -88,11 +88,12 @@ func (s *Service) handleGetInfo(ctx context.Context, req rpc.Envelope) (any, err
 		addrs = []string{}
 	}
 	return InfoResult{
-		IPAddresses:   addrs,
-		UptimeSec:     uptime,
-		Kernel:        kernel,
-		RunnerVersion: s.runnerVersion(ctx),
-		DockerVersion: dockerVersion(ctx),
+		IPAddresses:    addrs,
+		PrimaryAddress: system.PrimaryAddress(),
+		UptimeSec:      uptime,
+		Kernel:         kernel,
+		RunnerVersion:  s.runnerVersion(ctx),
+		DockerVersion:  dockerVersion(ctx),
 	}, nil
 }
 

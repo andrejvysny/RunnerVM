@@ -40,6 +40,12 @@ public enum OrchestrationError: RunnerError {
   /// `imageOverride` on a runner create. A runner VM must always be the image its profile names,
   /// otherwise `scaleset.list` and the image-update machinery describe a fleet that is not there.
   case imageOverrideMaintenanceOnly
+  /// `instance.create {purpose: fleet}`: a fleet instance carries a lease that only `fleet.create`
+  /// sets, and the generic path would admit one the GitLab plugin never learns about.
+  case fleetUseFleetAPI
+  /// `instance.create` of a runner-purpose VM for a `provider: gitlab` profile. The tick fences
+  /// those instances off, so nothing would ever reclaim it.
+  case gitlabProfileFleetOnly(profile: String)
   /// `image.update.*` naming a `managed_images` row this host does not track.
   case managedImageUnknown(name: String)
   /// `image.update.check`/`run` on a daemon with no `ImageUpdateService` wired in.
@@ -76,6 +82,8 @@ public enum OrchestrationError: RunnerError {
     case .maintenanceTTLRequired: "MAINTENANCE_TTL_REQUIRED"
     case .maintenanceTTLInvalid: "MAINTENANCE_TTL_INVALID"
     case .imageOverrideMaintenanceOnly: "IMAGE_OVERRIDE_MAINTENANCE_ONLY"
+    case .fleetUseFleetAPI: "FLEET_USE_FLEET_API"
+    case .gitlabProfileFleetOnly: "PROFILE_GITLAB_FLEET_ONLY"
     case .managedImageUnknown: "MANAGED_IMAGE_NOT_FOUND"
     case .imageUpdatesUnavailable: "IMAGE_UPDATES_UNAVAILABLE"
     case .managedImageMixedGuestOS: "MANAGED_IMAGE_MIXED_GUEST_OS"
@@ -133,6 +141,10 @@ public enum OrchestrationError: RunnerError {
       "maintenance ttl \(ttl)ms is outside \(minimum)ms...\(maximum)ms"
     case .imageOverrideMaintenanceOnly:
       "an image override is only allowed with purpose 'maintenance'"
+    case .fleetUseFleetAPI:
+      "purpose 'fleet' instances are created only through fleet.create"
+    case let .gitlabProfileFleetOnly(profile):
+      "profile '\(profile)' is a gitlab profile: use fleet.create via the gitlab fleeting plugin"
     case let .managedImageUnknown(name):
       "no managed image or tracked reference named '\(name)'"
     case .imageUpdatesUnavailable:

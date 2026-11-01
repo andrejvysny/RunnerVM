@@ -1,3 +1,4 @@
+import Foundation
 import GRDB
 import RunnerCore
 
@@ -55,6 +56,11 @@ public protocol InstanceRepository: Sendable {
   func capacityConsuming(profile: RunnerProfileID) async throws -> [InstanceRecord]
 
   func markLastSeen(id: InstanceID) async throws
+
+  /// Moves a lease deadline (`pinned_until`) without touching `state`, so a renewal can never
+  /// race a lifecycle transition. Returns the updated row, or `nil` when `id` no longer exists.
+  @discardableResult
+  func updatePinnedUntil(id: InstanceID, pinnedUntil: Date) async throws -> InstanceRecord?
 
   /// Applies the reuse bookkeeping columns in one write transaction and returns the updated row.
   /// Never touches `state`, so it can run against an instance another actor owns.
@@ -206,6 +212,15 @@ public final class GRDBInstanceRepository: InstanceRepository, Sendable {
       }
       record.lastSeenAt = .now
       try DatabaseErrorMapper.run(entity: "instances") { try record.update(db) }
+    }
+  }
+
+  public func updatePinnedUntil(id: InstanceID, pinnedUntil: Date) async throws -> InstanceRecord? {
+    try await db.write { db in
+      guard var record = try InstanceRecord.fetchOne(db, key: id) else { return nil }
+      record.pinnedUntil = DatabaseDate(pinnedUntil)
+      try DatabaseErrorMapper.run(entity: "instances") { try record.update(db) }
+      return record
     }
   }
 }

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-RunnerVM: self-hosted GitHub Actions runner orchestrator for a single Apple Silicon Mac host. Runs ephemeral Linux/arm64 guest VMs via Apple Virtualization.framework, scale-to-zero, driven by GitHub scale-set demand. Three languages: Swift 6 (main harness), Go (in-guest agent), Bash (ops scripts).
+RunnerVM: self-hosted GitHub Actions runner orchestrator (plus GitLab autoscaled-runner VM supplier, `provider: gitlab` profiles) for a single Apple Silicon Mac host. Runs ephemeral Linux/arm64 guest VMs via Apple Virtualization.framework, scale-to-zero, driven by GitHub scale-set demand. Three languages: Swift 6 (main harness), Go (in-guest agent), Bash (ops scripts).
 
 ## Architecture & Data Flow
 
@@ -11,6 +11,7 @@ RunnerVM: self-hosted GitHub Actions runner orchestrator for a single Apple Sili
 - `runnerctl` (`Sources/runnerctl/`) — CLI over `runnerd.sock` (doctor, VM/image/scale-set/system commands).
 - `vmworker` (`Sources/vmworker/main.swift`) — one process per VM; only binary linking Virtualization.framework + entitlement.
 - `GuestAgent/cmd/guest-agent` (Go) — runs inside the guest, serves vsock RPC.
+- `GuestAgent/cmd/fleeting-plugin-runnervm` (Go, `internal/fleet`) — gitlab-runner fleeting plugin on the host; drives the daemon's `fleet.*` API (`Proto/fleet.md`). `make -C GuestAgent build-plugin`. Setup: `docs/gitlab.md`.
 
 **Data flow**: `runnerctl` → Unix-socket JSON-RPC (`RPC`/`DaemonAPI`) → `Orchestrator` actor. Orchestrator consumes GitHub scale-set demand events (`GitHubControl` DemandProvider AsyncStream) + 10s Reconciler tick → `Scheduler` (pure capacity math) → `InstanceManager` creates VMs (`ImageStore` APFS-clone staging from OCI-registry images) → spawns `vmworker` → `VirtualizationCore` boots Linux VM, VsockBridge connects `GuestControl.GuestAgentClient` ↔ in-guest Go agent → `RunnerSessionManager` registers ephemeral GitHub runner, observes runner exit → instance destroyed.
 
@@ -22,10 +23,10 @@ RunnerVM: self-hosted GitHub Actions runner orchestrator for a single Apple Sili
 ## Key Directories
 
 - `Sources/` — 20 Swift targets (see layering above). Notable: `RPC/` (custom JSON-RPC: Envelope, FrameCodec, 16MB/4MB frame caps), `Persistence/` (GRDB records/repositories/migrations), `GitHubControl/` (API client, keychain credentials), `ImageStore/` (APFS clone, QCOW2, disk layout), `ConfigLoader/` (YAML), `RunnerLogging/` (JSON logs, Redactor), `HostSetup/` (`runnerctl setup`/`upgrade` behind `runnerctl`: `ServiceAccountManager`, `SetupWizard`, `Upgrader`, `SmokeTest`).
-- `GuestAgent/` — Go module `github.com/andrejvysny/RunnerVM/GuestAgent` (go 1.26, dep mdlayher/vsock); `internal/{agent,rpc,vsock,exec,runner,metrics,disk,cleanup,system}`; Makefile.
-- `Proto/` — wire protocol specs (`daemon_api.md`, `guest_agent.md`, `worker_protocol.md`, `envelope.md`) + fixtures.
-- `scripts/` — `install.sh` (from-source/dev install), `bootstrap.sh` (published as the `install.sh` release asset — the curl one-liner), `build-package.sh` (prebuilt pkg), `publish-images.sh` (push to GHCR), `sign-dev.sh`, `build-ubuntu-image.sh` (legacy), `qualify-host.sh`, `qualify-macos-image.sh` (`--pinned` maintenance instance, D8 fix for H2), `provision-macos-tart.sh` (`--attach <ip>` for daemon-driven managed provisioning, D7a; no `--attach` for the manual/dev path against a locally-run Tart VM), `live-github-e2e.sh`, `scripts/tests/`.
-- `docs/` — install, developer-setup (from-source build + dev daemon), image-build (Runnerfile reference), logging, qualification, live-integration, `db_schema_v{1,2,3}.sql`, e2e workflow.
+- `GuestAgent/` — Go module `github.com/andrejvysny/RunnerVM/GuestAgent` (go 1.26, dep mdlayher/vsock); `internal/{agent,rpc,vsock,exec,runner,metrics,disk,cleanup,system,fleet}`; Makefile.
+- `Proto/` — wire protocol specs (`daemon_api.md`, `fleet.md`, `guest_agent.md`, `worker_protocol.md`, `envelope.md`) + fixtures.
+- `scripts/` — `install.sh` (from-source/dev install), `bootstrap.sh` (published as the `install.sh` release asset — the curl one-liner), `build-package.sh` (prebuilt pkg), `publish-images.sh` (push to GHCR), `sign-dev.sh`, `build-ubuntu-image.sh` (legacy), `qualify-host.sh`, `qualify-macos-image.sh` (`--pinned` maintenance instance, D8 fix for H2), `provision-macos-tart.sh` (`--attach <ip>` for daemon-driven managed provisioning, D7a; no `--attach` for the manual/dev path against a locally-run Tart VM), `live-github-e2e.sh`, `live-gitlab-e2e.sh` (opt-in; needs gitlab-runner + plugin), `scripts/tests/`.
+- `docs/` — install, developer-setup (from-source build + dev daemon), image-build (Runnerfile reference), logging, qualification, live-integration, gitlab (GitLab autoscaled runners), `db_schema_v{1..5}.sql`, e2e workflow.
 - `Tests/` — Swift tests, one dir per module.
 - `packaging/launchd/` — launchd plist templates.
 - Ignore `.claude/worktrees/` — stale agent copies.
@@ -49,7 +50,7 @@ bash scripts/tests/install-test.sh            # script unit tests (also run in C
 All bash test suites (`scripts/tests/*.sh`, each a dry-run harness, all run in CI):
 `install-test.sh`, `bootstrap-test.sh`, `build-package-test.sh`, `publish-images-test.sh`,
 `qualify-host-test.sh`, `qualify-macos-image-test.sh`, `provision-macos-tart-test.sh`,
-`live-macos-e2e-test.sh`, `build-ubuntu-image-test.sh` (legacy).
+`live-macos-e2e-test.sh`, `live-gitlab-e2e-test.sh`, `build-ubuntu-image-test.sh` (legacy).
 
 Production install (pkg): `curl -fsSL https://github.com/andrejvysny/RunnerVM/releases/latest/download/install.sh | sudo bash` → `runnerctl setup`. From source: `scripts/install.sh --launchd daemon --config <file>` (see `docs/install.md`, `docs/developer-setup.md`). Image build: `runnerctl image build images/recipes/ubuntu-24-minimal --name ... --arg NODE_MAJOR=22`.
 

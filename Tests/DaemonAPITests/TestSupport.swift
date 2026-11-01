@@ -456,6 +456,34 @@ actor FakeDaemonService: DaemonService {
     return match
   }
 
+  func fleetInfo(_ request: FleetInfoRequest) async throws -> FleetInfoResponse {
+    FleetInfoResponse(
+      profile: request.profile, guestOS: "linux", arch: "arm64", sshUser: "runner",
+      maxInstances: 2)
+  }
+
+  func fleetList(_ request: FleetListRequest) async throws -> FleetListResponse {
+    FleetListResponse(instances: [])
+  }
+
+  func fleetCreate(_ request: FleetCreateRequest) async throws -> FleetCreateResponse {
+    FleetCreateResponse(id: "i-fleet", leaseUntil: "2026-01-01T00:00:00.000Z")
+  }
+
+  func fleetDelete(_ request: FleetDeleteRequest) async throws -> FleetDeleteResponse {
+    FleetDeleteResponse(id: request.id, accepted: true)
+  }
+
+  func fleetRenew(_ request: FleetRenewRequest) async throws -> FleetRenewResponse {
+    FleetRenewResponse(renewed: request.ids)
+  }
+
+  func fleetConnect(_ request: FleetConnectRequest) async throws -> FleetConnectResponse {
+    FleetConnectResponse(
+      id: request.id, address: "192.168.64.7", port: 22, user: "runner", guestOS: "linux",
+      arch: "arm64")
+  }
+
   func operationList() async throws -> OperationListResponse {
     OperationListResponse(operations: [])
   }

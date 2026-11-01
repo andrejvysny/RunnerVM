@@ -1,0 +1,50 @@
+# ubuntu-24-gitlab: ubuntu-24 (Docker Engine) prepared for gitlab-runner's `instance` and
+# `docker-autoscaler` executors. The gitlab-runner *manager* runs on the host and reaches each
+# ephemeral VM over SSH as `runner`, with a per-VM key the daemon writes into
+# ~runner/.ssh/authorized_keys after boot. This image carries no key and does NOT register or run
+# the gitlab-runner service: the binary is only the artifacts/cache helper the executor invokes.
+#
+# gitlab-runner v19.4.1, released 2026-09-24. Digest copied from
+# https://gitlab-runner-downloads.s3.amazonaws.com/v19.4.1/release.sha256 (binaries/gitlab-runner-linux-arm64).
+FROM ubuntu-24
+
+ARG GITLAB_RUNNER_VERSION=19.4.1
+ARG GITLAB_RUNNER_SHA256=9763a63f7bc2319119f80de41d1d414465b5268d072bcd55266020b989e93ee9
+
+LABEL dev.runnervm.image.name="ubuntu-24-gitlab"
+LABEL dev.runnervm.image.family="ubuntu-24"
+
+ENV APT="apt-get -y -o DPkg::Lock::Timeout=900 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+RUN $APT update && \
+    $APT install --no-install-recommends git ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# A checksum mismatch fails the build rather than baking in bytes nobody verified.
+RUN curl -fsSL --retry 5 --retry-delay 3 \
+      "https://gitlab-runner-downloads.s3.amazonaws.com/v${GITLAB_RUNNER_VERSION}/binaries/gitlab-runner-linux-arm64" \
+      -o /usr/local/bin/gitlab-runner && \
+    echo "${GITLAB_RUNNER_SHA256}  /usr/local/bin/gitlab-runner" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/gitlab-runner && \
+    /usr/local/bin/gitlab-runner --version
+
+# Key-only SSH for the executor. First match wins in sshd_config, and drop-ins are read in lexical
+# order, so the build fails if an earlier file (e.g. 50-cloud-init.conf) already enables password
+# authentication -- this file would then be silently ignored.
+RUN install -d -m 0755 /etc/ssh/sshd_config.d && \
+    printf '%s\n' \
+      'MaxSessions 10' \
+      'PasswordAuthentication no' \
+      'KbdInteractiveAuthentication no' \
+      'PermitRootLogin no' \
+      'AllowUsers runner' \
+      > /etc/ssh/sshd_config.d/60-runnervm-gitlab.conf && \
+    chmod 0644 /etc/ssh/sshd_config.d/60-runnervm-gitlab.conf && \
+    ! grep -riE '^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication)[[:space:]]+yes' \
+        /etc/ssh/sshd_config /etc/ssh/sshd_config.d
+
+# Empty on purpose: the daemon injects the per-VM public key at boot. The docker group (membership
+# is set by the ubuntu-24 recipe) is what lets the docker-autoscaler SSH user reach the Engine.
+RUN install -d -o runner -g runner -m 0700 /home/runner/.ssh && \
+    rm -f /home/runner/.ssh/authorized_keys /home/runner/.ssh/authorized_keys2 && \
+    id -nG runner | tr ' ' '\n' | grep -qx docker

@@ -65,16 +65,20 @@ public struct GuestInfo: Codable, Sendable, Equatable {
   public var runnerVersion: String?
   /// Omitted by the agent when Docker is not installed.
   public var dockerVersion: String?
+  /// The guest's primary IPv4 (default-route interface), when the agent could determine one.
+  /// Absent from older agents; `fleet.connect` falls back to `ipAddresses` then.
+  public var primaryAddress: String?
 
   public init(
     ipAddresses: [String], uptimeSec: Int64, kernel: String, runnerVersion: String? = nil,
-    dockerVersion: String? = nil
+    dockerVersion: String? = nil, primaryAddress: String? = nil
   ) {
     self.ipAddresses = ipAddresses
     self.uptimeSec = uptimeSec
     self.kernel = kernel
     self.runnerVersion = runnerVersion
     self.dockerVersion = dockerVersion
+    self.primaryAddress = primaryAddress
   }
 }
 

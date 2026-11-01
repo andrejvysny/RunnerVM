@@ -90,6 +90,12 @@ public actor DaemonServer {
     await request(.instanceMetrics) { try await service.instanceMetrics($0) }
     await request(.instanceSSHInfo) { try await service.instanceSSHInfo($0) }
     await request(.instanceSelfTest) { try await service.instanceSelfTest($0) }
+    await request(.fleetInfo) { try await service.fleetInfo($0) }
+    await request(.fleetList) { try await service.fleetList($0) }
+    await request(.fleetCreate) { try await service.fleetCreate($0) }
+    await request(.fleetDelete) { try await service.fleetDelete($0) }
+    await request(.fleetRenew) { try await service.fleetRenew($0) }
+    await request(.fleetConnect) { try await service.fleetConnect($0) }
     await request(.runnerGet) { try await service.runnerGet($0) }
     await request(.authLogin) { try await service.authLogin($0) }
     await request(.debugRunJIT) { try await service.debugRunJIT($0) }

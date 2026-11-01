@@ -14,6 +14,25 @@ import Testing
     return try JSONDecoder().decode(RunnerConfiguration.self, from: data)
   }
 
+  /// A `runner_profiles.config_json` written before `provider` existed must keep decoding, as github.
+  @Test func profileJSONWithoutProviderDecodesAsGitHub() throws {
+    let json = #"{"name":"ubuntu-24","scope":"engineering","image":"ghcr.io/a/b:c","guestOS":"linux"}"#
+    let profile = try JSONDecoder().decode(RunnerProfileConfig.self, from: Data(json.utf8))
+    #expect(profile.provider == .github)
+    #expect(profile.isGitHub)
+    #expect(profile.scope == "engineering")
+  }
+
+  @Test func gitLabProfileRoundTripsWithNoScope() throws {
+    let profile = RunnerProfileConfig(
+      name: "glab", scope: nil, provider: .gitlab, image: "ghcr.io/a/b:c", guestOS: .linux)
+    let data = try Self.encoder().encode(profile)
+    #expect(String(decoding: data, as: UTF8.self).contains(#""provider":"gitlab""#))
+    let decoded = try JSONDecoder().decode(RunnerProfileConfig.self, from: data)
+    #expect(decoded == profile)
+    #expect(decoded.scope == nil)
+  }
+
   @Test func fullConfigurationRoundTrips() throws {
     let config = RunnerConfiguration(
       host: HostConfig(

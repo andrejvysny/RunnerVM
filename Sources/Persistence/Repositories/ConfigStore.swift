@@ -121,9 +121,15 @@ public final class GRDBConfigStore: ConfigStore, Sendable {
     let byName = Dictionary(existing.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
     try DatabaseErrorMapper.run(entity: "runner_profiles") {
       for profile in config.profiles {
-        guard let scopeId = scopeIds[profile.scope] else {
-          throw PersistenceError.foreignKeyViolated(entity: "runner_profiles", field: "scope_id")
+        if let current = byName[profile.name], current.provider != profile.provider {
+          // Scale-set sessions, runner sessions and their teardown all key off the profile's
+          // provider and scope; flipping it under live state strands them. Rename instead.
+          throw PersistenceError.conflict(
+            entity: "runner_profiles",
+            reason: "profile '\(profile.name)' cannot change provider from "
+              + "\(current.provider.rawValue) to \(profile.provider.rawValue); use a new profile name")
         }
+        let scopeId = try Self.resolveScopeId(profile, scopeIds: scopeIds)
         let desired = try Self.record(
           profile, scopeId: scopeId, existing: byName[profile.name], now: now)
         if let current = byName[profile.name] {
@@ -147,16 +153,28 @@ public final class GRDBConfigStore: ConfigStore, Sendable {
     }
   }
 
+  /// GitLab profiles have no scope; a GitHub profile naming an unapplied scope is a FK violation.
+  private static func resolveScopeId(
+    _ profile: RunnerProfileConfig, scopeIds: [String: GitHubScopeID]
+  ) throws -> GitHubScopeID? {
+    guard profile.isGitHub else { return nil }
+    guard let name = profile.scope, let scopeId = scopeIds[name] else {
+      throw PersistenceError.foreignKeyViolated(entity: "runner_profiles", field: "scope_id")
+    }
+    return scopeId
+  }
+
   /// Built from `existing` where present so `id`/`createdAt`/`updatedAt` survive an update and the
   /// equality check above only sees document-driven fields.
   private static func record(
-    _ profile: RunnerProfileConfig, scopeId: GitHubScopeID, existing: RunnerProfileRecord?,
+    _ profile: RunnerProfileConfig, scopeId: GitHubScopeID?, existing: RunnerProfileRecord?,
     now: DatabaseDate
   ) throws -> RunnerProfileRecord {
     RunnerProfileRecord(
       id: existing?.id ?? .generate(),
       name: profile.name,
       scopeId: scopeId,
+      provider: profile.provider,
       imageReference: profile.image,
       guestOS: profile.guestOS,
       lifecycle: profile.lifecycle,

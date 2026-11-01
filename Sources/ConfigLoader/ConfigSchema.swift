@@ -21,7 +21,7 @@ enum ConfigSchema {
   ])
 
   private static let profile: Shape = .object([
-    "name": .scalar, "scope": .scalar, "image": .scalar, "os": .scalar, "lifecycle": .scalar,
+    "name": .scalar, "scope": .scalar, "provider": .scalar, "image": .scalar, "os": .scalar, "lifecycle": .scalar,
     "resources": resources,
     "warmPool": .object(["minIdle": .scalar, "maxIdle": .scalar, "idleTTL": .scalar]),
     "limits": .object(["maxInstances": .scalar]),

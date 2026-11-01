@@ -318,7 +318,7 @@ actor DaemonServiceImpl: DaemonService {
     return ProfileListResponse(
       profiles: records
         .sorted { $0.name < $1.name }
-        .map { Mapping.profile($0, scopeName: names[$0.scopeId] ?? $0.scopeId.rawValue) })
+        .map { Mapping.profile($0, scopeName: Self.scopeName($0, names)) })
   }
 
   func profileGet(_ request: ProfileGetRequest) async throws -> ProfileSummary {
@@ -326,7 +326,7 @@ actor DaemonServiceImpl: DaemonService {
       throw DaemonServiceError.notFound(entity: "profile", name: request.name)
     }
     let names = try await scopeNamesById()
-    return Mapping.profile(record, scopeName: names[record.scopeId] ?? record.scopeId.rawValue)
+    return Mapping.profile(record, scopeName: Self.scopeName(record, names))
   }
 
   func scopeList() async throws -> ScopeListResponse {
@@ -339,6 +339,12 @@ actor DaemonServiceImpl: DaemonService {
       throw DaemonServiceError.notFound(entity: "scope", name: request.name)
     }
     return Mapping.scope(record)
+  }
+
+  private static func scopeName(
+    _ record: RunnerProfileRecord, _ names: [GitHubScopeID: String]
+  ) -> String? {
+    record.scopeId.map { names[$0] ?? $0.rawValue }
   }
 
   private func scopeNamesById() async throws -> [GitHubScopeID: String] {
@@ -400,13 +406,24 @@ actor DaemonServiceImpl: DaemonService {
   /// the same guarantee once the *host* itself is already past its floor.
   func instanceCreate(_ request: InstanceCreateRequest) async throws -> InstanceInfoDTO {
     let options = try Self.createOptions(request, now: Date())
+    if options.purpose != .maintenance,
+       try await profiles.get(name: request.profile)?.provider == .gitlab {
+      throw OrchestrationError.gitlabProfileFleetOnly(profile: request.profile)
+    }
+    let record = try await createInstance(profileName: request.profile, options: options)
+    return await describe(record, names: try await profileNamesById())
+  }
+
+  /// The admission path shared by `instance.create` and `fleet.create`.
+  func createInstance(
+    profileName: String, options: InstanceCreateOptions
+  ) async throws -> InstanceRecord {
     let pressure = await diskPressure.refresh(floorBytes: reserveDiskFloor())
     guard pressure.state != .critical else {
       throw OrchestrationError.diskPressureCritical(
         freeBytes: pressure.freeBytes, floorBytes: pressure.floorBytes)
     }
-    let record = try await instances.create(profileName: request.profile, options: options)
-    return await describe(record, names: try await profileNamesById())
+    return try await instances.create(profileName: profileName, options: options)
   }
 
   /// Wire request -> `InstanceCreateOptions`, with the three refusals that belong to the protocol
@@ -430,6 +447,7 @@ actor DaemonServiceImpl: DaemonService {
     } else {
       purpose = .runner
     }
+    guard purpose != .fleet else { throw OrchestrationError.fleetUseFleetAPI }
     guard purpose == .maintenance else {
       guard request.imageOverride == nil else {
         throw OrchestrationError.imageOverrideMaintenanceOnly

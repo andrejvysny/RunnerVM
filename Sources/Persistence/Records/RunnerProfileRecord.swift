@@ -7,7 +7,9 @@ import RunnerCore
 public struct RunnerProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Hashable {
   public var id: RunnerProfileID
   public var name: String
-  public var scopeId: GitHubScopeID
+  /// `nil` exactly when `provider == .gitlab` (enforced by a table CHECK).
+  public var scopeId: GitHubScopeID?
+  public var provider: ProfileProvider
   public var imageReference: String
   public var guestOS: GuestOS
   public var lifecycle: InstanceLifecycle
@@ -24,7 +26,8 @@ public struct RunnerProfileRecord: Codable, FetchableRecord, PersistableRecord, 
   public var updatedAt: DatabaseDate
 
   public init(
-    id: RunnerProfileID, name: String, scopeId: GitHubScopeID, imageReference: String, guestOS: GuestOS,
+    id: RunnerProfileID, name: String, scopeId: GitHubScopeID?, provider: ProfileProvider = .github,
+    imageReference: String, guestOS: GuestOS,
     lifecycle: InstanceLifecycle, cpuCount: Int, memoryBytes: UInt64, diskBytes: UInt64,
     minIdle: Int = 0, maxIdle: Int = 0, maxInstances: Int? = nil, sshEnabled: Bool = true,
     configJson: String, enabled: Bool = true, createdAt: DatabaseDate, updatedAt: DatabaseDate
@@ -32,6 +35,7 @@ public struct RunnerProfileRecord: Codable, FetchableRecord, PersistableRecord, 
     self.id = id
     self.name = name
     self.scopeId = scopeId
+    self.provider = provider
     self.imageReference = imageReference
     self.guestOS = guestOS
     self.lifecycle = lifecycle
@@ -51,7 +55,7 @@ public struct RunnerProfileRecord: Codable, FetchableRecord, PersistableRecord, 
   public static let databaseTableName = "runner_profiles"
 
   private enum CodingKeys: String, CodingKey {
-    case id, name, lifecycle, enabled
+    case id, name, lifecycle, enabled, provider
     case scopeId = "scope_id"
     case imageReference = "image_reference"
     case guestOS = "guest_os"

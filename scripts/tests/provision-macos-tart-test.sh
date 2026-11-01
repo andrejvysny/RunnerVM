@@ -52,6 +52,7 @@ if help_out="$("$SCRIPT" --help 2>&1)"; then
     expect_contains "$help_out" "--keep-vm-running" "--help documents --keep-vm-running"
     expect_contains "$help_out" "--debug-ssh" "--help documents --debug-ssh"
     expect_contains "$help_out" "--allow-dirty-seal" "--help documents --allow-dirty-seal"
+    expect_contains "$help_out" "--gitlab-runner-sha256" "--help documents the GitLab variant"
     expect_contains "$help_out" "RVM_RELEASE_JSON_FILE" "--help documents the release JSON seam"
 else
     no "--help exits 0" "$help_out"
@@ -200,6 +201,24 @@ write_metadata "$CONFIG" "$DEBUG_META"
 expect_eq "$(jq -r .capabilities.ssh "$DEBUG_META")" "true" \
     "--debug-ssh records capabilities.ssh: true"
 DEBUG_SSH=0
+
+# Default metadata must not mention the GitLab variant at all (the default seal is unchanged).
+expect_eq "$(jq -r '.capabilities | has("gitlab")' "$META")" "false" \
+    "the default metadata has no capabilities.gitlab"
+expect_eq "$(jq -r '.capabilities.labels | has("runnervm.gitlab")' "$META")" "false" \
+    "the default metadata has no runnervm.gitlab label"
+
+# The GitLab variant keeps sshd on and says so, in both the capability and the label.
+GITLAB_META="$TWORK/metadata-gitlab.json"
+GITLAB_RUNNER_VERSION="19.4.1"
+write_metadata "$CONFIG" "$GITLAB_META"
+expect_eq "$(jq -r .capabilities.ssh "$GITLAB_META")" "true" "the GitLab variant records capabilities.ssh: true"
+expect_eq "$(jq -r .capabilities.gitlab "$GITLAB_META")" "true" "the GitLab variant records capabilities.gitlab: true"
+expect_eq "$(jq -r '.capabilities.labels."runnervm.gitlab"' "$GITLAB_META")" "true" \
+    "the GitLab variant records the runnervm.gitlab label"
+expect_eq "$(jq -r '.capabilities.labels."runnervm.source"' "$GITLAB_META")" "tart" \
+    "the GitLab variant keeps the other labels"
+GITLAB_RUNNER_VERSION=""
 
 # Missing sizing floors are refused, not silently omitted: admission now requires both, so an
 # image without them could never create an instance.
@@ -627,6 +646,104 @@ assert data['ssh'] is True, data['ssh']
 else
     no "--result is written on failure" "$ATTACH_FAILURE_RESULT missing"
 fi
+
+# --------------------------------------------------------------------------
+# 13. GitLab variant: flag validation (real subprocess), env passthrough, harden-report parsing
+# --------------------------------------------------------------------------
+GL_SHA="9763a63f7bc2319119f80de41d1d414465b5268d072bcd55266020b989e93ee9"
+if out="$("$SCRIPT" --gitlab-runner 19.4.1 2>&1)"; then
+    no "--gitlab-runner without a digest fails" "exited 0"
+else
+    expect_contains "$out" "must be given together" "--gitlab-runner without a digest fails"
+fi
+if out="$("$SCRIPT" --gitlab-runner-sha256 "$GL_SHA" 2>&1)"; then
+    no "--gitlab-runner-sha256 without a version fails" "exited 0"
+else
+    expect_contains "$out" "must be given together" "--gitlab-runner-sha256 without a version fails"
+fi
+if out="$("$SCRIPT" --gitlab-runner latest --gitlab-runner-sha256 "$GL_SHA" 2>&1)"; then
+    no "a non-numeric --gitlab-runner version fails" "exited 0"
+else
+    expect_contains "$out" "must be a version like 19.4.1" "--gitlab-runner version is validated"
+fi
+if out="$("$SCRIPT" --gitlab-runner 19.4.1 --gitlab-runner-sha256 nothex 2>&1)"; then
+    no "a malformed --gitlab-runner-sha256 fails" "exited 0"
+else
+    expect_contains "$out" "--gitlab-runner-sha256 must be 64 lowercase hex" \
+        "--gitlab-runner-sha256 is validated"
+fi
+if out="$("$SCRIPT" --gitlab-runner 19.4.1 --gitlab-runner-sha256 "$GL_SHA" --debug-ssh 2>&1)"; then
+    no "--gitlab-runner with --debug-ssh fails" "exited 0"
+else
+    expect_contains "$out" "mutually exclusive" "--gitlab-runner and --debug-ssh are exclusive"
+fi
+
+# validate_gitlab_args normalises a leading v and accepts a good pair (also on the attach path,
+# which shares parse_args).
+GITLAB_RUNNER_VERSION="v19.4.1"
+GITLAB_RUNNER_SHA256="$GL_SHA"
+DEBUG_SSH=0
+validate_gitlab_args
+expect_eq "$GITLAB_RUNNER_VERSION" "19.4.1" "a leading v is stripped from --gitlab-runner"
+
+expect_contains "$(gitlab_guest_env)" "GITLAB_RUNNER_VERSION='19.4.1'" "the guest env carries the version"
+expect_contains "$(gitlab_guest_env)" "GITLAB_RUNNER_SHA256='$GL_SHA'" "the guest env carries the digest"
+if ssh_kept; then ok "the GitLab variant keeps ssh"; else no "the GitLab variant keeps ssh" "ssh_kept false"; fi
+expect_eq "$(ssh_kept_json)" "true" "the attach result reports ssh: true for the GitLab variant"
+ATTACH_IP="127.0.0.1"
+HARDEN_DONE=0
+expect_eq "$(failure_ssh_json)" "true" "a GitLab attach failure reports ssh: true"
+HARDEN_DONE=1
+expect_eq "$(failure_ssh_json)" "true" "a GitLab attach failure after the lockdown still reports ssh: true"
+
+# harden report: the GitLab variant must show sshd on and key-only, not disabled.
+GL_HARDEN="$TWORK/harden-gitlab.txt"
+cat >"$GL_HARDEN" <<'TXT'
+RVM-HARDEN-V1
+harden_user=admin
+password_rotated=yes
+old_password_rejected=yes
+authorized_keys_removed=1
+sshd_disabled=no
+sshd_key_only=yes
+RVM-HARDEN-END
+TXT
+HARDEN_REPORT="$GL_HARDEN"
+SSH_USER="admin"
+if out="$(check_harden_report 2>&1)"; then
+    expect_contains "$out" "sshd kept on" "a GitLab harden report with sshd on and key-only passes"
+else
+    no "a GitLab harden report with sshd on and key-only passes" "$out"
+fi
+sed -i.bak 's/^sshd_key_only=yes$/sshd_key_only=no/' "$GL_HARDEN"
+if out="$(check_harden_report 2>&1)"; then
+    no "a GitLab harden report without key-only sshd fails" "exited 0"
+else
+    expect_contains "$out" "key-only sshd" "a GitLab harden report without key-only sshd fails"
+fi
+# A default-variant report claiming sshd on must still fail.
+GITLAB_RUNNER_VERSION=""
+GITLAB_RUNNER_SHA256=""
+if out="$(check_harden_report 2>&1)"; then
+    no "the default variant still requires sshd_disabled=yes" "exited 0"
+else
+    expect_contains "$out" "did not disable com.openssh.sshd" "the default variant still requires sshd_disabled=yes"
+fi
+ATTACH_IP=""
+HARDEN_DONE=0
+expect_eq "$(failure_ssh_json)" "true" "a default attach failure before the lockdown reports ssh: true"
+HARDEN_DONE=1
+expect_eq "$(failure_ssh_json)" "false" "a default attach failure after the lockdown reports ssh: false"
+HARDEN_DONE=0
+expect_eq "$(gitlab_guest_env)" "" "the default variant passes no GitLab env to the guest"
+
+# The guest script: the GitLab seal must not turn Remote Login off, and the default must.
+GUEST_SRC="$(cat "$GUEST_SCRIPT")"
+expect_contains "$GUEST_SRC" "100-runnervm-gitlab.conf" "the guest script writes the GitLab sshd drop-in"
+expect_contains "$GUEST_SRC" "'AllowUsers runner'" "the GitLab drop-in restricts logins to runner"
+expect_contains "$GUEST_SRC" "'PasswordAuthentication no'" "the GitLab drop-in refuses passwords"
+expect_contains "$GUEST_SRC" "gitlab-runner-darwin-arm64" "the guest script downloads the darwin-arm64 binary"
+expect_contains "$GUEST_SRC" "systemsetup -f -setremotelogin off" "the default seal still turns Remote Login off"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -87,6 +87,8 @@ jobs:
         run: bash scripts/tests/qualify-macos-image-test.sh
       - name: macOS live driver unit test
         run: bash scripts/tests/live-macos-e2e-test.sh
+      - name: GitLab live driver unit test
+        run: bash scripts/tests/live-gitlab-e2e-test.sh
       - name: image publishing script unit test
         run: bash scripts/tests/publish-images-test.sh
       - name: pkg build script unit test

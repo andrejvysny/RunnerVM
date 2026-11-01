@@ -20,7 +20,10 @@
 #   5. the guest agent's LaunchDaemon is loaded, from a real boot rather than from `launchctl
 #      bootstrap` during provisioning
 #   6. the seal-time lockdown held: nothing is listening on TCP/22, `com.openssh.sshd` is disabled,
-#      and the base image's `admin`/`admin` credential no longer authenticates
+#      and the base image's `admin`/`admin` credential no longer authenticates.
+#      GitLab variant (image metadata says capabilities.gitlab: true -- provision-macos-tart.sh
+#      --gitlab-runner): the opposite on purpose -- TCP/22 open, password authentication refused,
+#      no authorized_keys at rest, and gitlab-runner installed but not registered.
 #   7. the instance tears down cleanly and leaves nothing behind
 #   8. the image's digest is unchanged -- qualification is read-only with respect to the image
 #
@@ -39,6 +42,7 @@ EXEC_TIMEOUT=60
 ALLOW_SSH=0
 KEEP_VM=0
 DRY_RUN=0
+GITLAB_VARIANT=0
 
 RUNNERCTL_BIN=""
 INSTANCE_ID=""
@@ -61,12 +65,14 @@ Required:
 
 Options:
   --socket <path>        runnerd.sock (default: $RUNNERVM_SOCKET, else runnerctl's own default).
-  --state-dir <path>     Only used to place the report when --json is not given.
+  --state-dir <path>     Place the report when --json is not given, and read the image's sealed
+                         metadata.json to detect the GitLab variant (capabilities.gitlab: true).
   --json <path>          Write the JSON report here.
   --boot-timeout <s>     Seconds to wait for the clone to reach `idle` (default: 900).
   --teardown-timeout <s> Seconds to wait for the instance to disappear (default: 300).
   --allow-ssh            The image was built with --debug-ssh: skip the SSH lockdown checks and
-                         record them as skipped rather than failing them.
+                         record them as skipped rather than failing them. A GitLab-variant image
+                         is detected from its metadata and needs no flag.
   --keep                 Leave the instance running when the run finishes (debugging; the
                          teardown and leak checks are then skipped and the run is not a pass).
   --dry-run              Print the plan and exit.
@@ -209,6 +215,30 @@ check_preconditions() {
     IMAGE_DIGEST_BEFORE=$(rc image inspect "$IMAGE_REF" | jq -r '.digest') ||
         die "cannot resolve the profile's image: $IMAGE_REF"
     log "profile $PROFILE -> image $IMAGE_REF ($IMAGE_DIGEST_BEFORE)"
+    detect_gitlab_variant
+}
+
+# Same path scripts/publish-images.sh reads: the sealed metadata.json beside the local manifest.
+# `capabilities.gitlab` is the documented field; the `runnervm.gitlab` label is what survives an
+# import that re-encodes the metadata (Capabilities has no `gitlab` member). Unreadable metadata
+# (no --state-dir) means the default lockdown checks run, which a GitLab image then fails closed.
+detect_gitlab_variant() {
+    local metadata
+    GITLAB_VARIANT=0
+    [ -n "$STATE_DIR" ] || return 0
+    metadata="$STATE_DIR/images/manifests/${IMAGE_DIGEST_BEFORE/:/-}/metadata.json"
+    if [ ! -r "$metadata" ]; then
+        warn "cannot read $metadata; assuming the default (SSH closed) variant"
+        return 0
+    fi
+    gitlab_variant_from_metadata "$metadata" && GITLAB_VARIANT=1
+    [ "$GITLAB_VARIANT" -eq 0 ] || log "GitLab variant: SSH is expected open, key-only"
+    return 0
+}
+
+gitlab_variant_from_metadata() {
+    [ "$(jq -r '(.capabilities.gitlab == true) or (.capabilities.labels["runnervm.gitlab"] == "true")' \
+        "$1" 2>/dev/null)" = "true" ]
 }
 
 # --------------------------------------------------------------------------
@@ -293,6 +323,10 @@ check_launch_daemon() {
 # 6. The seal-time lockdown survived the reboot
 # --------------------------------------------------------------------------
 check_ssh_lockdown() {
+    if [ "$GITLAB_VARIANT" -eq 1 ]; then
+        check_gitlab_ssh
+        return 0
+    fi
     if [ "$ALLOW_SSH" -eq 1 ]; then
         skip ssh_port_closed "--allow-ssh: the image was built with --debug-ssh"
         skip sshd_disabled "--allow-ssh"
@@ -324,6 +358,64 @@ check_ssh_lockdown() {
         "admin/admin accepted=$accepted"
 
     check_ssh_unreachable_from_host
+}
+
+# --------------------------------------------------------------------------
+# 6 (GitLab variant). sshd on, key-only, nothing at rest, gitlab-runner present but unregistered
+# --------------------------------------------------------------------------
+# Pure: 0 when ssh's stderr shows the server was reached and refused authentication -- the only
+# result that proves password logins are off. A refused or timed-out connection is not that: it
+# means nothing answered, so it must not read as "key-only".
+ssh_auth_refused() {
+    case "$1" in
+    *"Connection refused"* | *"timed out"* | *"No route to host"* | *"Could not resolve"*) return 1 ;;
+    *"Permission denied"*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+check_gitlab_ssh() {
+    local address out count version
+    address=$(guest_sh 'ipconfig getifaddr en0 2>/dev/null || true')
+    address="$(printf '%s' "$address" | tr -d '\r\n')"
+    if [ -z "$address" ]; then
+        assert gitlab_ssh_port_open 1 "the guest reported no en0 address"
+        assert gitlab_ssh_password_refused 1 "the guest reported no en0 address"
+    elif nc -z -G 5 "$address" 22 >/dev/null 2>&1; then
+        assert gitlab_ssh_port_open 0 "$address:22 accepts connections"
+        # Password only, never a key: BatchMode forbids prompting, so the answer is the server's.
+        out=$(ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null "runner@$address" true 2>&1 </dev/null) || true
+        if ssh_auth_refused "$out"; then
+            assert gitlab_ssh_password_refused 0 "runner@$address: Permission denied"
+        else
+            assert gitlab_ssh_password_refused 1 "unexpected ssh result: $(printf '%s' "$out" | tail -1)"
+        fi
+    else
+        assert gitlab_ssh_port_open 1 "$address:22 refused or timed out"
+        assert gitlab_ssh_password_refused 1 "could not reach $address:22"
+    fi
+
+    local accepted
+    accepted=$(guest_sh "dscl . -authonly admin admin >/dev/null 2>&1 && echo yes || echo no")
+    accepted="$(printf '%s' "$accepted" | tr -d '\r\n')"
+    assert default_credential_rejected "$([ "$accepted" = "no" ] && echo 0 || echo 1)" \
+        "admin/admin accepted=$accepted"
+
+    count=$(guest_sh "find /Users /var/root /etc/ssh -name 'authorized_keys*' 2>/dev/null | wc -l")
+    count="$(printf '%s' "$count" | tr -cd '0-9')"
+    assert no_authorized_keys_at_rest "$([ "${count:-1}" = "0" ] && echo 0 || echo 1)" \
+        "${count:-unknown} authorized_keys file(s)"
+
+    version=$(guest /usr/local/bin/gitlab-runner --version)
+    version="$(printf '%s' "$version" | tr -d '\r' | sed -n 's/^Version:[[:space:]]*//p' | head -1)"
+    assert gitlab_runner_runs "$([ -n "$version" ] && echo 0 || echo 1)" "gitlab-runner --version=${version:--}"
+
+    out=$(guest_sh "ls /etc/gitlab-runner/config.toml /Users/runner/.gitlab-runner/config.toml 2>/dev/null | wc -l")
+    out="$(printf '%s' "$out" | tr -cd '0-9')"
+    assert gitlab_runner_not_registered "$([ "${out:-1}" = "0" ] && echo 0 || echo 1)" \
+        "${out:-unknown} config.toml file(s)"
 }
 
 # Belt and braces from the host's side of the NAT. Best effort: the guest may report no address,
@@ -410,6 +502,8 @@ qualify-macos-image.sh plan
   boot timeout     ${BOOT_TIMEOUT}s
   teardown timeout ${TEARDOWN_TIMEOUT}s
   ssh checks       $([ "$ALLOW_SSH" -eq 1 ] && echo "skipped (--allow-ssh)" || echo "enforced")
+                   (a GitLab-variant image, per its metadata, is checked for the opposite: tcp/22
+                   open, password auth refused, gitlab-runner runs -- needs --state-dir)
 
   1. resolve the profile and its image digest
   2. runnerctl vm create --profile $PROFILE --pinned --ttl 30m
@@ -417,6 +511,7 @@ qualify-macos-image.sh plan
   4. agent handshake (bootId), agent.metrics, exec sw_vers
   5. guest agent LaunchDaemon loaded after a real boot
   6. tcp/22 closed, com.openssh.sshd disabled, admin/admin rejected, host cannot reach :22
+     (GitLab variant: tcp/22 open, password auth refused, no authorized_keys, gitlab-runner runs)
   7. runnerctl vm delete, then no live instances and no instance directory
   8. the image digest is unchanged
 PLAN

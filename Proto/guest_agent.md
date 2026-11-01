@@ -7,7 +7,7 @@ Host initiates everything. Agent runs as root (Linux systemd / macOS launchd); r
 |---|---|---|
 | `agent.hello` | readOnly | `{}` → `{protocolVersion:1, agentVersion, os, arch, hostname, bootId, capabilities:[...]}` |
 | `agent.health` | readOnly | `{}` → `{state: starting\|ready\|degraded\|shuttingDown, reasons:[...]}` |
-| `agent.getInfo` | readOnly | `{}` → `{ipAddresses:[...], uptimeSec, kernel, runnerVersion?, dockerVersion?}` |
+| `agent.getInfo` | readOnly | `{}` → `{ipAddresses:[...], primaryAddress?, uptimeSec, kernel, runnerVersion?, dockerVersion?}` |
 | `agent.getMetrics` | readOnly | `{}` → spec §39 object (all counts int64) |
 | `agent.selfTest` | readOnly | `{}` → `{checks:[{name, ok, detail}]}` — macOS: proves an injected certificate can codesign; Linux: `{checks:[]}` (see below) |
 | `agent.resizeDisk` | idempotentMutation | `{}` → `{grown: bool, rootBytes}` — Linux: growpart + resize2fs; macOS: NOT_SUPPORTED in v1 |

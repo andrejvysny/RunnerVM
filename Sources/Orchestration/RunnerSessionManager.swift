@@ -177,7 +177,7 @@ public actor RunnerSessionManager {
     else {
       throw SchedulerError.unknownProfile(name: instance.profileId.rawValue)
     }
-    let scopeRecord = try await requireSchedulableScope(profileRow.scopeId)
+    let scopeRecord = try await requireSchedulableScope(profileRow)
     guard let plane = await gateway.controlPlane() else {
       throw OrchestrationError.githubNotConfigured(
         reason: "no GitHub credential provider is configured")
@@ -196,12 +196,19 @@ public actor RunnerSessionManager {
   /// Fails before any capacity is consumed. `startSession` re-checks — the scope can go bad while
   /// a VM boots — but a caller that is about to create one should not pay for the boot first.
   public func assertSchedulable(profile: RunnerProfileRecord) async throws {
-    _ = try await requireSchedulableScope(profile.scopeId)
+    _ = try await requireSchedulableScope(profile)
   }
 
   /// Spec §134: a scope GitHub no longer answers for stops receiving runners, rather than failing
   /// every job it is handed.
-  private func requireSchedulableScope(_ id: GitHubScopeID) async throws -> GitHubScopeRecord {
+  private func requireSchedulableScope(
+    _ profile: RunnerProfileRecord
+  ) async throws -> GitHubScopeRecord {
+    // A GitLab profile has no scope and never gets a GitHub runner session.
+    guard profile.provider == .github, let id = profile.scopeId else {
+      throw OrchestrationError.githubNotConfigured(
+        reason: "profile '\(profile.name)' is not a GitHub profile")
+    }
     guard let record = try await scopes.list().first(where: { $0.id == id }) else {
       throw DaemonServiceError.notFound(entity: "scope", name: id.rawValue)
     }

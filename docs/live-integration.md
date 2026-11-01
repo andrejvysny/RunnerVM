@@ -417,3 +417,36 @@ that reports 100 successes and leaks a guest is a failed soak.
 `scripts/tests/live-macos-e2e-test.sh` and `scripts/tests/qualify-macos-image-test.sh` cover both
 drivers' pure helpers — scenario selection, the identity and leak assertions against a fake state
 directory, the report shape — with no daemon, VM or GitHub.
+
+## Live GitLab E2E (`scripts/live-gitlab-e2e.sh`)
+
+Opt-in proof that a real GitLab job runs inside a RunnerVM VM through the fleeting plugin
+([gitlab.md](gitlab.md)). It never runs in CI.
+
+Setup once: a dedicated GitLab project whose default branch contains `docs/e2e/gitlab-ci.yml` as
+`.gitlab-ci.yml`; a `provider: gitlab` profile with a ready image; `gitlab-runner`, `curl`, `jq`
+and `fleeting-plugin-runnervm` on `PATH`; a PAT with `api`, `create_runner` and `manage_runner`.
+
+```sh
+export RUNNERVM_E2E_GITLAB_PROJECT=group/runnervm-e2e      # path or numeric id
+export RUNNERVM_E2E_GITLAB_PROFILE=ubuntu-24-gitlab
+export RUNNERVM_E2E_GITLAB_TOKEN=glpat-...                 # never echoed
+# optional: RUNNERVM_E2E_GITLAB_URL (default https://gitlab.com), RUNNERVM_E2E_SOCKET,
+#           RUNNERVM_E2E_GITLAB_EXECUTOR=instance|docker-autoscaler
+
+RUNNERVM_E2E_DRY_RUN=1 scripts/live-gitlab-e2e.sh   # print the plan and config.toml, touch nothing
+scripts/live-gitlab-e2e.sh
+```
+
+It creates a project runner tagged `runnervm-e2e`, writes a 0600 `config.toml` (one job per VM,
+scale to zero), starts `gitlab-runner`, triggers a pipeline with `RUNNERVM_E2E_EXECUTOR` set so
+only the matching job from `gitlab-ci.yml` runs (the `docker-autoscaler` job needs a Linux profile
+and that executor), requires success, then waits until no `purpose: fleet` instance of the profile
+remains. A trap stops gitlab-runner, deletes the runner and removes the temp dir; on failure the
+redacted gitlab-runner log is kept in `$TMPDIR`.
+
+Exit codes: 0 pass; 1 pipeline did not succeed; 2 usage/config; 3 preflight; 4 GitLab API or
+gitlab-runner failure; 5 pipeline timeout (`RUNNERVM_E2E_PIPELINE_TIMEOUT`, default 1200 s);
+6 fleet VMs left over (`RUNNERVM_E2E_LEFTOVER_TIMEOUT`, default 180 s).
+`scripts/tests/live-gitlab-e2e-test.sh` covers argument handling, the dry-run plan, config
+rendering and token redaction without GitLab or a daemon.

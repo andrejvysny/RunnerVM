@@ -342,6 +342,12 @@ binary plist works, and both `skip` on a host with no launchd job installed.
 full") — `APFSClone.freeSpace` logs this once per process at `component=image`; grep
 `runnerd.log`/`stdio.log` for that line to see why the volume query failed.
 
+## GitLab autoscaled runners
+
+RunnerVM can also supply VMs to gitlab-runner through a fleeting plugin. It needs a
+`provider: gitlab` profile, the plugin binary on `PATH`, and gitlab-runner running as `_runnervm`.
+See [gitlab.md](gitlab.md); `runnerctl doctor --config` warns if the plugin binary is missing.
+
 ## Log locations
 
 - `<state-dir>/logs/runnerd/runnerd.log` — the daemon's JSON log. `runnerd` writes and rotates it

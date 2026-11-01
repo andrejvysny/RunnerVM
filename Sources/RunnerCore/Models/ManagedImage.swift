@@ -2,9 +2,12 @@ import Foundation
 
 /// `instances.purpose` (`docs/db_schema_v4.sql`). A `maintenance` instance qualifies a candidate
 /// managed image rather than running a job, so the scheduler and demand accounting exclude it.
+/// A `fleet` instance is created only by `fleet.create` for a GitLab profile and is leased the
+/// same way (`pinned_until`); the scheduler excludes it for the same reason (`Proto/fleet.md`).
 public enum InstancePurpose: String, Codable, Sendable, CaseIterable, Hashable {
   case runner
   case maintenance
+  case fleet
 }
 
 /// `image_builds.kind` (`docs/db_schema_v4.sql`). Distinguishes a macOS guest-provisioning build

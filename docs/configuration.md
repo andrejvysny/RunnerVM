@@ -8,6 +8,18 @@ the cited file if you suspect drift.
 is lenient) gets `TimeoutPolicy.default`
 (`Sources/RunnerCore/Models/RunnerProfileConfig.swift:108-158`).
 
+## `profiles[].provider` and `scope`
+
+`provider` is `github` (default) or `gitlab`. A GitHub profile needs `scope`, naming a
+`github.scopes[]` entry, and is driven by RunnerVM's own scale-set demand. A GitLab profile has no
+GitHub scope and only supplies VMs when gitlab-runner asks for them (see [gitlab.md](gitlab.md)):
+
+| rule | code |
+| --- | --- |
+| `scope` must be absent | `PROFILE_GITLAB_SCOPE_UNSUPPORTED` |
+| `lifecycle` must be `ephemeral` | `PROFILE_GITLAB_EPHEMERAL_ONLY` |
+| `warmPool.minIdle`/`maxIdle` must be 0 (use gitlab-runner `idle_count`) | `PROFILE_GITLAB_WARM_POOL_UNSUPPORTED` |
+
 ## `profiles[].timeouts`
 
 | field | default | what it bounds | on expiry |

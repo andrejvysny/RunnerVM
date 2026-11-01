@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -176,5 +177,25 @@ func TestUnknownPayloadFieldIsRejected(t *testing.T) {
 	err := h.callErr(t, "agent.runnerStatus", map[string]any{"session": "s1"})
 	if err.Code != "INVALID_PARAMS" {
 		t.Fatalf("code = %q, want INVALID_PARAMS", err.Code)
+	}
+}
+
+// primaryAddress is optional (no default route in a sandbox), but when
+// present it must be a bare IPv4.
+func TestGetInfoPrimaryAddress(t *testing.T) {
+	h := newHarness(t, nil)
+
+	var raw map[string]json.RawMessage
+	h.call(t, "agent.getInfo", nil, &raw)
+	v, ok := raw["primaryAddress"]
+	if !ok {
+		return
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		t.Fatalf("primaryAddress is not a string: %v", err)
+	}
+	if ip := net.ParseIP(s); ip == nil || ip.To4() == nil {
+		t.Fatalf("primaryAddress = %q, want IPv4", s)
 	}
 }

@@ -181,8 +181,9 @@ public struct ProfileLimits: Codable, Sendable, Hashable {
 /// The primary scheduling/configuration unit (spec §10).
 public struct RunnerProfileConfig: Codable, Sendable, Hashable {
   public var name: String
-  /// `GitHubScopeConfig.name` this profile registers under.
-  public var scope: String
+  /// `GitHubScopeConfig.name` this profile registers under. `nil` for GitLab profiles.
+  public var scope: String?
+  public var provider: ProfileProvider
   /// Image reference string; validated with `ImageReference` rather than stored parsed, because a
   /// profile keeps its literal tag while instances pin the resolved digest (spec §138).
   public var image: String
@@ -204,7 +205,8 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
 
   public init(
     name: String,
-    scope: String,
+    scope: String?,
+    provider: ProfileProvider = .github,
     image: String,
     guestOS: GuestOS,
     lifecycle: InstanceLifecycle = .ephemeral,
@@ -218,6 +220,7 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
   ) {
     self.name = name
     self.scope = scope
+    self.provider = provider
     self.image = image
     self.guestOS = guestOS
     self.lifecycle = lifecycle
@@ -229,6 +232,8 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
     self.timeouts = timeouts
     self.allowHostedLabelShadowing = allowHostedLabelShadowing
   }
+
+  public var isGitHub: Bool { provider == .github }
 
   public var effectiveTimeouts: TimeoutPolicy { timeouts ?? .default }
 
@@ -242,7 +247,7 @@ public struct RunnerProfileConfig: Codable, Sendable, Hashable {
 
 extension RunnerProfileConfig {
   private enum CodingKeys: String, CodingKey {
-    case name, scope, image, guestOS, lifecycle, resources, warmPool, limits, ssh, reuse, timeouts
+    case name, scope, provider, image, guestOS, lifecycle, resources, warmPool, limits, ssh, reuse, timeouts
     case allowHostedLabelShadowing
   }
 
@@ -253,7 +258,8 @@ extension RunnerProfileConfig {
     let guestOS = try c.decode(GuestOS.self, forKey: .guestOS)
     self.init(
       name: try c.decode(String.self, forKey: .name),
-      scope: try c.decode(String.self, forKey: .scope),
+      scope: try c.decodeIfPresent(String.self, forKey: .scope),
+      provider: try c.decodeIfPresent(ProfileProvider.self, forKey: .provider) ?? .github,
       image: try c.decode(String.self, forKey: .image),
       guestOS: guestOS,
       lifecycle: try c.decodeIfPresent(InstanceLifecycle.self, forKey: .lifecycle) ?? .ephemeral,

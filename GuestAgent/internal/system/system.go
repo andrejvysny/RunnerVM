@@ -142,6 +142,25 @@ func IPAddresses() []string {
 	return out
 }
 
+// PrimaryAddress returns the local IPv4 the kernel would use for the default
+// route, or "" if there is none. A UDP "connect" only selects a route; no
+// packet is sent.
+func PrimaryAddress() string { return primaryAddress(net.Dial) }
+
+func primaryAddress(dial func(network, address string) (net.Conn, error)) string {
+	// 192.0.2.1 is TEST-NET-1: never routed anywhere, only used to pick a route.
+	conn, err := dial("udp4", "192.0.2.1:9")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	udp, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || udp.IP.To4() == nil || udp.IP.IsUnspecified() {
+		return ""
+	}
+	return udp.IP.String()
+}
+
 // isVirtualBridgeInterface reports interfaces created by container runtimes;
 // their addresses are never reachable from the host and must not win SSH.
 func isVirtualBridgeInterface(name string) bool {

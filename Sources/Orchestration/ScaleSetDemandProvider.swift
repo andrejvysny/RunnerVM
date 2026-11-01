@@ -122,8 +122,8 @@ public actor ScaleSetDemandProvider: DemandProvider {
       await retire(profileId)
     }
     let scopesById = Dictionary(scopeRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-    for row in rows where row.enabled && states[row.id] == nil {
-      guard let scopeRow = scopesById[row.scopeId], scopeRow.enabled,
+    for row in rows where row.enabled && row.provider == .github && states[row.id] == nil {
+      guard let scopeId = row.scopeId, let scopeRow = scopesById[scopeId], scopeRow.enabled,
             scopeRow.health == GitHubMapping.healthy, shouldRetryRegistration(row.id)
       else { continue }
       await register(row, scopeRecord: scopeRow, plane: plane)

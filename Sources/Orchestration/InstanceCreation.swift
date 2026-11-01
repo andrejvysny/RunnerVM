@@ -11,7 +11,8 @@ import RunnerLogging
 /// Defaulted throughout, so the scheduler's own `create(profileName:)` and every pre-existing
 /// call site keep meaning exactly what they meant before: an ordinary, unpinned runner VM.
 public struct InstanceCreateOptions: Sendable, Hashable {
-  /// `runner` (the scheduler owns it) or `maintenance` (pinned; the scheduler never plans it).
+  /// `runner` (the scheduler owns it), `maintenance` (pinned; the scheduler never plans it) or
+  /// `fleet` (leased to a GitLab fleeting plugin; same fence).
   public var purpose: InstancePurpose
   /// Absolute deadline `MaintenanceInstanceReaper` deletes the instance at. Required for
   /// `maintenance`, meaningless for `runner` — the daemon handler is what enforces that.
@@ -88,8 +89,13 @@ extension InstanceManager {
     guard image.metadata.os == profile.guestOS else {
       throw ImageError.incompatibleGuestOS(expected: profile.guestOS, actual: image.metadata.os)
     }
+    // A macOS fleet VM is reached only through ssh, and the key install path assumes sshd is up.
+    if options.purpose == .fleet, profile.guestOS == .macos, !image.metadata.capabilities.ssh {
+      throw FleetError.imageNoSSH
+    }
     let macos = try Self.macOSPlatformSpec(profile: profile, image: image)
-    try await enforceRunnerVersion(digest: digest, image: image)
+    // A gitlab profile's image carries no actions runner, so there is no runner version to grade.
+    if profile.provider != .gitlab { try await enforceRunnerVersion(digest: digest, image: image) }
     let reservation = DiskAccounting.estimatedAdditionalAllocation(
       for: profile.resources.diskBytes, image: image)
     let record = makeRecord(

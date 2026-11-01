@@ -59,6 +59,14 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
   /// Relays `agent.selfTest`: the guest's own qualification checks (Proto/guest_agent.md).
   case instanceSelfTest = "instance.selfTest"
 
+  /// `Proto/fleet.md`: leased VMs for the GitLab fleeting plugin. `gitlab` profiles only.
+  case fleetInfo = "fleet.info"
+  case fleetList = "fleet.list"
+  case fleetCreate = "fleet.create"
+  case fleetDelete = "fleet.delete"
+  case fleetRenew = "fleet.renew"
+  case fleetConnect = "fleet.connect"
+
   case runnerList = "runner.list"
   case runnerGet = "runner.get"
 
@@ -85,9 +93,10 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
          .imageUpdateCheck, .imageUpdateRun,
          .registryLogin, .registryLogout,
          .instanceStop, .instanceDelete, .instanceTaint, .authLogin, .authLogout,
+         .fleetDelete, .fleetRenew, .fleetConnect,
          .debugDemandSet, .debugScaleSetReconnect, .buildCancel:
       return .idempotentMutation
-    case .imageImport, .instanceCreate, .instanceExec, .debugRunJIT, .imageBuild:
+    case .imageImport, .instanceCreate, .instanceExec, .debugRunJIT, .imageBuild, .fleetCreate:
       return .singleShot
     default:
       return .readOnly
@@ -113,6 +122,7 @@ public enum DaemonMethod: String, Sendable, Hashable, CaseIterable, Codable {
     .instanceList, .instanceGet, .instanceCreate, .instanceStop, .instanceDelete,
     .instanceTaint,
     .instanceExec, .instanceMetrics, .instanceSSHInfo, .instanceSelfTest,
+    .fleetInfo, .fleetList, .fleetCreate, .fleetDelete, .fleetRenew, .fleetConnect,
     .runnerList, .runnerGet, .scaleSetList,
     .authStatus, .authLogin, .authLogout, .githubTest, .debugRunJIT, .debugDemandSet,
     .debugScaleSetReconnect,

@@ -80,6 +80,14 @@ public protocol DaemonService: Sendable {
     emit: @escaping @Sendable (InstanceExecChunk) async throws -> Void
   ) async throws -> InstanceExecResult
 
+  /// `Proto/fleet.md`. Every method answers `FLEET_PROFILE_NOT_GITLAB` for a non-GitLab profile.
+  func fleetInfo(_ request: FleetInfoRequest) async throws -> FleetInfoResponse
+  func fleetList(_ request: FleetListRequest) async throws -> FleetListResponse
+  func fleetCreate(_ request: FleetCreateRequest) async throws -> FleetCreateResponse
+  func fleetDelete(_ request: FleetDeleteRequest) async throws -> FleetDeleteResponse
+  func fleetRenew(_ request: FleetRenewRequest) async throws -> FleetRenewResponse
+  func fleetConnect(_ request: FleetConnectRequest) async throws -> FleetConnectResponse
+
   func operationList() async throws -> OperationListResponse
   func operationGet(_ request: OperationGetRequest) async throws -> OperationInfo
 

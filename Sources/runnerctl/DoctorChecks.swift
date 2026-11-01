@@ -33,6 +33,7 @@ enum DoctorChecks {
     checks.append(diskHeadroom(rootDir: paths.rootDir, config: loaded.config))
     checks.append(freeMemory(config: loaded.config, capabilities: capabilities))
     checks.append(githubToken(config: loaded.config, paths: paths))
+    if let plugin = gitlabFleetingPlugin(config: loaded.config) { checks.append(plugin) }
 
     checks.append(buildTools())
     checks.append(buildToolsServiceContext(rootDirPath: paths.rootDir.path, overrideServiceUser: serviceUser))

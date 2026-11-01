@@ -1,0 +1,36 @@
+# Copy this file to .gitlab-ci.yml (default branch) in the DEDICATED test project that
+# scripts/live-gitlab-e2e.sh drives (RUNNERVM_E2E_GITLAB_PROJECT). See docs/gitlab.md and
+# docs/live-integration.md.
+#
+# The driver creates a project runner tagged `runnervm-e2e` and starts the pipeline with the
+# variable RUNNERVM_E2E_EXECUTOR set to the executor under test, so only the matching job runs.
+workflow:
+  rules:
+    - if: $RUNNERVM_E2E_EXECUTOR == "instance" || $RUNNERVM_E2E_EXECUTOR == "docker-autoscaler"
+
+# executor = "instance": the script runs directly in the RunnerVM guest over SSH.
+instance-job:
+  tags: [runnervm-e2e]
+  rules:
+    - if: $RUNNERVM_E2E_EXECUTOR == "instance"
+  script:
+    - uname -a
+    - id
+    - cat /etc/runnervm-image.json
+    # Proves the job ran inside a RunnerVM guest, not on the host running gitlab-runner.
+    - test -f /etc/runnervm-image.json
+    - test "$(id -un)" = runner
+
+# executor = "docker-autoscaler": only used with a Linux profile; `image:` is ignored by the
+# instance executor, which is why this job is gated on the variable above.
+docker-job:
+  tags: [runnervm-e2e]
+  image: alpine:3.20
+  rules:
+    - if: $RUNNERVM_E2E_EXECUTOR == "docker-autoscaler"
+  script:
+    - uname -a
+    - cat /etc/os-release
+    - grep -q 'VERSION_ID=3.20' /etc/os-release
+    # Docker creates /.dockerenv; the container, not the guest, runs this script.
+    - test -f /.dockerenv

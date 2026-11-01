@@ -173,6 +173,46 @@ a production one.
 Nothing is lost: RunnerVM manages the finished guest over vsock, and `runnerctl vm exec` does not
 use SSH.
 
+## GitLab variant (opt-in): sshd on, key-only
+
+For gitlab-runner's `instance` executor the manager on the host connects to each VM over SSH as
+`runner`, so this variant keeps Remote Login on. Build it explicitly; without the flags the default
+lockdown above is unchanged.
+
+```bash
+scripts/provision-macos-tart.sh \
+  --gitlab-runner 19.4.1 \
+  --gitlab-runner-sha256 df0da2de25fca11de53d9d2ea0007b235e0e923bdfd4ffd9da1f7d70e26f2cf3
+```
+
+Both flags are required together (the digest is the `binaries/gitlab-runner-darwin-arm64` line of
+`https://gitlab-runner-downloads.s3.amazonaws.com/v<ver>/release.sha256`) and are passed through
+`--attach` too. They cannot be combined with `--debug-ssh`. The guest downloads the binary,
+verifies the digest, and installs it at `/usr/local/bin/gitlab-runner` (`root:wheel`, 0755). It is
+only the artifacts/cache helper: nothing registers it and no service is installed. `git` must
+already exist (Xcode Command Line Tools); the build fails rather than installing Xcode.
+
+Security delta against the default image:
+
+| | default seal | GitLab variant |
+|---|---|---|
+| Remote Login / sshd | disabled, port 22 closed | **on**, port 22 open on the guest's NAT address |
+| authentication | none possible | public key only: `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin no`, `AllowUsers runner` (`/etc/ssh/sshd_config.d/100-runnervm-gitlab.conf`) |
+| keys at rest | none | **none**: every `authorized_keys` is still removed; `/Users/runner/.ssh` is empty, 0700 |
+| key source | n/a | a per-VM key the daemon writes into `~runner/.ssh/authorized_keys` after boot |
+| build account (`admin`) | password rotated to a discarded value | same, and `AllowUsers runner` keeps it off SSH anyway |
+
+The guest proves the effective config with `sshd -T` before sealing and the host refuses to seal
+without it. The metadata records `capabilities.ssh: true` and `capabilities.gitlab: true` (plus the
+label `runnervm.gitlab: "true"`, which survives an import that drops unknown capability keys).
+`scripts/publish-images.sh` treats `ssh: true` on macOS as a refusal needing `--allow-ssh`.
+
+`scripts/qualify-macos-image.sh --state-dir <dir>` detects the variant from the sealed metadata and
+checks the opposite of the default: TCP/22 open, password authentication refused (`Permission
+denied`, not a connect error), no `authorized_keys` anywhere, `admin`/`admin` rejected,
+`/usr/local/bin/gitlab-runner --version` runs, and no runner `config.toml` exists. Without
+`--state-dir` the metadata cannot be read, so the default checks run and a GitLab image fails them.
+
 ## Image qualification: the cold-boot gate
 
 > A macOS image is not valid because the build script finished. It is valid because RunnerVM

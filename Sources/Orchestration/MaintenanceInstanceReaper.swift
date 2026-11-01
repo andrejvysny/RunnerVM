@@ -5,7 +5,10 @@ import Persistence
 import RunnerCore
 import RunnerLogging
 
-/// Deletes maintenance instances whose `pinned_until` has passed (schema v4).
+/// Deletes maintenance and fleet instances whose `pinned_until` has passed (schema v4).
+///
+/// A fleet instance (`Proto/fleet.md`) is leased through the same column: a crashed gitlab-runner
+/// stops renewing, and the lease running out is what frees its VMs.
 ///
 /// The scheduler deliberately cannot see a maintenance instance — that is what "pinned" means, and
 /// it is why `demand dropped`, `idle ttl`, `tainted`/`retired` and session assignment all skip it.
@@ -39,7 +42,7 @@ public struct MaintenanceInstanceReaper: ReconcileStep {
     var counts = ReconcileCounts()
     guard let rows = try? await instances.list(profile: nil, states: nil) else { return counts }
     let deadline = now()
-    for record in rows where record.purpose == .maintenance && record.state != .deleted {
+    for record in rows where record.purpose != .runner && record.state != .deleted {
       guard let pinnedUntil = record.pinnedUntil?.date, pinnedUntil < deadline else { continue }
       guard await delete(record) else { continue }
       counts.swept += 1
@@ -52,21 +55,24 @@ public struct MaintenanceInstanceReaper: ReconcileStep {
       _ = try await manager.delete(id: record.id)
     } catch {
       logger.warning(
-        "could not reap an expired maintenance instance",
+        "could not reap an expired \(record.purpose.rawValue) instance",
         metadata: .context(profile: record.profileId, instance: record.id).merging([
           "error": .string(String(describing: error)),
         ]) { $1 })
       return false
     }
+    let fleet = record.purpose == .fleet
     logger.notice(
-      "maintenance instance expired",
+      fleet ? "fleet instance lease expired" : "maintenance instance expired",
       metadata: .context(profile: record.profileId, instance: record.id).merging([
         "pinned_until": .string(RFC3339.string(from: record.pinnedUntil?.date ?? Date())),
       ]) { $1 })
     await events?.record(
-      LifecycleEventLog.instanceMaintenanceExpired,
+      fleet ? LifecycleEventLog.instanceFleetLeaseExpired
+        : LifecycleEventLog.instanceMaintenanceExpired,
       LifecycleEventLog.Fields(
-        instance: record.id, profile: record.profileId, reason: "pinned ttl elapsed"))
+        instance: record.id, profile: record.profileId,
+        reason: fleet ? "lease elapsed" : "pinned ttl elapsed"))
     return true
   }
 }

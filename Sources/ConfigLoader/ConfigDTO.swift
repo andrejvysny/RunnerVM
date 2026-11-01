@@ -96,6 +96,7 @@ struct ConfigDTO: Decodable {
 
     var name: String?
     var scope: String?
+    var provider: ProfileProvider?
     var image: String?
     var os: GuestOS?
     var lifecycle: InstanceLifecycle?

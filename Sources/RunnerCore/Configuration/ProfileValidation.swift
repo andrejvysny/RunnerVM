@@ -67,6 +67,44 @@ extension RunnerProfileConfig {
     return issues
   }
 
+  /// Scope rules differ by provider: GitHub profiles must name a configured scope, GitLab profiles
+  /// have none and are ephemeral-only with no RunnerVM-side pool (gitlab-runner owns demand).
+  func validateProvider(scopeNames: Set<String>, path: String) -> [ConfigurationIssue] {
+    switch provider {
+    case .github:
+      guard let scope, !scope.isEmpty else {
+        return [.error(
+          "PROFILE_SCOPE_REQUIRED", "\(path).scope", "github profiles require a scope")]
+      }
+      guard scopeNames.contains(scope) else {
+        return [.error("PROFILE_UNKNOWN_SCOPE", "\(path).scope", "unknown scope '\(scope)'")]
+      }
+      return []
+    case .gitlab:
+      return validateGitLabProfile(path: path)
+    }
+  }
+
+  private func validateGitLabProfile(path: String) -> [ConfigurationIssue] {
+    var issues: [ConfigurationIssue] = []
+    if scope != nil {
+      issues.append(.error(
+        "PROFILE_GITLAB_SCOPE_UNSUPPORTED", "\(path).scope",
+        "gitlab profiles do not use a GitHub scope; remove it"))
+    }
+    if lifecycle != .ephemeral {
+      issues.append(.error(
+        "PROFILE_GITLAB_EPHEMERAL_ONLY", "\(path).lifecycle",
+        "gitlab profiles are ephemeral-only"))
+    }
+    if warmPool.minIdle > 0 || warmPool.maxIdle > 0 {
+      issues.append(.error(
+        "PROFILE_GITLAB_WARM_POOL_UNSUPPORTED", "\(path).warmPool",
+        "pooling for gitlab profiles is gitlab-runner's [[runners.autoscaler.policy]] idle_count"))
+    }
+    return issues
+  }
+
   func validateWarmPool(path: String) -> [ConfigurationIssue] {
     var issues: [ConfigurationIssue] = []
     if warmPool.minIdle < 0 {
@@ -276,7 +314,7 @@ extension RunnerProfileConfig {
     // it succeeds, and under a minute it gives up on requests that were about to. It is not meant
     // to cover the full retry ladder either -- the scheduler's hold-down governs how soon a failed
     // registration is attempted again.
-    if timeouts.jitGeneration.seconds < 60 {
+    if isGitHub, timeouts.jitGeneration.seconds < 60 {
       issues.append(.warning(
         "PROFILE_TIMEOUT_JIT_GENERATION_SHORT", "\(path).timeouts.jitGeneration",
         "below 60s: a credential mint plus a couple of GitHub's rate-limit/5xx retries can outlast "

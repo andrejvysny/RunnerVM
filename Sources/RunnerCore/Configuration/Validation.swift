@@ -79,7 +79,8 @@ extension RunnerConfiguration {
       ))
     }
     issues += host.validate(facts: facts)
-    issues += github.validate()
+    // A GitLab-only host legitimately has no GitHub scopes; an empty profile list keeps the warning.
+    issues += github.validate(expectsScopes: profiles.isEmpty || profiles.contains { $0.isGitHub })
     issues += validateProfiles(facts: facts)
     issues += validateMacOSAggregates()
     issues += security.validate()

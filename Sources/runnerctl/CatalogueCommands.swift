@@ -47,10 +47,10 @@ extension Profile {
 
   static func table(_ profiles: [ProfileSummary]) -> String {
     Table.render(
-      headers: ["NAME", "SCOPE", "OS", "LIFECYCLE", "CPU", "MEMORY", "DISK", "MAX", "ENABLED"],
+      headers: ["NAME", "PROVIDER", "SCOPE", "OS", "LIFECYCLE", "CPU", "MEMORY", "DISK", "MAX", "ENABLED"],
       rows: profiles.map {
         [
-          $0.name, $0.scope, $0.guestOS, $0.lifecycle, "\($0.cpuCount)",
+          $0.name, $0.provider ?? "github", $0.scope ?? "-", $0.guestOS, $0.lifecycle, "\($0.cpuCount)",
           Format.bytes($0.memoryBytes), Format.bytes($0.diskBytes),
           $0.maxInstances.map(String.init) ?? "-", Format.yesNo($0.enabled),
         ]
@@ -60,7 +60,8 @@ extension Profile {
   static func fields(_ profile: ProfileSummary) -> [(String, String)] {
     [
       ("name", profile.name),
-      ("scope", profile.scope),
+      ("provider", profile.provider ?? "github"),
+      ("scope", profile.scope ?? "-"),
       ("image", profile.image),
       ("os", profile.guestOS),
       ("lifecycle", profile.lifecycle),

@@ -6,10 +6,11 @@ import RunnerCore
 /// Persistence records -> daemon API DTOs. Kept in one place so the wire shape does not drift
 /// between `profile.list` and `profile.get`.
 enum Mapping {
-  static func profile(_ record: RunnerProfileRecord, scopeName: String) -> ProfileSummary {
+  static func profile(_ record: RunnerProfileRecord, scopeName: String?) -> ProfileSummary {
     ProfileSummary(
       name: record.name,
       scope: scopeName,
+      provider: record.provider.rawValue,
       image: record.imageReference,
       guestOS: record.guestOS.rawValue,
       lifecycle: record.lifecycle.rawValue,

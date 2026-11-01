@@ -27,7 +27,9 @@ struct SchedulingPass: Sendable {
   var instances: [InstanceRecord]
   var bound: Set<InstanceID>
   /// Instances the scheduler must not plan, cancel, reap, recycle or hand a session to
-  /// (`instances.purpose = 'maintenance'`, schema v4). Deliberately *not* folded into `bound`:
+  /// (`instances.purpose` `maintenance` or `fleet`, schema v4, and every instance of a non-GitHub
+  /// profile; the purpose fence also covers a fleet row whose profile was since switched).
+  /// Deliberately *not* folded into `bound`:
   /// a bound instance is one `DesiredCapacity` counts as serving a job, and counting a smoke-test
   /// VM that way would inflate `busyTarget` and start a second VM for demand nobody has.
   /// Their `Reservation`s are untouched, so the host still charges cpu/memory/disk for them.
@@ -69,10 +71,16 @@ extension Orchestrator {
     guard let reservations = try? await InstanceAdmission.reservations(
       instances: instanceRows, profiles: profiles, bound: bound, builds: imageBuilds)
     else { return nil }
-    let maintenance = Set(records.filter { $0.purpose == .maintenance }.map(\.id))
+    // GitLab profiles are demand-driven by gitlab-runner, not by this loop: their instances are
+    // fenced off exactly like maintenance ones so no tick step cancels, recycles or hands them a
+    // GitHub session.
+    let external = Set(rows.filter { $0.provider != .github }.map(\.id))
+    let maintenance = Set(
+      records.filter { $0.purpose != .runner || external.contains($0.profileId) }.map(\.id))
     let budget = InstanceAdmission.budget(configuration: config, probe: probe, paths: paths)
     var entries: [SchedulingPass.ProfileEntry] = []
-    for row in rows where row.enabled {
+    // No entry for a GitLab profile: it must never advertise, snapshot or plan against a scale set.
+    for row in rows where row.enabled && row.provider == .github {
       guard let entry = await entry(
         row, reservations: reservations, maintenance: maintenance, budget: budget, mode: mode)
       else { continue }

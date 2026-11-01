@@ -22,7 +22,7 @@ import Testing
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
   }
 
   /// `PersistenceSchema.currentVersion` is the source of truth `Migrator` and
@@ -35,7 +35,7 @@ import Testing
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
     #expect(versions.last == PersistenceSchema.currentVersion)
   }
 
@@ -79,7 +79,7 @@ import Testing
         try String.fetchSet(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table'")
       )
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
     #expect(hosts == ["test-host"])
     #expect(tableNames.contains("image_builds"))
     #expect(tableNames.contains("image_aliases"))
@@ -114,7 +114,7 @@ import Testing
         try String.fetchOne(db, sql: "SELECT kind FROM image_builds WHERE id = 'build-from-v2'")
       )
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
     #expect(builds == ["build-from-v2"])
     #expect(columns.contains("recovery_since"))
     #expect(columns.contains("kind"))
@@ -291,6 +291,125 @@ import Testing
       detail_json TEXT, created_at TEXT NOT NULL);
     """
 
+  // MARK: - v5 (profile provider)
+
+  /// Seeds a real v4 database (production's v1..v4 step names, SQL from `docs/`), including an
+  /// instance that references the profile, then lets `RunnerDatabase.open` run only "v5".
+  private static func seedV4(at path: URL) throws {
+    var config = GRDB.Configuration()
+    config.foreignKeysEnabled = true
+    let pool = try DatabasePool(path: path.path, configuration: config)
+    let docs = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("docs")
+    var migrator = DatabaseMigrator()
+    migrator.eraseDatabaseOnSchemaChange = false
+    migrator.registerMigration("v1") { db in
+      try db.execute(sql: v1OnlySQL)
+      try db.execute(
+        sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)",
+        arguments: [DatabaseDate.now])
+    }
+    for version in 2...4 {
+      migrator.registerMigration("v\(version)") { db in
+        let sql = try String(
+          contentsOf: docs.appendingPathComponent("db_schema_v\(version).sql"), encoding: .utf8)
+        try db.execute(sql: sql)
+        try db.execute(
+          sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+          arguments: [version, DatabaseDate.now])
+      }
+    }
+    try migrator.migrate(pool)
+    try pool.write { db in
+      let now = DatabaseDate.now
+      try db.execute(
+        sql: "INSERT INTO host (id, mode, created_at, updated_at) VALUES ('h', 'normal', ?, ?)",
+        arguments: [now, now])
+      try db.execute(
+        sql: """
+          INSERT INTO github_scopes (id, name, kind, owner, created_at, updated_at)
+          VALUES ('scope-1', 'acme', 'organization', 'acme', ?, ?)
+          """, arguments: [now, now])
+      try db.execute(
+        sql: """
+          INSERT INTO runner_profiles (id, name, scope_id, image_reference, guest_os, lifecycle,
+            cpu_count, memory_bytes, disk_bytes, config_json, created_at, updated_at)
+          VALUES ('prof-1', 'linux', 'scope-1', 'ghcr.io/a/b:c', 'linux', 'ephemeral',
+            4, 8000000000, 80000000000, '{}', ?, ?)
+          """, arguments: [now, now])
+      try db.execute(
+        sql: """
+          INSERT INTO images (digest, os, architecture, schema_version, metadata_json, local_path,
+            virtual_size_bytes, state, created_at)
+          VALUES ('sha256:x', 'linux', 'arm64', 1, '{}', '/p', 1, 'ready', ?)
+          """, arguments: [now])
+      try db.execute(
+        sql: """
+          INSERT INTO instances (id, profile_id, image_digest, host_id, name, lifecycle, state,
+            desired_state, cpu_count, memory_bytes, disk_bytes, disk_reservation_bytes,
+            instance_path, created_at)
+          VALUES ('inst-1', 'prof-1', 'sha256:x', 'h', 'rvm-x', 'ephemeral', 'idle', 'idle',
+            4, 1, 1, 1, '/i', ?)
+          """, arguments: [now])
+    }
+    try pool.close()
+  }
+
+  @Test func upgradesAV4DatabasePreservingProfilesAndTheirReferences() async throws {
+    let path = FileManager.default.temporaryDirectory
+      .appendingPathComponent("runnervm-migration-v4-upgrade-\(UUID().uuidString).sqlite")
+    defer {
+      for suffix in ["", "-wal", "-shm", "-journal"] {
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: path.path + suffix))
+      }
+    }
+    try Self.seedV4(at: path)
+
+    let upgraded = try RunnerDatabase.open(at: path)
+    let (profileRows, scope, instances, fkViolations, versions) = try await upgraded.read { db in
+      (
+        try String.fetchAll(db, sql: "SELECT id || ':' || provider FROM runner_profiles"),
+        try String.fetchOne(db, sql: "SELECT scope_id FROM runner_profiles WHERE id = 'prof-1'"),
+        try String.fetchAll(db, sql: "SELECT id FROM instances"),
+        try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").count,
+        try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
+      )
+    }
+    #expect(profileRows == ["prof-1:github"])
+    #expect(scope == "scope-1")
+    #expect(instances == ["inst-1"])
+    #expect(fkViolations == 0)
+    #expect(versions == [1, 2, 3, 4, 5])
+
+    // The nullable scope + CHECK: gitlab needs NULL scope, github forbids it.
+    try await upgraded.write { db in
+      try Self.insertProfile(db, id: "gl", name: "gitlab", scope: nil, provider: "gitlab")
+    }
+    await #expect(throws: (any Error).self) {
+      try await upgraded.write { db in
+        try Self.insertProfile(db, id: "bad", name: "bad", scope: nil, provider: "github")
+      }
+    }
+    await #expect(throws: (any Error).self) {
+      try await upgraded.write { db in
+        try Self.insertProfile(db, id: "bad2", name: "bad2", scope: "scope-1", provider: "gitlab")
+      }
+    }
+  }
+
+  private static func insertProfile(
+    _ db: Database, id: String, name: String, scope: String?, provider: String
+  ) throws {
+    let now = DatabaseDate.now
+    try db.execute(
+      sql: """
+        INSERT INTO runner_profiles (id, name, scope_id, provider, image_reference, guest_os,
+          lifecycle, cpu_count, memory_bytes, disk_bytes, config_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'ghcr.io/a/b:c', 'linux', 'ephemeral', 4, 1, 1, '{}', ?, ?)
+        """, arguments: [id, name, scope, provider, now, now])
+  }
+
   @Test func pragmasAreSet() async throws {
     let db = try TestDatabase.make()
     let (journalMode, foreignKeys) = try await db.read { db in
@@ -325,7 +444,7 @@ import Testing
     let versions = try await second.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
   }
 
   /// `docs/db_schema_v4.sql`'s table and every column it adds, present on a fresh database.
@@ -361,18 +480,18 @@ import Testing
     let versions = try await db.read { db in
       try Int.fetchAll(db, sql: "SELECT version FROM schema_migrations ORDER BY version")
     }
-    #expect(versions == [1, 2, 3, 4])
+    #expect(versions == [1, 2, 3, 4, 5])
   }
 
   /// A `schema_migrations` row past `PersistenceSchema.currentVersion` (a newer build already
   /// migrated this database further) trips the trailing guard, not GRDB's own migrator -- this
-  /// build has no "v5" migration to even attempt.
+  /// build has no "v6" migration to even attempt.
   @Test func versionNewerThanSupportedIsRejected() async throws {
     let db = try TestDatabase.make()
     try await db.write { db in
       try db.execute(
         sql: "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-        arguments: [5, DatabaseDate.now]
+        arguments: [6, DatabaseDate.now]
       )
     }
 

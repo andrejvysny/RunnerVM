@@ -588,6 +588,18 @@ A flat tart manifest carries no whole-disk digest, so the per-chunk
 `org.cirruslabs.tart.uncompressed-content-digest` is the end-to-end check; it is
 also what lets an interrupted pull resume, exactly as for a RunnerVM image.
 
+## GitLab runner image (`images/recipes/ubuntu-24-gitlab`)
+
+`FROM ubuntu-24` (so Docker Engine and the `docker` group are inherited) plus what gitlab-runner's
+`instance` and `docker-autoscaler` executors need from the guest: `git`, the `gitlab-runner` binary
+on `PATH` (pinned `GITLAB_RUNNER_VERSION`/`GITLAB_RUNNER_SHA256`, checksum-verified at build; used
+only as the artifacts/cache helper), and key-only SSH for `runner`
+(`/etc/ssh/sshd_config.d/60-runnervm-gitlab.conf`: `PasswordAuthentication no`,
+`KbdInteractiveAuthentication no`, `PermitRootLogin no`, `AllowUsers runner`, `MaxSessions 10`).
+`/home/runner/.ssh` exists, empty and 0700: the daemon injects a per-VM key after boot. The guest
+never registers or runs the gitlab-runner service. Build:
+`runnerctl image build images/recipes/ubuntu-24-gitlab --name ubuntu-24-gitlab`.
+
 ## Known limitations
 
 * **A sealed `metadata.json` is adopted whole or not at all.** `image import`

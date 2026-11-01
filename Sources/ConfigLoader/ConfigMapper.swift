@@ -92,12 +92,15 @@ enum ConfigMapper {
   ) throws(ConfigLoadError) -> RunnerProfileConfig {
     let path = "profiles[\(index)]"
     guard let name = dto.name else { throw .missingKey(path: "\(path).name") }
-    guard let scope = dto.scope else { throw .missingKey(path: "\(path).scope") }
+    let provider = dto.provider ?? .github
+    // GitLab profiles have no scope; a stray one is rejected by validation, not silently dropped.
+    if provider == .github, dto.scope == nil { throw .missingKey(path: "\(path).scope") }
     guard let image = dto.image else { throw .missingKey(path: "\(path).image") }
     let guestOS = dto.os ?? .linux
     return RunnerProfileConfig(
       name: name,
-      scope: scope,
+      scope: dto.scope,
+      provider: provider,
       image: image,
       guestOS: guestOS,
       lifecycle: dto.lifecycle ?? .ephemeral,

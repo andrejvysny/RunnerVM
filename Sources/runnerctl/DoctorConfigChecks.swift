@@ -89,7 +89,16 @@ extension DoctorChecks {
     guard let images else {
       return check(.warn, "runnerd is not reachable; skipped")
     }
-    let referenced = profileImages(images, config: config)
+    // GitLab profile images carry gitlab-runner, not actions/runner; GitHub's policy does not apply.
+    let githubOnly = config.map { c in
+      var c = c
+      c.profiles = c.profiles.filter(\.isGitHub)
+      return c
+    }
+    if let config, !config.profiles.isEmpty, githubOnly?.profiles.isEmpty == true {
+      return check(.ok, "no GitHub profile; actions/runner freshness does not apply")
+    }
+    let referenced = profileImages(images, config: githubOnly)
     guard !referenced.isEmpty else {
       return check(.ok, "no locally stored image is referenced by a profile")
     }
@@ -156,6 +165,16 @@ extension DoctorChecks {
       return "no usable GitHub credential, so the latest release is unknown"
     }
     return "runnerd has not read the latest actions/runner release yet"
+  }
+
+  // MARK: GitLab fleeting plugin
+
+  /// `nil` (check omitted) unless the config has a GitLab profile; see `DoctorFleetingPlugin`.
+  static func gitlabFleetingPlugin(config: RunnerConfiguration?) -> DoctorCheck? {
+    DoctorFleetingPlugin.check(
+      hasGitLabProfile: config?.profiles.contains { !$0.isGitHub } ?? false,
+      path: ProcessInfo.processInfo.environment["PATH"],
+      isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
   }
 
   // MARK: Guest agent presence (spec §58)

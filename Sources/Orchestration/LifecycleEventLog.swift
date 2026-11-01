@@ -124,4 +124,6 @@ extension LifecycleEventLog {
   public static let diagnosticsCollected = "instance.diagnostics"
   /// A pinned maintenance instance outlived its ttl and `MaintenanceInstanceReaper` deleted it.
   public static let instanceMaintenanceExpired = "instance.maintenanceExpired"
+  /// A fleet instance's lease (`pinned_until`) ran out and the same reaper deleted it.
+  public static let instanceFleetLeaseExpired = "instance.fleetLeaseExpired"
 }

@@ -17,6 +17,10 @@ macOS runners cannot nest Virtualization.framework, so no hosted runner can boot
 | --- | --- | --- | --- | --- |
 | `ubuntu-24-base` | Linux arm64 (Ubuntu 24.04 LTS) | 16.0 GiB (`17180000256` bytes) | ~2.9 GiB | 2.337.0 |
 
+`images/recipes/ubuntu-24-gitlab` (the `ubuntu-24` image plus a pinned `gitlab-runner` and key-only
+SSH, for gitlab-runner's `instance`/`docker-autoscaler` executors) is a recipe, **not** a published
+package: build it with `runnerctl image build images/recipes/ubuntu-24-gitlab --name ubuntu-24-gitlab`.
+
 macOS is deliberately **not** published here — see [macOS guests](#macos-guests-not-published).
 
 > **Digests are not listed here on purpose.** A tag is a moving target and a digest goes stale the

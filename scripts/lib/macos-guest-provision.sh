@@ -31,6 +31,11 @@
 #                    before anything else in the harden stage.
 #   HARDEN_OLD_PASSWORD
 #                    the same value inline, for a manual run. Prefer the file.
+#   GITLAB_RUNNER_VERSION, GITLAB_RUNNER_SHA256
+#                    opt-in GitLab variant (both or neither). `all` installs the darwin-arm64
+#                    gitlab-runner binary (sha256 verified here) and an empty ~runner/.ssh;
+#                    `harden` then keeps sshd ON, key-only and limited to the runner account,
+#                    instead of disabling Remote Login. Unset = the default lockdown, unchanged.
 #
 # Output: a `RVM-SELFCHECK-V1` (STAGE=all) or `RVM-HARDEN-V1` (STAGE=harden) block of KEY=value
 # lines on stdout, which the host parses and refuses to seal without.
@@ -50,6 +55,8 @@ STAGE="${STAGE:-all}"
 HARDEN_USER="${HARDEN_USER:-admin}"
 HARDEN_OLD_PASSWORD="${HARDEN_OLD_PASSWORD:-}"
 HARDEN_OLD_PASSWORD_FILE="${HARDEN_OLD_PASSWORD_FILE:-}"
+GITLAB_RUNNER_VERSION="${GITLAB_RUNNER_VERSION:-}"
+GITLAB_RUNNER_SHA256="${GITLAB_RUNNER_SHA256:-}"
 
 RUNNER_HOME="/Users/$RUNNER_USER"
 RUNNER_DIR="$RUNNER_HOME/actions-runner"
@@ -61,13 +68,24 @@ SELFCHECK_LOG="/var/log/runnervm-provision-selfcheck.txt"
 HARDEN_LOG="/var/log/runnervm-harden.txt"
 SSHD_SERVICE="system/com.openssh.sshd"
 NEWSYSLOG_CONF="/etc/newsyslog.d/runnervm-guest-agent.conf"
+GITLAB_RUNNER_BIN="/usr/local/bin/gitlab-runner"
+GITLAB_SSHD_CONF="/etc/ssh/sshd_config.d/100-runnervm-gitlab.conf"
 
 log()  { printf '[guest %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[guest] warning: %s\n' "$*" >&2; }
 die()  { printf '[guest] error: %s\n' "$*" >&2; exit 1; }
 
+gitlab_enabled() { [ -n "$GITLAB_RUNNER_VERSION" ]; }
+
+check_gitlab_inputs() {
+    [ -z "$GITLAB_RUNNER_VERSION" ] && [ -z "$GITLAB_RUNNER_SHA256" ] && return 0
+    [ -n "$GITLAB_RUNNER_VERSION" ] && [ -n "$GITLAB_RUNNER_SHA256" ] ||
+        die "GITLAB_RUNNER_VERSION and GITLAB_RUNNER_SHA256 must be set together"
+}
+
 check_inputs() {
     [ "$(id -u)" = "0" ] || die "must run as root (sudo bash $0)"
+    check_gitlab_inputs
     [ -d "$STAGE_DIR" ] || die "stage directory not found: $STAGE_DIR"
     [ -n "$RUNNER_VERSION" ] || die "RUNNER_VERSION is required"
     [ -n "$RUNNER_SHA256" ] || die "RUNNER_SHA256 is required"
@@ -80,6 +98,7 @@ check_inputs() {
 check_harden_inputs() {
     [ "$(id -u)" = "0" ] || die "must run as root (sudo bash $0)"
     [ -n "$HARDEN_USER" ] || die "HARDEN_USER is required"
+    check_gitlab_inputs
     case "$SHUTDOWN" in yes | no) ;; *) die "SHUTDOWN must be yes or no" ;; esac
     read_old_password
 }
@@ -274,6 +293,32 @@ install_command_line_tools() {
 }
 
 # --------------------------------------------------------------------------
+# 4b. GitLab variant (opt-in): gitlab-runner binary + empty ~runner/.ssh
+# --------------------------------------------------------------------------
+# The binary is only the artifacts/cache helper gitlab-runner's `instance` executor invokes inside
+# the guest; nothing registers it and no service is installed. git must already be there (Xcode
+# Command Line Tools provide it) -- failing is better than installing Xcode on the operator's behalf.
+install_gitlab_runner() {
+    gitlab_enabled || return 0
+    local url tmp="$STAGE_DIR/gitlab-runner"
+    url="https://gitlab-runner-downloads.s3.amazonaws.com/v${GITLAB_RUNNER_VERSION}/binaries/gitlab-runner-darwin-arm64"
+    curl -fsSL --retry 5 --retry-delay 3 "$url" -o "$tmp" || die "could not download $url"
+    verify_sha256 "$tmp" "$GITLAB_RUNNER_SHA256" "gitlab-runner $GITLAB_RUNNER_VERSION"
+    install -d -m 0755 /usr/local/bin
+    install -o root -g wheel -m 0755 "$tmp" "$GITLAB_RUNNER_BIN"
+    rm -f "$tmp"
+    "$GITLAB_RUNNER_BIN" --version >/dev/null 2>&1 ||
+        die "$GITLAB_RUNNER_BIN will not execute; if it is unsigned, run: codesign -s - --force $GITLAB_RUNNER_BIN"
+    /usr/bin/git --version >/dev/null 2>&1 ||
+        die "git is not available; the GitLab variant needs it (install the Xcode Command Line Tools: xcode-select --install)"
+    # Empty and private: the daemon writes a per-VM key here after boot. sshd (StrictModes) also
+    # refuses keys when this directory or the home is group/world-writable.
+    install -d -o "$RUNNER_USER" -g staff -m 0700 "$RUNNER_HOME/.ssh"
+    rm -f "$RUNNER_HOME/.ssh/authorized_keys" "$RUNNER_HOME/.ssh/authorized_keys2"
+    log "gitlab-runner $GITLAB_RUNNER_VERSION installed at $GITLAB_RUNNER_BIN"
+}
+
+# --------------------------------------------------------------------------
 # 5. git credential helper -- the one setting a macOS runner must not get wrong
 # --------------------------------------------------------------------------
 # actions/checkout injects the job token via http.extraheader, so no helper is ever needed. An
@@ -367,6 +412,9 @@ self_check() {
         echo "git_version=$git_version"
         echo "credential_helper=$(credential_helper_value)"
         echo "runner_sudo=$RUNNER_SUDO"
+        if gitlab_enabled; then
+            echo "gitlab_runner_version=$("$GITLAB_RUNNER_BIN" --version 2>/dev/null | sed -n 's/^Version:[[:space:]]*//p' | head -1)"
+        fi
         echo "sw_vers_product_version=$(sw_vers -productVersion)"
         echo "sw_vers_build_version=$(sw_vers -buildVersion)"
         echo "RVM-SELFCHECK-END"
@@ -472,11 +520,41 @@ disable_remote_login() {
     esac
 }
 
+# GitLab variant: Remote Login stays ON so the daemon can reach the guest over SSH, but only as the
+# runner account, with keys and no passwords. First match wins in sshd_config and Apple's own
+# drop-ins sort before "100-", so a file here only adds what nothing earlier decided. `sshd -T`
+# prints the effective values and is the proof; `sshd -t` alone would only prove the syntax.
+configure_gitlab_sshd() {
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    printf '%s\n' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PermitRootLogin no' \
+        'AllowUsers runner' \
+        'MaxSessions 10' >"$GITLAB_SSHD_CONF"
+    chmod 0644 "$GITLAB_SSHD_CONF"
+    /usr/sbin/sshd -t || die "$GITLAB_SSHD_CONF does not pass sshd -t"
+    local effective want
+    effective="$(/usr/sbin/sshd -T 2>/dev/null | tr '[:upper:]' '[:lower:]')" || effective=""
+    for want in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
+        'permitrootlogin no' 'allowusers runner'; do
+        printf '%s\n' "$effective" | grep -qx "$want" ||
+            die "sshd -T does not report '$want'; an earlier sshd_config.d file overrides $GITLAB_SSHD_CONF"
+    done
+    launchctl enable "$SSHD_SERVICE" || die "could not enable $SSHD_SERVICE"
+    log "sshd stays on: key-only, runner account only"
+}
+
 harden_guest() {
-    local rejected
+    local rejected sshd_disabled=yes
     rotate_build_account_password
     remove_authorized_keys
-    disable_remote_login
+    if gitlab_enabled; then
+        configure_gitlab_sshd
+        sshd_disabled=no
+    else
+        disable_remote_login
+    fi
     rejected="$(old_password_rejected)"
     [ "$rejected" != "no" ] ||
         die "the build-time password for $HARDEN_USER still authenticates after rotation"
@@ -488,9 +566,13 @@ harden_guest() {
         echo "password_rotated=yes"
         echo "old_password_rejected=$rejected"
         echo "authorized_keys_removed=$AUTHORIZED_KEYS_REMOVED"
-        echo "sshd_disabled=yes"
-        echo "sshd_disabled_readback=$SSHD_DISABLED_READBACK"
-        echo "remote_login_off_at=next-boot"
+        echo "sshd_disabled=$sshd_disabled"
+        if gitlab_enabled; then
+            echo "sshd_key_only=yes"
+        else
+            echo "sshd_disabled_readback=$SSHD_DISABLED_READBACK"
+            echo "remote_login_off_at=next-boot"
+        fi
         echo "RVM-HARDEN-END"
     } | tee "$HARDEN_LOG"
     chmod 0644 "$HARDEN_LOG"
@@ -505,6 +587,15 @@ finish_harden() {
     [ "$SHUTDOWN" = "yes" ] || return 0
     local self
     self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    if gitlab_enabled; then
+        # Remote Login must stay on in the sealed image; only the script and the session go.
+        log "removing $self and halting the guest (Remote Login stays on: GitLab variant)"
+        nohup /bin/sh -c "rm -f '$self'
+sleep 3
+/sbin/shutdown -h now" >/dev/null 2>&1 </dev/null &
+        disown 2>/dev/null || true
+        return 0
+    fi
     log "removing $self, disabling Remote Login and halting the guest"
     nohup /bin/sh -c "rm -f '$self'
 systemsetup -f -setremotelogin off >/dev/null 2>&1
@@ -529,6 +620,7 @@ main() {
     install_agent
     install_runner
     install_command_line_tools
+    install_gitlab_runner
     reset_credential_helper
     configure_sudo
     tune_host_behaviour

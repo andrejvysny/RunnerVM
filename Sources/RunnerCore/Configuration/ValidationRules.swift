@@ -73,9 +73,9 @@ extension HostConfig {
 // MARK: - GitHub
 
 extension GitHubConfig {
-  func validate() -> [ConfigurationIssue] {
+  func validate(expectsScopes: Bool = true) -> [ConfigurationIssue] {
     var issues: [ConfigurationIssue] = []
-    if scopes.isEmpty {
+    if scopes.isEmpty, expectsScopes {
       issues.append(.warning("GITHUB_NO_SCOPES", "github.scopes", "no GitHub scopes configured"))
     }
     if demand == .manual {
@@ -140,11 +140,7 @@ extension RunnerConfiguration {
           "PROFILE_DUPLICATE_NAME", "\(path).name", "duplicate profile name '\(profile.name)'"
         ))
       }
-      if !scopeNames.contains(profile.scope) {
-        issues.append(.error(
-          "PROFILE_UNKNOWN_SCOPE", "\(path).scope", "unknown scope '\(profile.scope)'"
-        ))
-      }
+      issues += profile.validateProvider(scopeNames: scopeNames, path: path)
       if !ImageReference.isValidProfileImage(profile.image) {
         issues.append(.error(
           "PROFILE_IMAGE_REFERENCE_INVALID", "\(path).image",
@@ -160,7 +156,9 @@ extension RunnerConfiguration {
       issues += profile.validateResources(facts: facts, path: path)
       issues += profile.validateWarmPool(path: path)
       issues += profile.validateLifecycle(path: path)
-      issues += profile.validateHostedLabelShadowing(path: path)
+      if profile.isGitHub {
+        issues += profile.validateHostedLabelShadowing(path: path)
+      }
       issues += profile.validateTimeouts(path: path)
     }
     return issues

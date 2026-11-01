@@ -29,13 +29,16 @@ type HealthResult struct {
 }
 
 // InfoResult answers agent.getInfo. The two version fields are omitted
-// when the corresponding software is not installed.
+// when the corresponding software is not installed; primaryAddress when no
+// default route exists.
 type InfoResult struct {
-	IPAddresses   []string `json:"ipAddresses"`
-	UptimeSec     int64    `json:"uptimeSec"`
-	Kernel        string   `json:"kernel"`
-	RunnerVersion string   `json:"runnerVersion,omitempty"`
-	DockerVersion string   `json:"dockerVersion,omitempty"`
+	IPAddresses []string `json:"ipAddresses"`
+	// PrimaryAddress is the IPv4 of the default route; omitted if unknown.
+	PrimaryAddress string `json:"primaryAddress,omitempty"`
+	UptimeSec      int64  `json:"uptimeSec"`
+	Kernel         string `json:"kernel"`
+	RunnerVersion  string `json:"runnerVersion,omitempty"`
+	DockerVersion  string `json:"dockerVersion,omitempty"`
 }
 
 // SelfTestResult answers agent.selfTest. Checks is always present

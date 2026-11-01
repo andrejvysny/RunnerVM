@@ -2,7 +2,10 @@ import Foundation
 
 public struct ProfileSummary: Codable, Sendable, Hashable {
   public var name: String
-  public var scope: String
+  /// `nil` for GitLab profiles.
+  public var scope: String?
+  /// Absent on the wire from older daemons; treat as `github`.
+  public var provider: String?
   public var image: String
   public var guestOS: String
   public var lifecycle: String
@@ -17,12 +20,13 @@ public struct ProfileSummary: Codable, Sendable, Hashable {
   public var updatedAt: String
 
   public init(
-    name: String, scope: String, image: String, guestOS: String, lifecycle: String, cpuCount: Int,
+    name: String, scope: String?, provider: String? = nil, image: String, guestOS: String, lifecycle: String, cpuCount: Int,
     memoryBytes: UInt64, diskBytes: UInt64, minIdle: Int, maxIdle: Int, maxInstances: Int?,
     sshEnabled: Bool, enabled: Bool, updatedAt: String
   ) {
     self.name = name
     self.scope = scope
+    self.provider = provider
     self.image = image
     self.guestOS = guestOS
     self.lifecycle = lifecycle

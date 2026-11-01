@@ -199,7 +199,8 @@ extension ScaleSetDemandProvider {
     else { return nil }
     let scopesById = Dictionary(
       scopeRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-    guard let scopeRow = scopesById[row.scopeId] else { return nil }
+    guard row.provider == .github, let scopeId = row.scopeId,
+          let scopeRow = scopesById[scopeId] else { return nil }
     return try? GitHubMapping.scope(scopeRow)
   }
 

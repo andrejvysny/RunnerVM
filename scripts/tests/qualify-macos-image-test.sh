@@ -166,5 +166,62 @@ expect_contains "$LAST_RC_ARGS" "--pinned" "create_instance asks for a pinned in
 expect_contains "$LAST_RC_ARGS" "--ttl 30m" "create_instance sets a ttl"
 rm -f "$REPORT_TMP" 2>/dev/null || true
 
+# --------------------------------------------------------------------------
+# 5. GitLab variant: detection from the sealed metadata, and the ssh probe classifier
+# --------------------------------------------------------------------------
+if plan="$("$SCRIPT" --profile p --dry-run 2>&1)"; then
+    expect_contains "$plan" "GitLab-variant" "--dry-run mentions the GitLab-variant branch"
+    expect_contains "$plan" "password auth refused" "--dry-run states the GitLab ssh checks"
+else
+    no "--dry-run exits 0 (GitLab text)" "$plan"
+fi
+
+META_CAP="$TWORK/meta-cap.json"
+META_LABEL="$TWORK/meta-label.json"
+META_PLAIN="$TWORK/meta-plain.json"
+META_SSH_ONLY="$TWORK/meta-ssh-only.json"
+printf '{"capabilities":{"ssh":true,"gitlab":true}}' >"$META_CAP"
+printf '{"capabilities":{"ssh":true,"labels":{"runnervm.gitlab":"true"}}}' >"$META_LABEL"
+printf '{"capabilities":{"ssh":false,"labels":{"runnervm.source":"tart"}}}' >"$META_PLAIN"
+printf '{"capabilities":{"ssh":true}}' >"$META_SSH_ONLY"
+if gitlab_variant_from_metadata "$META_CAP"; then ok "capabilities.gitlab: true selects the GitLab checks"
+else no "capabilities.gitlab: true selects the GitLab checks" "not detected"; fi
+if gitlab_variant_from_metadata "$META_LABEL"; then ok "the runnervm.gitlab label selects the GitLab checks"
+else no "the runnervm.gitlab label selects the GitLab checks" "not detected"; fi
+if gitlab_variant_from_metadata "$META_PLAIN"; then no "a default image keeps the port-closed checks" "detected as GitLab"
+else ok "a default image keeps the port-closed checks"; fi
+if gitlab_variant_from_metadata "$META_SSH_ONLY"; then no "--debug-ssh style metadata is not the GitLab variant" "detected"
+else ok "--debug-ssh style metadata is not the GitLab variant"; fi
+
+# detect_gitlab_variant reads <state-dir>/images/manifests/sha256-<hex>/metadata.json.
+STATE_DIR="$TWORK/state"
+IMAGE_DIGEST_BEFORE="sha256:abc123"
+mkdir -p "$STATE_DIR/images/manifests/sha256-abc123"
+cp "$META_CAP" "$STATE_DIR/images/manifests/sha256-abc123/metadata.json"
+detect_gitlab_variant >/dev/null 2>&1
+expect_eq "$GITLAB_VARIANT" "1" "detect_gitlab_variant finds the sealed metadata by digest"
+cp "$META_PLAIN" "$STATE_DIR/images/manifests/sha256-abc123/metadata.json"
+detect_gitlab_variant >/dev/null 2>&1
+expect_eq "$GITLAB_VARIANT" "0" "a default image's metadata leaves the default checks on"
+rm -f "$STATE_DIR/images/manifests/sha256-abc123/metadata.json"
+GITLAB_VARIANT=1
+detect_gitlab_variant >/dev/null 2>&1
+expect_eq "$GITLAB_VARIANT" "0" "unreadable metadata falls back to the default checks"
+STATE_DIR=""
+
+# Only "the server answered and said no" proves password logins are off.
+if ssh_auth_refused "runner@10.0.0.5: Permission denied (publickey)."; then
+    ok "Permission denied counts as password auth refused"
+else no "Permission denied counts as password auth refused" "rejected"; fi
+if ssh_auth_refused "ssh: connect to host 10.0.0.5 port 22: Connection refused"; then
+    no "Connection refused is not an auth refusal" "accepted"
+else ok "Connection refused is not an auth refusal"; fi
+if ssh_auth_refused "ssh: connect to host 10.0.0.5 port 22: Operation timed out"; then
+    no "a timeout is not an auth refusal" "accepted"
+else ok "a timeout is not an auth refusal"; fi
+if ssh_auth_refused ""; then
+    no "a password login that succeeds (no output) is not a refusal" "accepted"
+else ok "a password login that succeeds (no output) is not a refusal"; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
