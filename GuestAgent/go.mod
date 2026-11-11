@@ -7,7 +7,7 @@ require (
 	github.com/mdlayher/vsock v1.3.0
 	gitlab.com/gitlab-org/fleeting/fleeting v0.0.0-20261007103110-1a9ff2408b83
 	golang.org/x/crypto v0.58.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
